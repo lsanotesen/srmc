@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: srmc-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: srmc
+      MYSQL_USER: srmc
+      MYSQL_PASSWORD: srmc123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./backend/init_sql:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: srmc-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      timeout: 20s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: srmc-backend
+    environment:
+      - SECRET_KEY=YjY2YjJmYmM2ZjljYjJhYmJhZjJjZjljYjJhYmJhYg==
+      - JWT_SECRET_KEY=srmc-jwt-secret-key-2024
+      - DATABASE_URL=mysql+pymysql://srmc:srmc123@mysql:3306/srmc?charset=utf8mb4
+      - REDIS_URL=redis://redis:6379/0
+      - AUDIT_LOG_RETENTION_DAYS=90
+    ports:
+      - "8000:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+
+  frontend:
+    build: ./frontend
+    container_name: srmc-frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+
+volumes:
+  mysql_data:
+  redis_data:
