@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import axios from 'axios'
+import axios from '@/utils/axios'
 
 export const useServiceStore = defineStore('service', () => {
   const services = ref([])

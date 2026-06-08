@@ -1,0 +1,22 @@
+-- 应用服务表（关联项目）
+CREATE TABLE IF NOT EXISTS `app_services` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `project_id` BIGINT NOT NULL COMMENT '所属项目ID',
+  `func_desc` VARCHAR(255) NOT NULL COMMENT '功能描述',
+  `module` VARCHAR(100) COMMENT '对应模块',
+  `ip` VARCHAR(45) NOT NULL COMMENT '服务器IP',
+  `username` VARCHAR(100) NOT NULL COMMENT 'SSH用户名',
+  `password` VARCHAR(500) NOT NULL COMMENT 'AES-256-GCM加密密码',
+  `program_path` VARCHAR(500) NOT NULL COMMENT '程序路径',
+  `start_script` VARCHAR(500) COMMENT '启动脚本',
+  `stop_script` VARCHAR(500) COMMENT '停止脚本',
+  `log_path` VARCHAR(500) COMMENT '日志路径',
+  `port` INT COMMENT '程序端口',
+  `owner` VARCHAR(100) COMMENT '负责人',
+  `remark` TEXT COMMENT '备注',
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  INDEX `idx_project` (`project_id`),
+  INDEX `idx_ip` (`ip`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='应用服务表';

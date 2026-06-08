@@ -15,15 +15,18 @@ def encrypt(data: str) -> str:
     encryptor = cipher.encryptor()
     ciphertext = encryptor.update(padded_data) + encryptor.finalize()
     
-    return base64.b64encode(ciphertext).decode()
+    encrypted = ciphertext + encryptor.tag
+    return base64.b64encode(encrypted).decode()
 
 def decrypt(data: str) -> str:
     key = base64.b64decode(settings.SECRET_KEY)
     iv = b'\x00' * 12
     
-    ciphertext = base64.b64decode(data)
+    encrypted = base64.b64decode(data)
+    ciphertext = encrypted[:-16]
+    tag = encrypted[-16:]
     
-    cipher = Cipher(algorithms.AES(key), modes.GCM(iv), backend=default_backend())
+    cipher = Cipher(algorithms.AES(key), modes.GCM(iv, tag), backend=default_backend())
     decryptor = cipher.decryptor()
     padded_data = decryptor.update(ciphertext) + decryptor.finalize()
     

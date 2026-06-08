@@ -62,9 +62,8 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
-import { Plus } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import axios from 'axios'
+import axios from '@/utils/axios'
 
 const users = ref([])
 const showAddDialog = ref(false)

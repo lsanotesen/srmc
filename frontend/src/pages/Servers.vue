@@ -48,7 +48,7 @@
           <el-input v-model="serverForm.password" type="password" />
         </el-form-item>
         <el-form-item label="私钥" v-if="authType === 'key'">
-          <el-textarea v-model="serverForm.private_key" rows="5" />
+          <el-input v-model="serverForm.private_key" type="textarea" :rows="5" />
         </el-form-item>
         <el-form-item label="操作系统">
           <el-select v-model="serverForm.os_type">
@@ -67,9 +67,8 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
-import { Plus } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import axios from 'axios'
+import axios from '@/utils/axios'
 
 const servers = ref([])
 const showAddDialog = ref(false)

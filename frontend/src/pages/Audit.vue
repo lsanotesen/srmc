@@ -58,7 +58,7 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
-import axios from 'axios'
+import axios from '@/utils/axios'
 
 const logs = ref([])
 const total = ref(0)

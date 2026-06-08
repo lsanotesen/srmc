@@ -12,7 +12,7 @@ services:
     ports:
       - "3306:3306"
     volumes:
-      - mysql_data:/var/lib/mysql
+      - /home/isi/srmc/mysql_data:/var/lib/mysql
       - ./backend/init_sql:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
@@ -25,7 +25,7 @@ services:
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:/data
+      - /home/isi/srmc/redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       timeout: 20s
@@ -35,7 +35,7 @@ services:
     build: ./backend
     container_name: srmc-backend
     environment:
-      - SECRET_KEY=YjY2YjJmYmM2ZjljYjJhYmJhZjJjZjljYjJhYmJhYg==
+      - SECRET_KEY=VGhpcyBpcyBhIHNlY3JldCBtZXNzYWdlIGZvciBBVVM=
       - JWT_SECRET_KEY=srmc-jwt-secret-key-2024
       - DATABASE_URL=mysql+pymysql://srmc:srmc123@mysql:3306/srmc?charset=utf8mb4
       - REDIS_URL=redis://redis:6379/0
@@ -48,7 +48,7 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      - ./backend:/app
+      - /home/isi/srmc/backend:/app
 
   frontend:
     build: ./frontend
@@ -58,8 +58,5 @@ services:
     depends_on:
       - backend
     volumes:
-      - ./frontend:/app
-
-volumes:
-  mysql_data:
-  redis_data:
+      - /home/isi/srmc/frontend:/app
+      - /app/node_modules

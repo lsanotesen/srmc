@@ -45,7 +45,7 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import axios from 'axios'
+import axios from '@/utils/axios'
 
 const settings = reactive({
   auditRetentionDays: 90,

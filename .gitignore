@@ -1,0 +1,10 @@
+mysql_data/
+redis_data/
+__pycache__/
+*.pyc
+*.pyo
+.Python
+.DS_Store
+node_modules/
+dist/
+build/

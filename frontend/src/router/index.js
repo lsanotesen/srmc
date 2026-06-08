@@ -13,7 +13,11 @@ const routes = [
     children: [
       { path: '', name: 'Dashboard', component: () => import('../pages/Dashboard.vue') },
       { path: '/dashboard', name: 'Dashboard', component: () => import('../pages/Dashboard.vue') },
-      { path: '/services', name: 'Services', component: () => import('../pages/Services.vue') },
+      { path: '/projects', name: 'Projects', component: () => import('../pages/Projects.vue') },
+      { path: '/services', name: 'Services', component: () => import('../pages/ServicesNew.vue') },
+      { path: '/import-services', name: 'ImportServices', component: () => import('../pages/ImportServices.vue') },
+      { path: '/subsystems', name: 'Subsystems', component: () => import('../pages/Subsystems.vue') },
+      { path: '/service-groups', name: 'ServiceGroups', component: () => import('../pages/ServiceGroups.vue') },
       { path: '/servers', name: 'Servers', component: () => import('../pages/Servers.vue') },
       { path: '/logs', name: 'Logs', component: () => import('../pages/Logs.vue') },
       { path: '/shell', name: 'Shell', component: () => import('../pages/Shell.vue') },

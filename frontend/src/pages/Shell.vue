@@ -2,10 +2,16 @@
   <div class="shell-page">
     <div class="page-header">
       <h2>WebShell</h2>
-      <el-select v-model="selectedServiceId" placeholder="选择服务">
+      <div v-if="targetServiceName" class="target-info">
+        <el-tag type="primary" size="large">
+          <el-icon name="server" :size="14" />
+          {{ targetServiceName }}
+        </el-tag>
+      </div>
+      <el-select v-model="selectedServiceId" placeholder="选择服务" class="service-select">
         <el-option v-for="service in services" :key="service.id" :label="service.service_name" :value="service.id" />
       </el-select>
-      <el-button @click="connect" :disabled="!selectedServiceId || connected">连接</el-button>
+      <el-button @click="connect" :disabled="!selectedServiceId || connected" type="primary">连接</el-button>
       <el-button @click="disconnect" :disabled="!connected" type="danger">断开</el-button>
     </div>
     
@@ -25,24 +31,37 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { useRoute } from 'vue-router'
 import { Terminal } from 'xterm'
 import { FitAddon } from 'xterm-addon-fit'
 import { ElMessage } from 'element-plus'
-import axios from 'axios'
+import axios from '@/utils/axios'
 
+const route = useRoute()
 const services = ref([])
 const selectedServiceId = ref('')
+const selectedServerId = ref('')
 const terminalRef = ref(null)
 const connected = ref(false)
 const currentHost = ref('')
+const targetServiceName = ref('')
 
 let terminal = null
 let websocket = null
 
 async function loadServices() {
-  const response = await axios.get('/api/services')
+  const token = localStorage.getItem('token')
+  const response = await axios.get('/api/services', {
+    headers: { Authorization: `Bearer ${token}` }
+  })
   if (response.data.code === 0) {
     services.value = response.data.data.filter(s => s.work_dir && s.server_id)
+    
+    if (route.query.serviceId) {
+      selectedServiceId.value = parseInt(route.query.serviceId)
+      selectedServerId.value = route.query.serverId || ''
+      targetServiceName.value = route.query.serviceName || ''
+    }
   }
 }
 
@@ -77,20 +96,23 @@ function initTerminal() {
 }
 
 function connect() {
-  if (!selectedServiceId.value) {
+  if (!selectedServiceId.value && !selectedServerId.value) {
     ElMessage.error('请选择服务')
     return
   }
   
   const service = services.value.find(s => s.id === selectedServiceId.value)
-  currentHost.value = `${service.ip}:${service.port || '22'}`
+  if (service) {
+    currentHost.value = `${service.ip}:${service.port || '22'}`
+  }
   
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  websocket = new WebSocket(`${wsProtocol}//${window.location.host}/api/shell/ws/${selectedServiceId.value}`)
+  const targetId = selectedServerId.value || selectedServiceId.value
+  websocket = new WebSocket(`${wsProtocol}//${window.location.host}/api/shell/ws/${targetId}`)
   
   websocket.onopen = () => {
     connected.value = true
-    terminal.write('\r\nConnected to ' + currentHost.value + '\r\n')
+    terminal.write('\r\n[连接中] 正在连接到服务器...\r\n')
   }
   
   websocket.onmessage = (event) => {
@@ -98,12 +120,12 @@ function connect() {
   }
   
   websocket.onerror = (error) => {
-    terminal.write('\r\nConnection error: ' + error.message + '\r\n')
+    terminal.write('\r\n[错误] 连接失败: ' + error.message + '\r\n')
     connected.value = false
   }
   
   websocket.onclose = () => {
-    terminal.write('\r\nConnection closed\r\n')
+    terminal.write('\r\n[断开] 连接已关闭\r\n')
     connected.value = false
     websocket = null
   }
@@ -121,10 +143,13 @@ watch(selectedServiceId, () => {
   }
 })
 
-onMounted(() => {
-  loadServices()
+onMounted(async () => {
+  await loadServices()
   nextTick(() => {
     initTerminal()
+    if (selectedServiceId.value) {
+      connect()
+    }
   })
 })
 
@@ -154,6 +179,23 @@ onUnmounted(() => {
 
 .page-header h2 {
   margin: 0;
+}
+
+.target-info {
+  display: flex;
+  align-items: center;
+}
+
+.target-info .el-tag {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-size: 14px;
+}
+
+.service-select {
+  width: 200px;
 }
 
 .terminal-container {

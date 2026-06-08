@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from models.audit_log import AuditLog
-from datetime import datetime
+from datetime import datetime, timedelta
 from core.config import settings
 from apscheduler.schedulers.background import BackgroundScheduler
 import os

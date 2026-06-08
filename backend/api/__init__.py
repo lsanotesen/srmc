@@ -1,6 +1,7 @@
 from api.auth import router as auth_router
 from api.server import router as server_router
 from api.service import router as service_router
+from api.processes import router as processes_router
 from api.monitor import router as monitor_router
 from api.log import router as log_router
 from api.shell import router as shell_router

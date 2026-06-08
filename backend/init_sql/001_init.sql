@@ -95,8 +95,18 @@ CREATE TABLE IF NOT EXISTS `sql_exec_history` (
     CONSTRAINT `fk_sql_exec_history_service_id` FOREIGN KEY (`service_id`) REFERENCES `services`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `projects` (
+    `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `name` VARCHAR(100) NOT NULL,
+    `code` VARCHAR(50) NOT NULL UNIQUE,
+    `description` TEXT,
+    `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX `idx_projects_code` (`code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 INSERT INTO `users` (`username`, `password`, `role`, `email`, `is_active`) VALUES
-('admin', '$2b$12$EixZaYbB.rK4fl8x2q7Meu6Q6D2V5fF5Q5Q5Q5Q5Q5Q5Q5Q5Q5Q', 'ADMIN', 'admin@example.com', 1) ON DUPLICATE KEY UPDATE role='ADMIN';
+('admin', '$2b$12$UkjGjVJJr59b4QDdKChcTedlPhESbyP5rTv8k1oCDdwn/Quz0TbSy', 'ADMIN', 'admin@example.com', 1) ON DUPLICATE KEY UPDATE role='ADMIN';
 
 INSERT INTO `servers` (`hostname`, `ip`, `ssh_port`, `username`, `password`, `os_type`) VALUES
 ('localhost', '127.0.0.1', 22, 'root', '', 'LINUX') ON DUPLICATE KEY UPDATE hostname='localhost';

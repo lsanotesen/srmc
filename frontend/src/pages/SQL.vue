@@ -56,7 +56,7 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import axios from 'axios'
+import axios from '@/utils/axios'
 
 const dbServices = ref([])
 const selectedServiceId = ref('')

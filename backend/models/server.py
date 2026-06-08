@@ -1,4 +1,5 @@
-from sqlalchemy import Column, BIGINT, VARCHAR, TEXT, ENUM, DATETIME
+from sqlalchemy import Column, BIGINT, VARCHAR, TEXT, DATETIME
+from sqlalchemy.dialects.mysql import ENUM
 from core.database import Base
 
 class Server(Base):

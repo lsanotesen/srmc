@@ -92,18 +92,19 @@ SERVICE_TYPE_CAPABILITIES = {
 
 ROLE_PERMISSIONS = {
     "ADMIN": [
-        "service_view", "service_operate", "webshell", "sql_execute",
+        "service_view", "service_operate", "service_manage", "webshell", "sql_execute",
         "log_view", "log_download", "import", "export", "audit_view",
-        "user_manage", "system_settings"
+        "user_manage", "system_settings", "project_manage", "project_view"
     ],
     "OPS": [
-        "service_view", "service_operate", "webshell", "sql_execute",
-        "log_view", "log_download", "import", "export", "audit_view"
+        "service_view", "service_operate", "service_manage", "webshell", "sql_execute",
+        "log_view", "log_download", "import", "export", "audit_view",
+        "project_manage", "project_view"
     ],
     "DEV": [
-        "service_view", "log_view", "webshell", "sql_read"
+        "service_view", "log_view", "webshell", "sql_read", "project_view"
     ],
     "READONLY": [
-        "service_view", "log_view"
+        "service_view", "log_view", "project_view"
     ]
 }
