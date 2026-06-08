@@ -55,9 +55,14 @@ async def websocket_shell(
         username = service.username
         password = decrypt(service.password) if service.password else None
         private_key = None
-        work_dir = None
+        work_dir = service.program_path
         service_code = service.func_desc
         server_id = None
+        service_type = service.service_type
+        deploy_type = service.deploy_type
+        container_name = service.container_name
+        cluster_name = service.cluster_name
+        master_node = service.master_node
         
     else:
         # 尝试从 Service 表查找（旧模型）
@@ -81,6 +86,16 @@ async def websocket_shell(
         work_dir = service.work_dir
         service_code = service.service_code
         server_id = server.id
+        service_type = 'HOST_APP'
+        deploy_type = 'HOST'
+        container_name = None
+        cluster_name = None
+        master_node = None
+    
+    # 根据服务类型决定连接地址
+    # ES/SOLR 服务连接到 master/leader 节点
+    if service_type in ['ES', 'SOLR'] and master_node:
+        ip = master_node
     
     conn = await ssh_pool.get_connection(ip, ssh_port, username, password, private_key)
     if not conn:
@@ -93,7 +108,16 @@ async def websocket_shell(
     
     try:
         shell = await conn.invoke_shell()
-        if work_dir:
+        
+        # 根据服务类型执行不同的初始化命令
+        if service_type == 'DOCKER' and container_name:
+            # Docker服务：进入容器
+            shell.send(f"docker exec -it {container_name} bash 2>/dev/null || docker exec -it {container_name} sh\n")
+        elif service_type in ['ES', 'SOLR'] and work_dir:
+            # ES/SOLR服务：进入安装目录
+            shell.send(f"cd {work_dir}\n")
+        elif service_type == 'HOST_APP' and work_dir:
+            # Host应用服务：进入程序目录
             shell.send(f"cd {work_dir}\n")
         
         async def read_from_shell():
@@ -113,8 +137,7 @@ async def websocket_shell(
                 commands = buffer.split('\r') if '\r' in buffer else buffer.split('\n')
                 for cmd in commands:
                     if cmd.strip():
-                        # AppService 模型没有 server_id，所以不写入 service_id 和 server_id
-                        log_audit(db, user.id, user.username, "SHELL", 
+                        log_audit(db, user.id, user.username, "SERVICE_REMOTE_LOGIN", 
                                   service_code=service_code,
                                   ip=ip, result="success", output=cmd.strip())
                 
@@ -127,3 +150,6 @@ async def websocket_shell(
     finally:
         if shell:
             shell.close()
+            log_audit(db, user.id, user.username, "SERVICE_REMOTE_LOGIN", 
+                      service_code=service_code, ip=ip, result="success", 
+                      output="Connection closed")

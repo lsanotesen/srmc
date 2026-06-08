@@ -48,10 +48,12 @@ async def list_services(
             'project_name': project.name if project else None,
             'service_name': service.func_desc,
             'service_code': service.module,
-            'service_type': service.module,
+            'service_type': service.service_type,
+            'deploy_type': service.deploy_type,
+            'instance_name': service.instance_name,
             'environment': 'production',
             'ip': service.ip,
-            'status': 'UNKNOWN',
+            'status': service.status or 'UNKNOWN',
             'server_id': None,
             'owner': service.owner,
             'created_at': service.created_at,
@@ -121,7 +123,15 @@ async def get_services(
             'port': service.port,
             'owner': service.owner,
             'remark': service.remark,
-            'status': None,
+            # 新增字段
+            'service_type': service.service_type,
+            'deploy_type': service.deploy_type,
+            'instance_name': service.instance_name,
+            'status': service.status,
+            'cpu_usage': service.cpu_usage,
+            'memory_usage': service.memory_usage,
+            'disk_usage': service.disk_usage,
+            'network_io': service.network_io,
             'created_at': service.created_at,
             'updated_at': service.updated_at
         })
@@ -249,7 +259,33 @@ async def get_service(
         'port': service.port,
         'owner': service.owner,
         'remark': service.remark,
-        'status': None,
+        # 新增字段
+        'service_type': service.service_type,
+        'deploy_type': service.deploy_type,
+        'instance_name': service.instance_name,
+        'container_name': service.container_name,
+        'image_name': service.image_name,
+        'image_tag': service.image_tag,
+        'container_id': service.container_id,
+        'port_mapping': service.port_mapping,
+        'volume_mapping': service.volume_mapping,
+        'network_mode': service.network_mode,
+        'cluster_name': service.cluster_name,
+        'node_count': service.node_count,
+        'master_node': service.master_node,
+        'data_nodes': service.data_nodes,
+        'redis_role': service.redis_role,
+        'redis_memory_usage': service.redis_memory_usage,
+        'redis_key_count': service.redis_key_count,
+        'mysql_version': service.mysql_version,
+        'mysql_connection_count': service.mysql_connection_count,
+        'mysql_slave_status': service.mysql_slave_status,
+        'mysql_db_count': service.mysql_db_count,
+        'status': service.status,
+        'cpu_usage': service.cpu_usage,
+        'memory_usage': service.memory_usage,
+        'disk_usage': service.disk_usage,
+        'network_io': service.network_io,
         'created_at': service.created_at,
         'updated_at': service.updated_at
     })
@@ -415,7 +451,33 @@ async def update_service(
         'port': service.port,
         'owner': service.owner,
         'remark': service.remark,
-        'status': None,
+        # 新增字段
+        'service_type': service.service_type,
+        'deploy_type': service.deploy_type,
+        'instance_name': service.instance_name,
+        'container_name': service.container_name,
+        'image_name': service.image_name,
+        'image_tag': service.image_tag,
+        'container_id': service.container_id,
+        'port_mapping': service.port_mapping,
+        'volume_mapping': service.volume_mapping,
+        'network_mode': service.network_mode,
+        'cluster_name': service.cluster_name,
+        'node_count': service.node_count,
+        'master_node': service.master_node,
+        'data_nodes': service.data_nodes,
+        'redis_role': service.redis_role,
+        'redis_memory_usage': service.redis_memory_usage,
+        'redis_key_count': service.redis_key_count,
+        'mysql_version': service.mysql_version,
+        'mysql_connection_count': service.mysql_connection_count,
+        'mysql_slave_status': service.mysql_slave_status,
+        'mysql_db_count': service.mysql_db_count,
+        'status': service.status,
+        'cpu_usage': service.cpu_usage,
+        'memory_usage': service.memory_usage,
+        'disk_usage': service.disk_usage,
+        'network_io': service.network_io,
         'created_at': service.created_at,
         'updated_at': service.updated_at
     })
@@ -492,35 +554,66 @@ async def start_service(
     if not service:
         raise HTTPException(status_code=404, detail="服务不存在")
     
-    if not service.start_script:
-        return ResponseModel(data={"success": False, "message": "未配置启动脚本"}, code=400)
+    service_type = service.service_type or 'HOST_APP'
+    result_message = ""
+    output = ""
+    success = False
     
     try:
         ssh = await ssh_pool.get_connection(service.ip, service.ssh_port or 22, service.username, decrypt(service.password))
         if not ssh:
             return ResponseModel(data={"success": False, "message": "无法建立SSH连接"}, code=500)
         
-        command = f"cd {expand_home_path(service.program_path)} && {get_script_path(service.start_script)}"
-        output, error, success = await ssh.execute_command(command)
+        # 根据服务类型执行不同的启动命令
+        if service_type == 'DOCKER' and service.container_name:
+            # Docker服务
+            command = f"docker start {service.container_name}"
+            output, error, cmd_success = await ssh.execute_command(command)
+            if cmd_success:
+                result_message = "Docker容器启动成功"
+                success = True
+            else:
+                result_message = f"启动失败: {error}"
+        
+        elif service_type in ['ES', 'SOLR']:
+            # ES/SOLR服务 - 节点启动
+            if service.start_script:
+                command = f"cd {expand_home_path(service.program_path)} && {get_script_path(service.start_script)}"
+                output, error, cmd_success = await ssh.execute_command(command)
+                if cmd_success:
+                    result_message = "服务启动命令已执行"
+                    success = True
+                else:
+                    result_message = f"启动失败: {error}"
+            else:
+                result_message = "未配置启动脚本"
+        
+        else:
+            # HOST_APP及其他服务类型
+            if not service.start_script:
+                return ResponseModel(data={"success": False, "message": "未配置启动脚本"}, code=400)
+            
+            command = f"cd {expand_home_path(service.program_path)} && {get_script_path(service.start_script)}"
+            output, error, cmd_success = await ssh.execute_command(command)
+            
+            await asyncio.sleep(2)
+            
+            status = await get_program_status(service.ip, service.username, decrypt(service.password), service.port, service.program_path, service.ssh_port or 22)
+            
+            success = status == "RUNNING"
+            result_message = "启动成功" if success else "启动命令已执行，请检查状态"
         
         ssh.close()
         
-        await asyncio.sleep(2)
-        
-        status = await get_program_status(service.ip, service.username, decrypt(service.password), service.port, service.program_path, service.ssh_port or 22)
-        
-        success = status == "RUNNING"
-        message = "启动成功" if success else "启动命令已执行，请检查状态"
-        
         log_audit(db, user.id, user.username, "SERVICE_START",
                   result="success" if success else "partial",
-                  output=f"服务: {service.func_desc}, IP: {service.ip}, 输出: {output[:200]}")
+                  output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 命令: {command}, 输出: {output[:200]}")
         
-        return ResponseModel(data={"success": success, "message": message, "output": output[:500]})
+        return ResponseModel(data={"success": success, "message": result_message, "output": output[:500]})
     except Exception as e:
         log_audit(db, user.id, user.username, "SERVICE_START",
                   result="failed",
-                  output=f"服务: {service.func_desc}, IP: {service.ip}, 错误: {str(e)}")
+                  output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 错误: {str(e)}")
         return ResponseModel(data={"success": False, "message": str(e), "output": None}, code=500)
 
 @router.post("/services/{service_id}/stop", response_model=ResponseModel)
@@ -533,35 +626,71 @@ async def stop_service(
     if not service:
         raise HTTPException(status_code=404, detail="服务不存在")
     
-    if not service.stop_script:
-        return ResponseModel(data={"success": False, "message": "未配置停止脚本"}, code=400)
+    service_type = service.service_type or 'HOST_APP'
+    result_message = ""
+    output = ""
+    success = False
     
     try:
         ssh = await ssh_pool.get_connection(service.ip, service.ssh_port or 22, service.username, decrypt(service.password))
         if not ssh:
             return ResponseModel(data={"success": False, "message": "无法建立SSH连接"}, code=500)
         
-        command = f"cd {expand_home_path(service.program_path)} && {get_script_path(service.stop_script)}"
-        output, error, cmd_success = await ssh.execute_command(command)
+        # 根据服务类型执行不同的停止命令
+        if service_type == 'DOCKER' and service.container_name:
+            # Docker服务
+            command = f"docker stop {service.container_name}"
+            output, error, cmd_success = await ssh.execute_command(command)
+            if cmd_success:
+                result_message = "Docker容器停止成功"
+                success = True
+            else:
+                result_message = f"停止失败: {error}"
+        
+        elif service_type in ['ES', 'SOLR']:
+            # ES/SOLR服务 - 禁止直接停止整个生产集群
+            if service.deploy_type == 'CLUSTER':
+                ssh.close()
+                return ResponseModel(data={"success": False, "message": "禁止直接停止集群，请先确认是否要停止单个节点"}, code=400)
+            
+            # 单个节点停止
+            if service.stop_script:
+                command = f"cd {expand_home_path(service.program_path)} && {get_script_path(service.stop_script)}"
+                output, error, cmd_success = await ssh.execute_command(command)
+                if cmd_success:
+                    result_message = "节点停止命令已执行"
+                    success = True
+                else:
+                    result_message = f"停止失败: {error}"
+            else:
+                result_message = "未配置停止脚本"
+        
+        else:
+            # HOST_APP及其他服务类型
+            if not service.stop_script:
+                return ResponseModel(data={"success": False, "message": "未配置停止脚本"}, code=400)
+            
+            command = f"cd {expand_home_path(service.program_path)} && {get_script_path(service.stop_script)}"
+            output, error, cmd_success = await ssh.execute_command(command)
+            
+            await asyncio.sleep(2)
+            
+            status = await get_program_status(service.ip, service.username, decrypt(service.password), service.port, service.program_path, service.ssh_port or 22)
+            
+            success = status == "STOPPED"
+            result_message = "停止成功" if success else "停止命令已执行，请检查状态"
         
         ssh.close()
         
-        await asyncio.sleep(2)
-        
-        status = await get_program_status(service.ip, service.username, decrypt(service.password), service.port, service.program_path, service.ssh_port or 22)
-        
-        stopped = status == "STOPPED"
-        message = "停止成功" if stopped else "停止命令已执行，请检查状态"
-        
         log_audit(db, user.id, user.username, "SERVICE_STOP",
-                  result="success" if stopped else "partial",
-                  output=f"服务: {service.func_desc}, IP: {service.ip}, 输出: {output[:200]}, 错误: {error[:200]}")
+                  result="success" if success else "partial",
+                  output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 命令: {command}, 输出: {output[:200]}")
         
-        return ResponseModel(data={"success": stopped, "message": message, "output": output[:500]})
+        return ResponseModel(data={"success": success, "message": result_message, "output": output[:500]})
     except Exception as e:
         log_audit(db, user.id, user.username, "SERVICE_STOP",
                   result="failed",
-                  output=f"服务: {service.func_desc}, IP: {service.ip}, 错误: {str(e)}")
+                  output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 错误: {str(e)}")
         return ResponseModel(data={"success": False, "message": str(e), "output": None}, code=500)
 
 @router.post("/services/{service_id}/restart", response_model=ResponseModel)
@@ -574,40 +703,81 @@ async def restart_service(
     if not service:
         raise HTTPException(status_code=404, detail="服务不存在")
     
+    service_type = service.service_type or 'HOST_APP'
+    result_message = ""
+    output = ""
+    success = False
+    
     try:
         ssh = await ssh_pool.get_connection(service.ip, service.ssh_port or 22, service.username, decrypt(service.password))
         if not ssh:
             return ResponseModel(data={"success": False, "message": "无法建立SSH连接"}, code=500)
         
-        if service.stop_script:
-            command = f"cd {expand_home_path(service.program_path)} && {get_script_path(service.stop_script)}"
-            await ssh.execute_command(command)
-            await asyncio.sleep(1)
+        # 根据服务类型执行不同的重启命令
+        if service_type == 'DOCKER' and service.container_name:
+            # Docker服务
+            command = f"docker restart {service.container_name}"
+            output, error, cmd_success = await ssh.execute_command(command)
+            if cmd_success:
+                result_message = "Docker容器重启成功"
+                success = True
+            else:
+                result_message = f"重启失败: {error}"
         
-        if service.start_script:
-            command = f"cd {expand_home_path(service.program_path)} && {get_script_path(service.start_script)}"
-            output, error, success = await ssh.execute_command(command)
+        elif service_type in ['ES', 'SOLR']:
+            # ES/SOLR服务 - 禁止直接重启整个生产集群
+            if service.deploy_type == 'CLUSTER':
+                ssh.close()
+                return ResponseModel(data={"success": False, "message": "禁止直接重启集群，请先确认是否要重启单个节点"}, code=400)
+            
+            # 单个节点重启
+            if service.stop_script:
+                stop_command = f"cd {expand_home_path(service.program_path)} && {get_script_path(service.stop_script)}"
+                await ssh.execute_command(stop_command)
+                await asyncio.sleep(1)
+            
+            if service.start_script:
+                start_command = f"cd {expand_home_path(service.program_path)} && {get_script_path(service.start_script)}"
+                output, error, cmd_success = await ssh.execute_command(start_command)
+                if cmd_success:
+                    result_message = "节点重启命令已执行"
+                    success = True
+                else:
+                    result_message = f"重启失败: {error}"
+            else:
+                result_message = "未配置启动脚本"
+        
         else:
-            output = "未配置启动脚本"
+            # HOST_APP及其他服务类型
+            if service.stop_script:
+                command = f"cd {expand_home_path(service.program_path)} && {get_script_path(service.stop_script)}"
+                await ssh.execute_command(command)
+                await asyncio.sleep(1)
+            
+            if service.start_script:
+                command = f"cd {expand_home_path(service.program_path)} && {get_script_path(service.start_script)}"
+                output, error, cmd_success = await ssh.execute_command(command)
+            else:
+                output = "未配置启动脚本"
+            
+            await asyncio.sleep(2)
+            
+            status = await get_program_status(service.ip, service.username, decrypt(service.password), service.port, service.program_path, service.ssh_port or 22)
+            
+            success = status == "RUNNING"
+            result_message = "重启成功" if success else "重启命令已执行，请检查状态"
         
         ssh.close()
         
-        await asyncio.sleep(2)
-        
-        status = await get_program_status(service.ip, service.username, decrypt(service.password), service.port, service.program_path, service.ssh_port or 22)
-        
-        success = status == "RUNNING"
-        message = "重启成功" if success else "重启命令已执行，请检查状态"
-        
         log_audit(db, user.id, user.username, "SERVICE_RESTART",
                   result="success" if success else "partial",
-                  output=f"服务: {service.func_desc}, IP: {service.ip}, 输出: {output[:200]}")
+                  output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 输出: {output[:200]}")
         
-        return ResponseModel(data={"success": success, "message": message, "output": output[:500]})
+        return ResponseModel(data={"success": success, "message": result_message, "output": output[:500]})
     except Exception as e:
         log_audit(db, user.id, user.username, "SERVICE_RESTART",
                   result="failed",
-                  output=f"服务: {service.func_desc}, IP: {service.ip}, 错误: {str(e)}")
+                  output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 错误: {str(e)}")
         return ResponseModel(data={"success": False, "message": str(e), "output": None}, code=500)
 
 @router.get("/services/{service_id}/log/files", response_model=ResponseModel)

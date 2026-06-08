@@ -27,6 +27,21 @@
       <el-table-column prop="func_desc" label="功能描述" min-width="150" />
       <el-table-column prop="module" label="对应模块" min-width="120" />
       <el-table-column prop="project_name" label="所属项目" min-width="120" />
+      <el-table-column prop="deploy_type" label="部署方式" min-width="100">
+        <template #default="scope">
+          <el-tag :type="getDeployType(scope.row.deploy_type).type">
+            {{ getDeployType(scope.row.deploy_type).label }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column prop="service_type" label="服务类型" min-width="120">
+        <template #default="scope">
+          <el-tag :type="getServiceType(scope.row.service_type).type">
+            {{ getServiceType(scope.row.service_type).label }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column prop="instance_name" label="运行实例" min-width="120" show-overflow-tooltip />
       <el-table-column prop="ip" label="IP地址" min-width="120" />
       <el-table-column prop="username" label="用户名" min-width="100" />
       <el-table-column prop="program_path" label="程序路径" min-width="180" show-overflow-tooltip />
@@ -153,26 +168,92 @@
       </template>
     </el-dialog>
 
-    <el-dialog title="服务详情" v-model="showDetailDialog">
+    <el-dialog title="服务详情" v-model="showDetailDialog" width="800px">
       <el-descriptions :column="2" border>
         <el-descriptions-item label="功能描述">{{ selectedService.func_desc || '-' }}</el-descriptions-item>
         <el-descriptions-item label="对应模块">{{ selectedService.module || '-' }}</el-descriptions-item>
         <el-descriptions-item label="所属项目">{{ selectedService.project_name || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="部署方式">
+          <el-tag :type="getDeployType(selectedService.deploy_type).type">
+            {{ getDeployType(selectedService.deploy_type).label }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="服务类型">
+          <el-tag :type="getServiceType(selectedService.service_type).type">
+            {{ getServiceType(selectedService.service_type).label }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="运行实例">{{ selectedService.instance_name || '-' }}</el-descriptions-item>
         <el-descriptions-item label="IP地址">{{ selectedService.ip || '-' }}</el-descriptions-item>
         <el-descriptions-item label="SSH端口">{{ selectedService.ssh_port || '-' }}</el-descriptions-item>
         <el-descriptions-item label="SSH用户名">{{ selectedService.username || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="程序路径">{{ selectedService.program_path || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="启动脚本">{{ selectedService.start_script || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="停止脚本">{{ selectedService.stop_script || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="日志路径">{{ selectedService.log_path || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="程序端口">{{ selectedService.port || '-' }}</el-descriptions-item>
+        
+        <!-- Host应用服务信息 -->
+        <template v-if="selectedService.service_type === 'HOST_APP'">
+          <el-descriptions-item label="程序路径">{{ selectedService.program_path || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="启动脚本">{{ selectedService.start_script || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="停止脚本">{{ selectedService.stop_script || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="日志路径">{{ selectedService.log_path || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="程序端口">{{ selectedService.port || '-' }}</el-descriptions-item>
+        </template>
+        
+        <!-- Docker服务信息 -->
+        <template v-else-if="selectedService.service_type === 'DOCKER'">
+          <el-descriptions-item label="容器名称">{{ selectedService.container_name || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="镜像名称">{{ selectedService.image_name || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="镜像版本">{{ selectedService.image_tag || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="容器ID">{{ selectedService.container_id || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="端口映射">{{ selectedService.port_mapping || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="Volume挂载">{{ selectedService.volume_mapping || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="网络模式">{{ selectedService.network_mode || '-' }}</el-descriptions-item>
+        </template>
+        
+        <!-- ES服务信息 -->
+        <template v-else-if="selectedService.service_type === 'ES'">
+          <el-descriptions-item label="集群名称">{{ selectedService.cluster_name || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="节点数量">{{ selectedService.node_count || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="Master节点">{{ selectedService.master_node || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="Data节点">{{ selectedService.data_nodes || '-' }}</el-descriptions-item>
+        </template>
+        
+        <!-- Redis服务信息 -->
+        <template v-else-if="selectedService.service_type === 'REDIS'">
+          <el-descriptions-item label="角色">{{ selectedService.redis_role || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="内存使用率">{{ selectedService.redis_memory_usage || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="Key数量">{{ selectedService.redis_key_count || '-' }}</el-descriptions-item>
+        </template>
+        
+        <!-- MySQL服务信息 -->
+        <template v-else-if="selectedService.service_type === 'MYSQL'">
+          <el-descriptions-item label="版本">{{ selectedService.mysql_version || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="连接数">{{ selectedService.mysql_connection_count || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="主从状态">{{ selectedService.mysql_slave_status || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="数据库数量">{{ selectedService.mysql_db_count || '-' }}</el-descriptions-item>
+        </template>
+        
+        <!-- 默认信息（其他服务类型） -->
+        <template v-else>
+          <el-descriptions-item label="程序路径">{{ selectedService.program_path || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="启动脚本">{{ selectedService.start_script || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="停止脚本">{{ selectedService.stop_script || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="日志路径">{{ selectedService.log_path || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="程序端口">{{ selectedService.port || '-' }}</el-descriptions-item>
+        </template>
+        
         <el-descriptions-item label="负责人">{{ selectedService.owner || '-' }}</el-descriptions-item>
         <el-descriptions-item label="状态">
           <el-tag :type="getStatusType(selectedService.status)">
             {{ selectedService.status || '未知' }}
           </el-tag>
         </el-descriptions-item>
-        <el-descriptions-item label="备注">{{ selectedService.remark || '-' }}</el-descriptions-item>
+        
+        <!-- 监控信息 -->
+        <el-descriptions-item label="CPU使用率">{{ selectedService.cpu_usage || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="内存使用率">{{ selectedService.memory_usage || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="磁盘使用率">{{ selectedService.disk_usage || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="网络IO">{{ selectedService.network_io || '-' }}</el-descriptions-item>
+        
+        <el-descriptions-item label="备注" :span="2">{{ selectedService.remark || '-' }}</el-descriptions-item>
       </el-descriptions>
       <template #footer>
         <el-button @click="showDetailDialog = false">关闭</el-button>
@@ -295,12 +376,49 @@ let statusInterval = null;
 const getStatusType = (status) => {
  switch (status) {
  case 'RUNNING':
+ case 'running':
  return 'success';
  case 'STOPPED':
+ case 'stopped':
  return 'danger';
- default:
+ case 'ERROR':
+ case 'error':
+ return 'danger';
+ case 'WARNING':
+ case 'warning':
  return 'warning';
+ default:
+ return 'info';
  }
+};
+
+const deployTypeMap = {
+ 'HOST': { label: 'Host', type: 'primary' },
+ 'DOCKER': { label: 'Docker', type: 'success' },
+ 'CLUSTER': { label: 'Cluster', type: 'warning' }
+};
+
+const getDeployType = (deployType) => {
+ return deployTypeMap[deployType] || { label: deployType || '未知', type: 'info' };
+};
+
+const serviceTypeMap = {
+ 'HOST_APP': { label: '应用服务', type: 'primary' },
+ 'DOCKER': { label: 'Docker容器', type: 'success' },
+ 'ES': { label: 'Elasticsearch', type: 'warning' },
+ 'SOLR': { label: 'Solr', type: 'warning' },
+ 'REDIS': { label: 'Redis', type: 'danger' },
+ 'MYSQL': { label: 'MySQL', type: 'info' },
+ 'POSTGRESQL': { label: 'PostgreSQL', type: 'info' },
+ 'KAFKA': { label: 'Kafka', type: 'primary' },
+ 'ROCKETMQ': { label: 'RocketMQ', type: 'primary' },
+ 'RABBITMQ': { label: 'RabbitMQ', type: 'primary' },
+ 'NGINX': { label: 'Nginx', type: 'success' },
+ 'AI_MODEL': { label: 'AI服务', type: 'danger' }
+};
+
+const getServiceType = (serviceType) => {
+ return serviceTypeMap[serviceType] || { label: serviceType || '未知', type: 'info' };
 };
 const loadServices = async () => {
  try {

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, Query
 from sqlalchemy.orm import Session
 from schemas.common import ResponseModel
-from services.log_service import get_log_content
+from services.log_service import get_log_content, get_log_files
 from core.database import get_db
 from api.dependencies import require_permission
 import asyncio
@@ -13,13 +13,26 @@ async def get_logs(
     service_id: int,
     lines: int = Query(100, ge=0),
     keyword: str = Query(None),
+    start_time: str = Query(None),
+    end_time: str = Query(None),
     db: Session = Depends(get_db),
     user = Depends(require_permission("log_view"))
 ):
-    content, error = await get_log_content(service_id, lines, keyword, db)
+    content, error = await get_log_content(service_id, lines, keyword, start_time, end_time, db)
     if error:
         return ResponseModel(code=1, message=error)
     return ResponseModel(data={"content": content, "lines": len(content.split('\n')) if content else 0})
+
+@router.get("/logs/{service_id}/files", response_model=ResponseModel)
+async def get_log_files_list(
+    service_id: int,
+    db: Session = Depends(get_db),
+    user = Depends(require_permission("log_view"))
+):
+    files, error = await get_log_files(service_id, db)
+    if error:
+        return ResponseModel(code=1, message=error)
+    return ResponseModel(data={"files": files})
 
 @router.websocket("/logs/ws/{service_id}")
 async def websocket_logs(websocket: WebSocket, service_id: int):
