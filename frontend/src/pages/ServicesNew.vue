@@ -51,6 +51,21 @@
             <el-table-column prop="module" label="对应模块" min-width="120" />
             <el-table-column prop="subsystem_name" label="子系统" min-width="120" />
             <el-table-column prop="group_name" label="程序分类" min-width="120" />
+            <el-table-column prop="deploy_type" label="部署方式" min-width="100">
+              <template #default="scope">
+                <el-tag :type="getDeployType(scope.row.deploy_type).type">
+                  {{ getDeployType(scope.row.deploy_type).label }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="service_type" label="服务类型" min-width="120">
+              <template #default="scope">
+                <el-tag :type="getServiceType(scope.row.service_type).type">
+                  {{ getServiceType(scope.row.service_type).label }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="instance_name" label="运行实例" min-width="120" show-overflow-tooltip />
             <el-table-column prop="ip" label="IP地址" min-width="120" />
             <el-table-column prop="username" label="用户名" min-width="100" />
             <el-table-column prop="program_path" label="程序路径" min-width="180" show-overflow-tooltip />
@@ -89,16 +104,19 @@
               <template #default="scope">
                 <div class="action-buttons">
                   <template v-if="scope.row.status !== 'RUNNING'">
-                    <div class="action-btn start-btn" @click="startService(scope.row)">
-                      <span>启动</span>
+                    <div class="action-btn start-btn" :class="{ 'disabled': operatingServices.has(scope.row.id) }" @click="startService(scope.row)">
+                      <span v-if="operatingServices.has(scope.row.id)">启动中...</span>
+                      <span v-else>启动</span>
                     </div>
                   </template>
                   <template v-else>
-                    <div class="action-btn stop-btn" @click="stopService(scope.row)">
-                      <span>停止</span>
+                    <div class="action-btn stop-btn" :class="{ 'disabled': operatingServices.has(scope.row.id) }" @click="stopService(scope.row)">
+                      <span v-if="operatingServices.has(scope.row.id)">停止中...</span>
+                      <span v-else>停止</span>
                     </div>
-                    <div class="action-btn restart-btn" @click="restartService(scope.row)">
-                      <span>重启</span>
+                    <div class="action-btn restart-btn" :class="{ 'disabled': operatingServices.has(scope.row.id) }" @click="restartService(scope.row)">
+                      <span v-if="operatingServices.has(scope.row.id)">重启中...</span>
+                      <span v-else>重启</span>
                     </div>
                   </template>
                 </div>
@@ -133,13 +151,15 @@
             <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="所属子系统" required>
-          <el-select v-model="serviceForm.subsystem_id" placeholder="请选择子系统" @change="handleFormSubsystemChange">
+        <el-form-item label="所属子系统">
+          <el-select v-model="serviceForm.subsystem_id" placeholder="请选择子系统（可选）" @change="handleFormSubsystemChange" :loading="formLoadingSubsystems">
+            <el-option label="无" value="" />
             <el-option v-for="subsystem in formSubsystems" :key="subsystem.id" :label="subsystem.subsystem_name" :value="subsystem.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="程序分类" required>
-          <el-select v-model="serviceForm.group_id" placeholder="请选择程序分类">
+        <el-form-item label="程序分类">
+          <el-select v-model="serviceForm.group_id" placeholder="请选择程序分类（可选）" :loading="formLoadingGroups">
+            <el-option label="无" value="" />
             <el-option v-for="group in formGroups" :key="group.id" :label="group.group_name" :value="group.id" />
           </el-select>
         </el-form-item>
@@ -161,20 +181,83 @@
         <el-form-item label="密码" :required="!serviceForm.id">
           <el-input v-model="serviceForm.password" type="password" placeholder="编辑时留空表示不修改密码" />
         </el-form-item>
-        <el-form-item label="程序路径" required>
-          <el-input v-model="serviceForm.program_path" placeholder="请输入程序路径" />
+        <!-- 主机部署相关字段 -->
+        <template v-if="serviceForm.deploy_type === 'HOST' || !serviceForm.deploy_type">
+          <el-form-item label="程序路径" required>
+            <el-input v-model="serviceForm.program_path" placeholder="请输入程序路径" />
+          </el-form-item>
+          <el-form-item label="启动脚本" required>
+            <el-input v-model="serviceForm.start_script" placeholder="如: ./start.sh" />
+          </el-form-item>
+          <el-form-item label="停止脚本" required>
+            <el-input v-model="serviceForm.stop_script" placeholder="如: ./stop.sh" />
+          </el-form-item>
+          <el-form-item label="日志路径">
+            <el-input v-model="serviceForm.log_path" placeholder="日志文件路径或目录" />
+          </el-form-item>
+          <el-form-item label="程序端口">
+            <el-input v-model.number="serviceForm.port" placeholder="请输入端口号" />
+          </el-form-item>
+        </template>
+
+        <!-- Docker部署相关字段 -->
+        <template v-if="serviceForm.deploy_type === 'DOCKER'">
+          <el-form-item label="程序路径" required>
+            <el-input v-model="serviceForm.program_path" placeholder="docker-compose.yml所在目录路径" />
+          </el-form-item>
+          <el-form-item label="启动脚本" required>
+            <el-input v-model="serviceForm.start_script" placeholder="如: docker-compose up -d" />
+          </el-form-item>
+          <el-form-item label="停止脚本" required>
+            <el-input v-model="serviceForm.stop_script" placeholder="如: docker-compose down" />
+          </el-form-item>
+          <el-form-item label="容器名称">
+            <el-input v-model="serviceForm.container_name" placeholder="请输入容器名称" />
+          </el-form-item>
+          <el-form-item label="镜像名称">
+            <el-input v-model="serviceForm.image_name" placeholder="如: nginx:latest" />
+          </el-form-item>
+          <el-form-item label="端口映射">
+            <el-input v-model="serviceForm.port_mapping" placeholder="如: 8080:80" />
+          </el-form-item>
+          <el-form-item label="日志类型">
+            <el-select v-model="serviceForm.log_type" placeholder="请选择日志类型">
+              <el-option label="主机目录" value="HOST_DIR" />
+              <el-option label="Docker Logs" value="DOCKER_LOGS" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="日志路径" v-if="serviceForm.log_type === 'HOST_DIR'">
+            <el-input v-model="serviceForm.log_path" placeholder="挂载到主机的日志目录路径" />
+          </el-form-item>
+          <el-form-item label="程序端口">
+            <el-input v-model.number="serviceForm.port" placeholder="容器内部端口" />
+          </el-form-item>
+        </template>
+        <el-form-item label="服务类型">
+          <el-select v-model="serviceForm.service_type" placeholder="请选择服务类型">
+            <el-option label="主机应用" value="HOST_APP" />
+            <el-option label="Docker容器" value="DOCKER" />
+            <el-option label="Elasticsearch" value="ES" />
+            <el-option label="Solr" value="SOLR" />
+            <el-option label="Redis" value="REDIS" />
+            <el-option label="MySQL" value="MYSQL" />
+            <el-option label="PostgreSQL" value="POSTGRESQL" />
+            <el-option label="Kafka" value="KAFKA" />
+            <el-option label="RocketMQ" value="ROCKETMQ" />
+            <el-option label="RabbitMQ" value="RABBITMQ" />
+            <el-option label="Nginx" value="NGINX" />
+            <el-option label="AI模型" value="AI_MODEL" />
+          </el-select>
         </el-form-item>
-        <el-form-item label="启动脚本">
-          <el-input v-model="serviceForm.start_script" placeholder="如: ./start.sh" />
+        <el-form-item label="部署方式">
+          <el-select v-model="serviceForm.deploy_type" placeholder="请选择部署方式">
+            <el-option label="主机部署" value="HOST" />
+            <el-option label="Docker部署" value="DOCKER" />
+          </el-select>
         </el-form-item>
-        <el-form-item label="停止脚本">
-          <el-input v-model="serviceForm.stop_script" placeholder="如: ./stop.sh" />
-        </el-form-item>
-        <el-form-item label="日志路径">
-          <el-input v-model="serviceForm.log_path" placeholder="日志文件路径或目录" />
-        </el-form-item>
-        <el-form-item label="程序端口">
-          <el-input v-model.number="serviceForm.port" placeholder="请输入端口号" />
+        <!-- 主机部署才显示运行实例 -->
+        <el-form-item label="运行实例" v-if="serviceForm.deploy_type === 'HOST' || !serviceForm.deploy_type">
+          <el-input v-model="serviceForm.instance_name" placeholder="实例名称或主机名（可选）" />
         </el-form-item>
         <el-form-item label="负责人">
           <el-input v-model="serviceForm.owner" placeholder="请输入负责人" />
@@ -205,6 +288,17 @@
         <el-descriptions-item label="启动脚本">{{ selectedService.start_script || '-' }}</el-descriptions-item>
         <el-descriptions-item label="停止脚本">{{ selectedService.stop_script || '-' }}</el-descriptions-item>
         <el-descriptions-item label="日志路径">{{ selectedService.log_path || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="服务类型">
+          <el-tag :type="getServiceType(selectedService.service_type).type">
+            {{ getServiceType(selectedService.service_type).label }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="部署方式">
+          <el-tag :type="getDeployType(selectedService.deploy_type).type">
+            {{ getDeployType(selectedService.deploy_type).label }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="运行实例">{{ selectedService.instance_name || '-' }}</el-descriptions-item>
         <el-descriptions-item label="状态">
           <el-tag :type="getStatusType(selectedService.status)">
             {{ selectedService.status || '未知' }}
@@ -219,10 +313,17 @@
 
     <el-dialog title="日志查看" v-model="showLogDialog" width="900px" :before-close="handleLogClose">
       <div class="log-header">
-        <el-select v-model="selectedLogFile" style="width: 250px" placeholder="选择日志文件" @change="loadLog">
-          <el-option label="最新日志" value="" />
-          <el-option v-for="file in logFiles" :key="file.name" :label="`${file.name} (${file.size})`" :value="file.name" />
-        </el-select>
+        <!-- Docker Logs方式显示容器信息 -->
+        <template v-if="selectedLogService?.deploy_type === 'DOCKER' && selectedLogService?.log_type === 'DOCKER_LOGS'">
+          <el-tag type="info">Docker Logs - {{ selectedLogService.container_name || '未配置容器名称' }}</el-tag>
+        </template>
+        <!-- 主机目录方式显示文件选择 -->
+        <template v-else>
+          <el-select v-model="selectedLogFile" style="width: 250px" placeholder="选择日志文件" @change="loadLog">
+            <el-option label="最新日志" value="" />
+            <el-option v-for="file in logFiles" :key="file.name" :label="`${file.name} (${file.size})`" :value="file.name" />
+          </el-select>
+        </template>
         <el-select v-model="logLines" style="width: 120px">
           <el-option label="100行" :value="100" />
           <el-option label="200行" :value="200" />
@@ -231,7 +332,7 @@
         </el-select>
         <el-button @click="loadLogFileList">刷新列表</el-button>
         <el-button @click="refreshLog">刷新内容</el-button>
-        <el-button @click="downloadLog">下载日志</el-button>
+        <el-button @click="downloadLog" v-if="!(selectedLogService?.deploy_type === 'DOCKER' && selectedLogService?.log_type === 'DOCKER_LOGS')">下载日志</el-button>
       </div>
       <div class="log-content" ref="logContent">
         <pre>{{ logContentText }}</pre>
@@ -325,6 +426,9 @@ const logLines = ref(200);
 const logContentText = ref('');
 const logFiles = ref([]);
 const selectedLogFile = ref('');
+const isSubmitting = ref(false);
+// 操作中的服务ID集合
+const operatingServices = ref(new Set());
 const serviceForm = reactive({
   id: null,
   project_id: '',
@@ -340,11 +444,28 @@ const serviceForm = reactive({
   start_script: '',
   stop_script: '',
   log_path: '',
+  log_type: '',
   port: null,
+  service_type: '',
+  deploy_type: '',
+  instance_name: '',
+  // Docker相关字段
+  container_name: '',
+  image_name: '',
+  port_mapping: '',
   owner: '',
   remark: ''
 });
 let statusInterval = null;
+
+// 缓存已加载的数据，避免重复请求
+const subsystemCache = ref({});
+const groupCache = ref({});
+// 加载状态
+const loadingSubsystems = ref(false);
+const loadingGroups = ref(false);
+const formLoadingSubsystems = ref(false);
+const formLoadingGroups = ref(false);
 
 const getStatusType = (status) => {
   switch (status) {
@@ -405,7 +526,22 @@ const loadProjects = async () => {
   }
 };
 
-const loadSubsystems = async (projectId = '') => {
+const loadSubsystems = async (projectId = '', forForm = false) => {
+  // 使用缓存键，空字符串表示全部子系统
+  const cacheKey = projectId || 'all';
+  
+  // 检查缓存
+  if (subsystemCache.value[cacheKey]) {
+    return subsystemCache.value[cacheKey];
+  }
+  
+  // 设置加载状态
+  if (forForm) {
+    formLoadingSubsystems.value = true;
+  } else {
+    loadingSubsystems.value = true;
+  }
+  
   try {
     const params = new URLSearchParams();
     if (projectId) {
@@ -413,28 +549,61 @@ const loadSubsystems = async (projectId = '') => {
     }
     const response = await axios.get(`/api/subsystems?${params}`);
     if (response.data.code === 0) {
-      return response.data.data.items;
+      const data = response.data.data.items;
+      // 缓存结果
+      subsystemCache.value[cacheKey] = data;
+      return data;
     }
     return [];
   } catch (error) {
     console.error('加载子系统列表失败', error);
     return [];
+  } finally {
+    // 清除加载状态
+    if (forForm) {
+      formLoadingSubsystems.value = false;
+    } else {
+      loadingSubsystems.value = false;
+    }
   }
 };
 
-const loadGroups = async (subsystemId = '') => {
+const loadGroups = async (subsystemId = '', forForm = false) => {
+  if (!subsystemId) {
+    return [];
+  }
+  
+  // 检查缓存
+  if (groupCache.value[subsystemId]) {
+    return groupCache.value[subsystemId];
+  }
+  
+  // 设置加载状态
+  if (forForm) {
+    formLoadingGroups.value = true;
+  } else {
+    loadingGroups.value = true;
+  }
+  
   try {
-    // 如果指定了子系统，从子系统的关联中获取分类
-    if (subsystemId) {
-      const response = await axios.get(`/api/subsystems/${subsystemId}/groups`);
-      if (response.data.code === 0) {
-        return response.data.data;
-      }
+    const response = await axios.get(`/api/subsystems/${subsystemId}/groups`);
+    if (response.data.code === 0) {
+      const data = response.data.data;
+      // 缓存结果
+      groupCache.value[subsystemId] = data;
+      return data;
     }
     return [];
   } catch (error) {
     console.error('加载程序分类列表失败', error);
     return [];
+  } finally {
+    // 清除加载状态
+    if (forForm) {
+      formLoadingGroups.value = false;
+    } else {
+      loadingGroups.value = false;
+    }
   }
 };
 
@@ -488,7 +657,7 @@ const handleSubsystemChange = async () => {
 };
 
 const handleFormProjectChange = async () => {
-  formSubsystems.value = await loadSubsystems(serviceForm.project_id);
+  formSubsystems.value = await loadSubsystems(serviceForm.project_id, true);
   formGroups.value = [];
   serviceForm.subsystem_id = '';
   serviceForm.group_id = '';
@@ -496,7 +665,7 @@ const handleFormProjectChange = async () => {
 
 const handleFormSubsystemChange = async () => {
   serviceForm.group_id = '';
-  formGroups.value = await loadGroups(serviceForm.subsystem_id);
+  formGroups.value = await loadGroups(serviceForm.subsystem_id, true);
 };
 
 const updateStatuses = async () => {
@@ -531,7 +700,14 @@ const resetForm = () => {
   serviceForm.start_script = '';
   serviceForm.stop_script = '';
   serviceForm.log_path = '';
+  serviceForm.log_type = '';
   serviceForm.port = null;
+  serviceForm.service_type = '';
+  serviceForm.deploy_type = '';
+  serviceForm.instance_name = '';
+  serviceForm.container_name = '';
+  serviceForm.image_name = '';
+  serviceForm.port_mapping = '';
   serviceForm.owner = '';
   serviceForm.remark = '';
   formSubsystems.value = [];
@@ -556,10 +732,17 @@ const viewService = async (service) => {
     if (response.data.code === 0) {
       Object.assign(selectedService, response.data.data);
       showDetailDialog.value = true;
-      const statusResponse = await axios.post('/api/services/status/batch', [service.id]);
-      if (statusResponse.data.code === 0) {
-        selectedService.status = statusResponse.data.data[service.id] || 'UNKNOWN';
-      }
+      // 异步获取状态，不阻塞弹窗显示
+      setTimeout(async () => {
+        try {
+          const statusResponse = await axios.post('/api/services/status/batch', [service.id]);
+          if (statusResponse.data.code === 0) {
+            selectedService.status = statusResponse.data.data[service.id] || 'UNKNOWN';
+          }
+        } catch (e) {
+          console.error('获取状态失败:', e);
+        }
+      }, 100);
     } else {
       ElMessage.error('获取服务详情失败');
     }
@@ -584,6 +767,9 @@ const editService = async (service) => {
   serviceForm.stop_script = service.stop_script || '';
   serviceForm.log_path = service.log_path || '';
   serviceForm.port = service.port || null;
+  serviceForm.service_type = service.service_type || '';
+  serviceForm.deploy_type = service.deploy_type || '';
+  serviceForm.instance_name = service.instance_name || '';
   serviceForm.owner = service.owner || '';
   serviceForm.remark = service.remark || '';
   
@@ -597,16 +783,14 @@ const editService = async (service) => {
 };
 
 const saveService = async () => {
+  // 防止重复提交
+  if (isSubmitting.value) {
+    ElMessage.warning('正在提交中，请稍后');
+    return;
+  }
+  
   if (!serviceForm.project_id) {
     ElMessage.error('请选择所属项目');
-    return;
-  }
-  if (!serviceForm.subsystem_id) {
-    ElMessage.error('请选择所属子系统');
-    return;
-  }
-  if (!serviceForm.group_id) {
-    ElMessage.error('请选择程序分类');
     return;
   }
   if (!serviceForm.func_desc.trim()) {
@@ -621,29 +805,67 @@ const saveService = async () => {
     ElMessage.error('请输入SSH用户名');
     return;
   }
-  if (!serviceForm.program_path.trim()) {
-    ElMessage.error('请输入程序路径');
-    return;
+  
+  // 根据部署方式进行字段验证
+  if (serviceForm.deploy_type === 'HOST' || !serviceForm.deploy_type) {
+    if (!serviceForm.program_path.trim()) {
+      ElMessage.error('请输入程序路径');
+      return;
+    }
+    if (!serviceForm.start_script.trim()) {
+      ElMessage.error('请输入启动脚本');
+      return;
+    }
+    if (!serviceForm.stop_script.trim()) {
+      ElMessage.error('请输入停止脚本');
+      return;
+    }
+  } else if (serviceForm.deploy_type === 'DOCKER') {
+    if (!serviceForm.program_path.trim()) {
+      ElMessage.error('请输入程序路径');
+      return;
+    }
+    if (!serviceForm.start_script.trim()) {
+      ElMessage.error('请输入启动脚本');
+      return;
+    }
+    if (!serviceForm.stop_script.trim()) {
+      ElMessage.error('请输入停止脚本');
+      return;
+    }
   }
+  
   if (!serviceForm.id && !serviceForm.password.trim()) {
     ElMessage.error('请输入密码');
     return;
   }
+  
+  // 设置提交状态
+  isSubmitting.value = true;
+  
   try {
     const data = {
       project_id: serviceForm.project_id,
-      subsystem_id: serviceForm.subsystem_id,
-      group_id: serviceForm.group_id,
+      subsystem_id: serviceForm.subsystem_id || null,
+      group_id: serviceForm.group_id || null,
       func_desc: serviceForm.func_desc,
       module: serviceForm.module || null,
       ip: serviceForm.ip,
       ssh_port: serviceForm.ssh_port || 22,
       username: serviceForm.username,
-      program_path: serviceForm.program_path,
+      program_path: serviceForm.program_path || null,
       start_script: serviceForm.start_script || null,
       stop_script: serviceForm.stop_script || null,
       log_path: serviceForm.log_path || null,
+      log_type: serviceForm.log_type || null,
       port: serviceForm.port || null,
+      service_type: serviceForm.service_type || 'HOST_APP',
+      deploy_type: serviceForm.deploy_type || 'HOST',
+      instance_name: serviceForm.instance_name || null,
+      // Docker相关字段
+      container_name: serviceForm.container_name || null,
+      image_name: serviceForm.image_name || null,
+      port_mapping: serviceForm.port_mapping || null,
       owner: serviceForm.owner || null,
       remark: serviceForm.remark || null
     };
@@ -666,6 +888,9 @@ const saveService = async () => {
     }
   } catch (error) {
     ElMessage.error(error.response?.data?.message || '操作失败');
+  } finally {
+    // 重置提交状态
+    isSubmitting.value = false;
   }
 };
 
@@ -781,6 +1006,12 @@ const batchDeleteServices = async () => {
 };
 
 const startService = async (service) => {
+  // 防止重复操作
+  if (operatingServices.value.has(service.id)) {
+    return;
+  }
+  operatingServices.value.add(service.id);
+  
   try {
     const response = await axios.post(`/api/services/${service.id}/start`);
     if (response.data.code === 0) {
@@ -791,10 +1022,18 @@ const startService = async (service) => {
     }
   } catch (error) {
     ElMessage.error(error.response?.data?.message || '启动失败');
+  } finally {
+    operatingServices.value.delete(service.id);
   }
 };
 
 const stopService = async (service) => {
+  // 防止重复操作
+  if (operatingServices.value.has(service.id)) {
+    return;
+  }
+  operatingServices.value.add(service.id);
+  
   try {
     const response = await axios.post(`/api/services/${service.id}/stop`);
     if (response.data.code === 0) {
@@ -805,10 +1044,18 @@ const stopService = async (service) => {
     }
   } catch (error) {
     ElMessage.error(error.response?.data?.message || '停止失败');
+  } finally {
+    operatingServices.value.delete(service.id);
   }
 };
 
 const restartService = async (service) => {
+  // 防止重复操作
+  if (operatingServices.value.has(service.id)) {
+    return;
+  }
+  operatingServices.value.add(service.id);
+  
   try {
     const response = await axios.post(`/api/services/${service.id}/restart`);
     if (response.data.code === 0) {
@@ -819,6 +1066,8 @@ const restartService = async (service) => {
     }
   } catch (error) {
     ElMessage.error(error.response?.data?.message || '重启失败');
+  } finally {
+    operatingServices.value.delete(service.id);
   }
 };
 
@@ -1089,6 +1338,33 @@ const handleShellClose = () => {
   showShellDialog.value = false;
 };
 
+const getDeployType = (type) => {
+  const types = {
+    'HOST': { label: '主机部署', type: 'primary' },
+    'DOCKER': { label: 'Docker部署', type: 'success' },
+    'CLUSTER': { label: '集群部署', type: 'warning' },
+  };
+  return types[type] || { label: type || '未知', type: 'info' };
+};
+
+const getServiceType = (type) => {
+  const types = {
+    'HOST_APP': { label: '主机应用', type: 'primary' },
+    'DOCKER': { label: 'Docker容器', type: 'success' },
+    'ES': { label: 'Elasticsearch', type: 'warning' },
+    'SOLR': { label: 'Solr', type: 'warning' },
+    'REDIS': { label: 'Redis', type: 'danger' },
+    'MYSQL': { label: 'MySQL', type: 'info' },
+    'POSTGRESQL': { label: 'PostgreSQL', type: 'info' },
+    'KAFKA': { label: 'Kafka', type: 'purple' },
+    'ROCKETMQ': { label: 'RocketMQ', type: 'purple' },
+    'RABBITMQ': { label: 'RabbitMQ', type: 'purple' },
+    'NGINX': { label: 'Nginx', type: 'primary' },
+    'AI_MODEL': { label: 'AI模型', type: 'danger' },
+  };
+  return types[type] || { label: type || '未知', type: 'info' };
+};
+
 onMounted(() => {
   loadServices();
   loadProjects();
@@ -1238,6 +1514,12 @@ onUnmounted(() => {
   &:active {
     transform: translateY(0);
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+  }
+
+  &.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    pointer-events: none;
   }
 }
 

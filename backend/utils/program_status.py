@@ -34,9 +34,38 @@ async def check_process_by_ssh(ip: str, username: str, password: str, program_pa
     except Exception:
         return False
 
-async def get_program_status(ip: str, username: str, password: str, port: int = None, program_path: str = None, ssh_port: int = 22) -> str:
+async def check_docker_container(ip: str, username: str, password: str, container_name: str, ssh_port: int = 22) -> bool:
+    """通过SSH检测Docker容器状态"""
+    try:
+        conn = await ssh_pool.get_connection(ip, ssh_port, username, password)
+        if not conn:
+            return False
+        
+        # 检查容器是否运行
+        command = f"docker inspect -f '{{{{.State.Running}}}}' {container_name} 2>/dev/null"
+        output, error, success = await conn.execute_command(command)
+        if success and output.strip() == 'true':
+            return True
+        
+        # 如果容器名称为空，尝试通过docker-compose检测
+        if not container_name:
+            command = "docker-compose ps -q"
+            output, error, success = await conn.execute_command(command)
+            return success and output.strip() != ''
+        
+        return False
+    except Exception:
+        return False
+
+async def get_program_status(ip: str, username: str, password: str, port: int = None, program_path: str = None, ssh_port: int = 22, deploy_type: str = 'HOST', container_name: str = None) -> str:
     """获取单个程序状态"""
     try:
+        # Docker部署优先检测容器状态
+        if deploy_type == 'DOCKER':
+            if await check_docker_container(ip, username, password, container_name, ssh_port):
+                return "RUNNING"
+            return "STOPPED"
+        
         # 优先检测端口
         if port:
             if await check_port_status(ip, port):
@@ -75,22 +104,43 @@ async def get_batch_program_status(programs: list) -> dict:
             for prog in progs:
                 status = "UNKNOWN"
                 try:
-                    # 优先端口检测
-                    if prog['port']:
-                        if await check_port_status(ip, prog['port']):
-                            status = "RUNNING"
+                    # Docker部署优先检测容器状态
+                    deploy_type = prog.get('deploy_type', 'HOST')
+                    if deploy_type == 'DOCKER':
+                        container_name = prog.get('container_name', '')
+                        if conn:
+                            if container_name:
+                                command = f"docker inspect -f '{{{{.State.Running}}}}' {container_name} 2>/dev/null"
+                                output, error, success = await conn.execute_command(command)
+                                if success and output.strip() == 'true':
+                                    status = "RUNNING"
+                                else:
+                                    status = "STOPPED"
+                            else:
+                                # 无容器名称，尝试通过docker-compose检测
+                                command = "docker-compose ps -q"
+                                output, error, success = await conn.execute_command(command)
+                                if success and output.strip() != '':
+                                    status = "RUNNING"
+                                else:
+                                    status = "STOPPED"
                     else:
-                        # SSH进程检测
-                        if conn and prog['program_path']:
-                            keyword = os.path.basename(prog['program_path'])
-                            command = f"ps -ef | grep -E '{keyword}' | grep -v grep"
-                            output, error, success = await conn.execute_command(command)
-                            if success and output.strip() != '':
+                        # 主机部署：优先端口检测
+                        if prog['port']:
+                            if await check_port_status(ip, prog['port']):
                                 status = "RUNNING"
+                        else:
+                            # SSH进程检测
+                            if conn and prog['program_path']:
+                                keyword = os.path.basename(prog['program_path'])
+                                command = f"ps -ef | grep -E '{keyword}' | grep -v grep"
+                                output, error, success = await conn.execute_command(command)
+                                if success and output.strip() != '':
+                                    status = "RUNNING"
+                                else:
+                                    status = "STOPPED"
                             else:
                                 status = "STOPPED"
-                        else:
-                            status = "STOPPED"
                 except Exception as e:
                     status = "UNKNOWN"
                 

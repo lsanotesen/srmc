@@ -5,21 +5,10 @@ from core.database import engine
 def upgrade():
     """Add new fields to app_services table for service type enhancement"""
     with engine.begin() as conn:
-        # 创建枚举类型
-        conn.execute(text("""
-            CREATE TYPE service_type AS ENUM (
-                'HOST_APP', 'DOCKER', 'ES', 'SOLR', 'REDIS', 'MYSQL', 
-                'POSTGRESQL', 'KAFKA', 'ROCKETMQ', 'RABBITMQ', 'NGINX', 'AI_MODEL'
-            )
-        """))
-        
-        conn.execute(text("""
-            CREATE TYPE deploy_type AS ENUM ('HOST', 'DOCKER', 'CLUSTER')
-        """))
-        
-        # 添加新字段
-        conn.execute(text("ALTER TABLE app_services ADD COLUMN service_type service_type DEFAULT 'HOST_APP'"))
-        conn.execute(text("ALTER TABLE app_services ADD COLUMN deploy_type deploy_type DEFAULT 'HOST'"))
+        # MySQL不支持CREATE TYPE，直接在ALTER TABLE中定义ENUM
+        # 添加新字段（MySQL使用ENUM类型）
+        conn.execute(text("ALTER TABLE app_services ADD COLUMN service_type ENUM('HOST_APP', 'DOCKER', 'ES', 'SOLR', 'REDIS', 'MYSQL', 'POSTGRESQL', 'KAFKA', 'ROCKETMQ', 'RABBITMQ', 'NGINX', 'AI_MODEL') DEFAULT 'HOST_APP'"))
+        conn.execute(text("ALTER TABLE app_services ADD COLUMN deploy_type ENUM('HOST', 'DOCKER', 'CLUSTER') DEFAULT 'HOST'"))
         conn.execute(text("ALTER TABLE app_services ADD COLUMN instance_name VARCHAR(255)"))
         
         # Docker相关字段
@@ -76,12 +65,9 @@ def downgrade():
         for field in fields:
             conn.execute(text(f"ALTER TABLE app_services DROP COLUMN IF EXISTS {field}"))
         
-        # 删除枚举类型
-        conn.execute(text("DROP TYPE IF EXISTS service_type"))
-        conn.execute(text("DROP TYPE IF EXISTS deploy_type"))
-        
+        # MySQL不需要删除枚举类型，字段删除后类型自动消失
         # 恢复 program_path 非空约束
-        conn.execute(text("ALTER TABLE app_services ALTER COLUMN program_path SET NOT NULL"))
+        conn.execute(text("ALTER TABLE app_services MODIFY COLUMN program_path VARCHAR(500) NOT NULL"))
 
 if __name__ == "__main__":
     upgrade()

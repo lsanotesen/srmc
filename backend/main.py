@@ -106,7 +106,8 @@ async def health_check(db: Session = Depends(get_db)):
 @app.on_event("startup")
 async def startup_event():
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(update_all_service_statuses, 'interval', seconds=10, args=[next(get_db())])
+    # 将状态检查间隔从10秒改为60秒，减少对API请求的影响
+    scheduler.add_job(update_all_service_statuses, 'interval', seconds=60, args=[next(get_db())], max_instances=1)
     scheduler.start()
 
 @app.on_event("shutdown")

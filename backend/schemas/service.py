@@ -12,13 +12,23 @@ class ServiceCreate(BaseModel):
     ssh_port: Optional[int] = Field(22, ge=1, le=65535)
     username: str = Field(..., max_length=100)
     password: str = Field(..., max_length=500)
-    program_path: str = Field(..., max_length=500)
+    program_path: Optional[str] = Field(None, max_length=500)
     start_script: Optional[str] = Field(None, max_length=500)
     stop_script: Optional[str] = Field(None, max_length=500)
     log_path: Optional[str] = Field(None, max_length=500)
+    log_type: Optional[str] = Field(None, max_length=50)
     port: Optional[int] = Field(None, ge=1, le=65535)
     owner: Optional[str] = Field(None, max_length=100)
     remark: Optional[str] = None
+    service_type: Optional[str] = Field(None, max_length=50)
+    deploy_type: Optional[str] = Field(None, max_length=50)
+    instance_name: Optional[str] = Field(None, max_length=255)
+    container_name: Optional[str] = Field(None, max_length=255)
+    image_name: Optional[str] = Field(None, max_length=255)
+    port_mapping: Optional[str] = Field(None, max_length=500)
+    cluster_name: Optional[str] = Field(None, max_length=255)
+    node_count: Optional[int] = Field(None, ge=1)
+    master_node: Optional[str] = Field(None, max_length=45)
 
 class ServiceUpdate(BaseModel):
     project_id: Optional[int] = Field(None, ge=1)
@@ -34,9 +44,19 @@ class ServiceUpdate(BaseModel):
     start_script: Optional[str] = Field(None, max_length=500)
     stop_script: Optional[str] = Field(None, max_length=500)
     log_path: Optional[str] = Field(None, max_length=500)
+    log_type: Optional[str] = Field(None, max_length=50)
     port: Optional[int] = Field(None, ge=1, le=65535)
     owner: Optional[str] = Field(None, max_length=100)
     remark: Optional[str] = None
+    service_type: Optional[str] = Field(None, max_length=50)
+    deploy_type: Optional[str] = Field(None, max_length=50)
+    instance_name: Optional[str] = Field(None, max_length=255)
+    container_name: Optional[str] = Field(None, max_length=255)
+    image_name: Optional[str] = Field(None, max_length=255)
+    port_mapping: Optional[str] = Field(None, max_length=500)
+    cluster_name: Optional[str] = Field(None, max_length=255)
+    node_count: Optional[int] = Field(None, ge=1)
+    master_node: Optional[str] = Field(None, max_length=45)
 
 class ServiceResponse(BaseModel):
     id: int
@@ -51,7 +71,7 @@ class ServiceResponse(BaseModel):
     ip: str
     ssh_port: int
     username: str
-    program_path: str
+    program_path: Optional[str]
     start_script: Optional[str]
     stop_script: Optional[str]
     log_path: Optional[str]
@@ -61,6 +81,15 @@ class ServiceResponse(BaseModel):
     status: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    service_type: Optional[str]
+    deploy_type: Optional[str]
+    instance_name: Optional[str]
+    container_name: Optional[str]
+    image_name: Optional[str]
+    port_mapping: Optional[str]
+    cluster_name: Optional[str]
+    node_count: Optional[int]
+    master_node: Optional[str]
 
     class Config:
         from_attributes = True

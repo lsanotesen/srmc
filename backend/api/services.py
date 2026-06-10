@@ -327,9 +327,19 @@ async def create_service(
         start_script=service_create.start_script,
         stop_script=service_create.stop_script,
         log_path=service_create.log_path,
+        log_type=service_create.log_type,
         port=service_create.port,
         owner=service_create.owner,
-        remark=service_create.remark
+        remark=service_create.remark,
+        service_type=service_create.service_type or 'HOST_APP',
+        deploy_type=service_create.deploy_type or 'HOST',
+        instance_name=service_create.instance_name or (service_create.container_name if service_create.deploy_type == 'DOCKER' else None),
+        container_name=service_create.container_name,
+        image_name=service_create.image_name,
+        port_mapping=service_create.port_mapping,
+        cluster_name=service_create.cluster_name,
+        node_count=service_create.node_count,
+        master_node=service_create.master_node
     )
     
     db.add(new_service)
@@ -538,7 +548,10 @@ async def batch_get_status(
             'username': service.username,
             'password': decrypt(service.password),
             'port': service.port,
-            'program_path': service.program_path
+            'program_path': service.program_path,
+            'deploy_type': service.deploy_type,
+            'container_name': service.container_name,
+            'ssh_port': service.ssh_port or 22
         })
     
     result = await get_batch_program_status(progs)
@@ -790,36 +803,79 @@ async def list_log_files(
     if not service:
         raise HTTPException(status_code=404, detail="服务不存在")
     
-    if not service.log_path:
-        return ResponseModel(data={"files": [], "message": "未配置日志路径"}, code=400)
-    
     try:
         ssh = await ssh_pool.get_connection(service.ip, service.ssh_port or 22, service.username, decrypt(service.password))
         if not ssh:
             return ResponseModel(data={"files": [], "message": "无法建立SSH连接"}, code=500)
         
-        program_dir = expand_home_path(service.program_path)
-        log_dir = service.log_path
-        
-        command = f"cd {program_dir}/{log_dir} && ls -lht *.log 2>/dev/null | awk '{{print $9, $5, $6, $7, $8}}'"
-        output, error, success = await ssh.execute_command(command)
-        ssh.close()
-        
-        if success and output.strip():
-            files = []
-            for line in output.strip().split('\n'):
-                if line.strip():
-                    parts = line.split(None, 4)
-                    if len(parts) >= 5:
-                        files.append({
-                            "name": parts[0],
-                            "size": parts[1],
-                            "date": " ".join(parts[2:5])
-                        })
+        # Docker部署处理
+        if service.deploy_type == 'DOCKER':
+            # 如果是Docker Logs方式，返回容器名称作为日志标识
+            if service.log_type == 'DOCKER_LOGS':
+                ssh.close()
+                return ResponseModel(data={
+                    "files": [{"name": "docker.log", "size": "实时", "date": "实时"}],
+                    "log_dir": "docker_logs",
+                    "log_type": "DOCKER_LOGS",
+                    "container_name": service.container_name
+                })
             
-            return ResponseModel(data={"files": files, "log_dir": log_dir})
+            # 主机目录方式
+            if not service.log_path:
+                ssh.close()
+                return ResponseModel(data={"files": [], "message": "未配置日志路径"}, code=400)
+            
+            program_dir = expand_home_path(service.program_path)
+            log_dir = service.log_path
+            
+            command = f"cd {program_dir}/{log_dir} && ls -lht *.log 2>/dev/null | awk '{{print $9, $5, $6, $7, $8}}'"
+            output, error, success = await ssh.execute_command(command)
+            ssh.close()
+            
+            if success and output.strip():
+                files = []
+                for line in output.strip().split('\n'):
+                    if line.strip():
+                        parts = line.split(None, 4)
+                        if len(parts) >= 5:
+                            files.append({
+                                "name": parts[0],
+                                "size": parts[1],
+                                "date": " ".join(parts[2:5])
+                            })
+                
+                return ResponseModel(data={"files": files, "log_dir": log_dir, "log_type": "HOST_DIR"})
+            else:
+                return ResponseModel(data={"files": [{"name": service.log_path, "size": "unknown", "date": "unknown"}], "log_dir": service.log_path, "log_type": "HOST_DIR"})
+        
+        # 主机部署处理（原有逻辑）
         else:
-            return ResponseModel(data={"files": [{"name": service.log_path, "size": "unknown", "date": "unknown"}], "log_dir": service.log_path})
+            if not service.log_path:
+                ssh.close()
+                return ResponseModel(data={"files": [], "message": "未配置日志路径"}, code=400)
+            
+            program_dir = expand_home_path(service.program_path)
+            log_dir = service.log_path
+            
+            command = f"cd {program_dir}/{log_dir} && ls -lht *.log 2>/dev/null | awk '{{print $9, $5, $6, $7, $8}}'"
+            output, error, success = await ssh.execute_command(command)
+            ssh.close()
+            
+            if success and output.strip():
+                files = []
+                for line in output.strip().split('\n'):
+                    if line.strip():
+                        parts = line.split(None, 4)
+                        if len(parts) >= 5:
+                            files.append({
+                                "name": parts[0],
+                                "size": parts[1],
+                                "date": " ".join(parts[2:5])
+                            })
+                
+                return ResponseModel(data={"files": files, "log_dir": log_dir})
+            else:
+                return ResponseModel(data={"files": [{"name": service.log_path, "size": "unknown", "date": "unknown"}], "log_dir": service.log_path})
     except Exception as e:
         return ResponseModel(data={"files": [], "message": f"获取日志文件列表失败: {str(e)}"}, code=500)
 
@@ -836,41 +892,95 @@ async def get_service_log(
     if not service:
         raise HTTPException(status_code=404, detail="服务不存在")
     
-    if not service.log_path:
-        return ResponseModel(data={"content": "未配置日志路径"}, code=400)
-    
     try:
         ssh = await ssh_pool.get_connection(service.ip, service.ssh_port or 22, service.username, decrypt(service.password))
         if not ssh:
             return ResponseModel(data={"content": "无法建立SSH连接"}, code=500)
         
-        program_dir = expand_home_path(service.program_path)
-        log_dir = service.log_path
-        
-        if filename:
-            log_file = f"{program_dir}/{log_dir}/{filename}"
-        else:
-            command = f"cd {program_dir}/{log_dir} && ls -t *.log 2>/dev/null | head -1"
-            output, error, success = await ssh.execute_command(command)
-            log_file = output.strip()
-            if not log_file:
+        # Docker部署处理
+        if service.deploy_type == 'DOCKER':
+            container_name = service.container_name
+            
+            # 如果有日志路径配置，说明是挂载的主机目录日志
+            if service.log_path and service.log_type == 'HOST_DIR':
+                program_dir = expand_home_path(service.program_path)
+                log_dir = service.log_path
+                
+                if filename:
+                    log_file = f"{program_dir}/{log_dir}/{filename}"
+                else:
+                    command = f"cd {program_dir}/{log_dir} && ls -t *.log 2>/dev/null | head -1"
+                    output, error, success = await ssh.execute_command(command)
+                    log_file = output.strip()
+                    if not log_file:
+                        ssh.close()
+                        return ResponseModel(data={"content": "日志目录下未找到日志文件"})
+                    log_file = f"{program_dir}/{log_dir}/{log_file}"
+                
+                if keyword:
+                    command = f"grep -n '{keyword}' {log_file} | tail -n {lines}"
+                else:
+                    command = f"tail -n {lines} {log_file}"
+                
+                content, error_output, success = await ssh.execute_command(command)
                 ssh.close()
-                return ResponseModel(data={"content": "日志目录下未找到日志文件"})
-            log_file = f"{program_dir}/{log_dir}/{log_file}"
+                
+                if error_output and not keyword:
+                    content = f"警告: {error_output}\n\n{content}"
+                
+                return ResponseModel(data={"content": content, "filename": filename or "latest.log"})
+            
+            # Docker Logs方式
+            else:
+                if not container_name:
+                    ssh.close()
+                    return ResponseModel(data={"content": "未配置容器名称，无法查看Docker日志"}, code=400)
+                
+                if keyword:
+                    command = f"docker logs {container_name} 2>&1 | grep -n '{keyword}' | tail -n {lines}"
+                else:
+                    command = f"docker logs --tail {lines} {container_name} 2>&1"
+                
+                content, error_output, success = await ssh.execute_command(command)
+                ssh.close()
+                
+                if error_output and not success:
+                    content = f"错误: {error_output}"
+                
+                return ResponseModel(data={"content": content, "filename": "docker.log"})
         
-        if keyword:
-            command = f"grep -n '{keyword}' {log_file} | tail -n {lines}"
+        # 主机部署处理（原有逻辑）
         else:
-            command = f"tail -n {lines} {log_file}"
-        
-        content, error_output, success = await ssh.execute_command(command)
-        
-        ssh.close()
-        
-        if error_output and not keyword:
-            content = f"警告: {error_output}\n\n{content}"
-        
-        return ResponseModel(data={"content": content, "filename": filename or "latest.log"})
+            if not service.log_path:
+                ssh.close()
+                return ResponseModel(data={"content": "未配置日志路径"}, code=400)
+            
+            program_dir = expand_home_path(service.program_path)
+            log_dir = service.log_path
+            
+            if filename:
+                log_file = f"{program_dir}/{log_dir}/{filename}"
+            else:
+                command = f"cd {program_dir}/{log_dir} && ls -t *.log 2>/dev/null | head -1"
+                output, error, success = await ssh.execute_command(command)
+                log_file = output.strip()
+                if not log_file:
+                    ssh.close()
+                    return ResponseModel(data={"content": "日志目录下未找到日志文件"})
+                log_file = f"{program_dir}/{log_dir}/{log_file}"
+            
+            if keyword:
+                command = f"grep -n '{keyword}' {log_file} | tail -n {lines}"
+            else:
+                command = f"tail -n {lines} {log_file}"
+            
+            content, error_output, success = await ssh.execute_command(command)
+            ssh.close()
+            
+            if error_output and not keyword:
+                content = f"警告: {error_output}\n\n{content}"
+            
+            return ResponseModel(data={"content": content, "filename": filename or "latest.log"})
     except Exception as e:
         return ResponseModel(data={"content": f"读取日志失败: {str(e)}"}, code=500)
 

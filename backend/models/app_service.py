@@ -23,8 +23,7 @@ ServiceType = Enum(
 # 部署方式枚举
 DeployType = Enum(
     'HOST', 
-    'DOCKER', 
-    'CLUSTER',
+    'DOCKER',
     name='deploy_type'
 )
 
@@ -62,6 +61,7 @@ class AppService(Base):
     port_mapping = Column(String(500), comment='端口映射')
     volume_mapping = Column(String(1000), comment='Volume挂载')
     network_mode = Column(String(100), comment='网络模式')
+    log_type = Column(String(50), comment='日志类型: HOST_DIR/DOCKER_LOGS')
     
     # 集群相关字段
     cluster_name = Column(String(255), comment='集群名称')
