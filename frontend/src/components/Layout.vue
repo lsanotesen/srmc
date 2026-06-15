@@ -138,7 +138,7 @@ const menu = computed(() => {
       ]
     },
     { id: 'servers', name: '服务器管理', icon: 'computer', path: '/servers', children: [] },
-    { id: 'logs', name: '日志中心', icon: 'file-text', path: '/logs', children: [] },
+    { id: 'monitoring', name: '监控中心', icon: 'cpu', path: '/monitoring', children: [] },
     { id: 'audit', name: '审计日志', icon: 'file-search', path: '/audit', children: [] },
     { id: 'users', name: '用户管理', icon: 'users', path: '/users', children: [] },
     { id: 'settings', name: '系统设置', icon: 'settings', path: '/settings', children: [] }

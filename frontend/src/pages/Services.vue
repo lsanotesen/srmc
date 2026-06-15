@@ -341,8 +341,8 @@ const filters = reactive({
 const showAddDialog = ref(false);
 const showDetailDialog = ref(false);
 const showLogDialog = ref(false);
-const showShellDialog = ref(false);
 const showImportDialog = ref(false);
+const showShellDialog = ref(false);
 const importFile = ref(null);
 const selectedService = reactive({});
 const selectedLogService = ref(null);
@@ -817,6 +817,7 @@ const doImport = async () => {
  ElMessage.error(error.response?.data?.message || '导入失败');
  }
 };
+
 let websocket = null;
 const webShell = (service) => {
  console.log('Opening shell for service:', service);
@@ -826,7 +827,6 @@ const webShell = (service) => {
  shellConnected.value = false;
  showShellDialog.value = true;
  
- // 自动连接
  setTimeout(() => {
  connectShell();
  }, 100);

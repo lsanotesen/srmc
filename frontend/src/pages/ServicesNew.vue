@@ -346,22 +346,136 @@
         <el-tag v-else class="disconnected-tag">未连接</el-tag>
         <el-button @click="connectShell" v-if="!shellConnected" type="primary">连接</el-button>
         <el-button @click="disconnectShell" v-else type="danger">断开</el-button>
+        <el-tabs v-model="shellActiveTab" class="shell-tabs">
+          <el-tab-pane label="终端" name="terminal">
+          </el-tab-pane>
+          <el-tab-pane label="文件管理" name="files">
+          </el-tab-pane>
+        </el-tabs>
       </div>
       <div class="shell-container" ref="shellContainer">
-        <div class="shell-output" ref="shellOutput" v-html="shellOutputText"></div>
-        <div class="shell-input-wrapper">
-          <span class="shell-prompt">{{ shellPrompt }}</span>
-          <input 
-            ref="shellInput"
-            v-model="shellInputText" 
-            class="shell-input" 
-            @keydown.enter="sendShellCommand"
-            placeholder="输入命令..."
-            :disabled="!shellConnected"
-          />
+        <div v-show="shellActiveTab === 'terminal'" ref="terminalRef" class="terminal-container"></div>
+        <div v-show="shellActiveTab === 'files'" class="file-manager">
+          <div class="file-manager-panels">
+            <!-- 左侧：本地文件 -->
+            <div class="file-panel local-panel">
+              <div class="panel-header">
+                <span class="panel-title">📁 本地文件</span>
+                <input type="file" ref="uploadFileInput" class="upload-input" @change="handleFileUpload" multiple webkitdirectory directory />
+                <el-button @click="triggerUpload" size="small">选择文件</el-button>
+              </div>
+              <div class="panel-body">
+                <div v-if="localFiles.length === 0" class="empty-state">
+                  <p>点击上方按钮选择本地文件</p>
+                  <p style="font-size: 12px; color: #999;">或拖拽文件到此处</p>
+                </div>
+                <el-table :data="localFiles" class="file-table" v-else>
+                  <el-table-column prop="name" label="文件名">
+                    <template #default="scope">
+                      <span class="file-icon">📄</span>
+                      {{ scope.row.name }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="size" label="大小">
+                    <template #default="scope">{{ formatFileSize(scope.row.size) }}</template>
+                  </el-table-column>
+                  <el-table-column label="操作">
+                    <template #default="scope">
+                      <el-button @click="uploadSelectedFile(scope.row)" size="small" type="primary">上传</el-button>
+                      <el-button @click="removeLocalFile(scope.$index)" size="small" type="danger">移除</el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
+              <div class="drop-zone" @drop.prevent="handleDrop" @dragover.prevent>
+                <span>📥 拖拽文件到此处上传</span>
+              </div>
+            </div>
+
+            <!-- 中间分隔线 -->
+            <div class="panel-divider">
+              <div class="divider-line"></div>
+            </div>
+
+            <!-- 右侧：远程文件 -->
+            <div class="file-panel remote-panel">
+              <div class="panel-header">
+                <span class="panel-title">🖥️ 远程文件</span>
+                <div class="header-actions">
+                  <el-button 
+                    @click="goBack" 
+                    size="small" 
+                    :disabled="pathHistoryIndex <= 0"
+                    title="后退"
+                  >◀</el-button>
+                  <el-button 
+                    @click="goForward" 
+                    size="small" 
+                    :disabled="pathHistoryIndex >= pathHistory.length - 1"
+                    title="前进"
+                  >▶</el-button>
+                  <el-input v-model="currentRemotePath" placeholder="远程路径" class="path-input" @keyup.enter="listRemoteFiles" />
+                  <el-button @click="listRemoteFiles" size="small" type="primary">刷新</el-button>
+                  <el-button @click="createRemoteDir" size="small">新建文件夹</el-button>
+                </div>
+              </div>
+              <div class="panel-body" @contextmenu="handlePanelContextMenuNew">
+                <el-table 
+                  :data="remoteFiles" 
+                  class="file-table" 
+                  ref="remoteFileTable"
+                >
+                  <el-table-column prop="filename" label="文件名">
+                    <template #default="scope">
+                      <span v-if="scope.row.filename === '..'" class="dir-icon">⬆️</span>
+                      <span v-else-if="scope.row.is_directory" class="dir-icon">📁</span>
+                      <span v-else class="file-icon">📄</span>
+                      <span 
+                        @click="scope.row.is_directory && navigateToDir(scope.row.filename)"
+                        @dblclick="scope.row.is_directory && navigateToDir(scope.row.filename)"
+                        :class="{ 'dir-clickable': scope.row.is_directory }"
+                      >{{ scope.row.filename }}</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="size" label="大小">
+                    <template #default="scope">{{ scope.row.is_directory ? '-' : formatFileSize(scope.row.size) }}</template>
+                  </el-table-column>
+                  <el-table-column prop="modify_time" label="修改时间">
+                    <template #default="scope">{{ formatTime(scope.row.modify_time) }}</template>
+                  </el-table-column>
+                  <el-table-column label="操作">
+                    <template #default="scope">
+                      <el-button v-if="!scope.row.is_directory" @click="downloadRemoteFile(scope.row.filename)" size="small">下载</el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </el-dialog>
+
+    <!-- 右键菜单 -->
+    <el-menu
+      v-if="contextMenuVisible"
+      :style="{ left: contextMenuPosition.x + 'px', top: contextMenuPosition.y + 'px' }"
+      class="context-menu"
+      mode="vertical"
+    >
+      <el-menu-item v-if="contextMenuFile && !contextMenuFile.is_directory" @click="handleContextMenuDownload">
+        <span>📥 下载</span>
+      </el-menu-item>
+      <el-menu-item v-if="contextMenuFile && contextMenuFile.filename !== '..'" @click="handleContextMenuRename">
+        <span>✏️ 重命名</span>
+      </el-menu-item>
+      <el-menu-item v-if="contextMenuFile" @click="handleContextMenuCopy">
+        <span>📋 复制路径</span>
+      </el-menu-item>
+      <el-menu-item v-if="contextMenuFile && contextMenuFile.filename !== '..'" @click="handleContextMenuDelete">
+        <span>🗑️ 删除</span>
+      </el-menu-item>
+    </el-menu>
 
     <el-dialog title="导入服务" v-model="showImportDialog">
       <el-upload
@@ -383,9 +497,12 @@
 
 <script setup>
 import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox, ElMenu, ElMenuItem } from 'element-plus';
 import axios from '@/utils/axios';
 import ProjectTree from '@/components/ProjectTree.vue';
+import { Terminal } from 'xterm';
+import { FitAddon } from 'xterm-addon-fit';
+import 'xterm/css/xterm.css';
 
 const services = ref([]);
 const selectedServices = ref([]);
@@ -416,12 +533,24 @@ const showImportDialog = ref(false);
 const showShellDialog = ref(false);
 const importFile = ref(null);
 const selectedService = reactive({});
-const selectedLogService = ref(null);
 const currentShellService = ref(null);
 const shellConnected = ref(false);
-const shellOutputText = ref('');
-const shellInputText = ref('');
-const shellPrompt = ref('$');
+const terminalRef = ref(null);
+let terminal = null;
+let fitAddon = null;
+const shellActiveTab = ref('terminal');
+const remoteFiles = ref([]);
+const currentRemotePath = ref('/');
+const pathHistory = ref(['/']);
+const pathHistoryIndex = ref(0);
+const uploadFileInput = ref(null);
+const localFiles = ref([]);
+const selectedLogService = ref(null);
+
+// 右键菜单相关
+const contextMenuVisible = ref(false);
+const contextMenuPosition = ref({ x: 0, y: 0 });
+const contextMenuFile = ref(null);
 const logLines = ref(200);
 const logContentText = ref('');
 const logFiles = ref([]);
@@ -1251,16 +1380,102 @@ const doImport = async () => {
 };
 
 let websocket = null;
+
+const initTerminal = () => {
+  if (terminal) {
+    terminal.dispose();
+  }
+  
+  terminal = new Terminal({
+    fontSize: 14,
+    fontFamily: 'Consolas, Monaco, "Courier New", monospace',
+    cursorBlink: true,
+    scrollback: 1000,
+    convertEol: true,
+    disableStdin: false,
+    theme: {
+      background: '#1e1e1e',
+      foreground: '#d4d4d4',
+      cursor: '#d4d4d4',
+      selection: '#264f78',
+      black: '#000000',
+      red: '#ff0000',
+      green: '#00ff00',
+      yellow: '#ffff00',
+      blue: '#0000ff',
+      magenta: '#ff00ff',
+      cyan: '#00ffff',
+      white: '#ffffff',
+      brightBlack: '#808080',
+      brightRed: '#ff0000',
+      brightGreen: '#00ff00',
+      brightYellow: '#ffff00',
+      brightBlue: '#0000ff',
+      brightMagenta: '#ff00ff',
+      brightCyan: '#00ffff',
+      brightWhite: '#ffffff'
+    }
+  });
+  
+  fitAddon = new FitAddon();
+  terminal.loadAddon(fitAddon);
+  
+  terminal.open(terminalRef.value);
+  
+  // 确保终端容器有正确的尺寸和焦点
+  setTimeout(() => {
+    fitAddon.fit();
+    // 直接聚焦到 xterm 的 textarea 输入元素
+    const textarea = terminalRef.value?.querySelector('.xterm-helper-textarea');
+    if (textarea) {
+      textarea.focus();
+    }
+    terminal.focus();
+  }, 200);
+  
+  terminal.onData((data) => {
+    console.log('Terminal onData:', data, 'websocket:', !!websocket, 'connected:', shellConnected.value);
+    // 不进行本地回显，让后端bash处理所有输出
+    if (websocket && shellConnected.value) {
+      websocket.send(data);
+      console.log('Sent data to websocket');
+    }
+  });
+  
+  terminal.onResize((size) => {
+    if (fitAddon) {
+      fitAddon.fit();
+    }
+  });
+  
+  // 直接为终端容器添加点击事件，确保聚焦到 textarea
+  terminalRef.value?.addEventListener('click', () => {
+    const textarea = terminalRef.value?.querySelector('.xterm-helper-textarea');
+    if (textarea) {
+      textarea.focus();
+    }
+    terminal.focus();
+  }, true);
+  
+  // 窗口resize时重新适配
+  window.addEventListener('resize', () => {
+    if (fitAddon && terminal) {
+      fitAddon.fit();
+    }
+  });
+};
+
 const webShell = (service) => {
   console.log('Opening shell for service:', service);
   currentShellService.value = service;
-  shellOutputText.value = '';
-  shellInputText.value = '';
   shellConnected.value = false;
   showShellDialog.value = true;
   
-  // 自动连接
+  // 设置默认远程目录为程序路径，如果没有则使用根目录
+  currentRemotePath.value = service.program_path || '/';
+  
   setTimeout(() => {
+    initTerminal();
     connectShell();
   }, 100);
 };
@@ -1268,51 +1483,65 @@ const webShell = (service) => {
 const connectShell = () => {
   if (!currentShellService.value) return;
   
-  const token = localStorage.getItem('token');
-  console.log('Connecting to WebSocket, token:', !!token);
-  if (!token) {
-    shellOutputText.value += '[错误] 未找到认证token，请重新登录\n';
+  // 防止重复连接
+  if (websocket && websocket.readyState === WebSocket.OPEN) {
+    console.log('WebSocket already connected');
     return;
   }
   
-  shellOutputText.value += '[正在连接服务器...]\n';
+  const token = localStorage.getItem('token');
+  console.log('Connecting to WebSocket, token:', !!token);
+  if (!token) {
+    terminal.write('[错误] 未找到认证token，请重新登录\r\n');
+    return;
+  }
+  
+  terminal.write('[正在连接服务器...]\r\n');
   
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${wsProtocol}//${window.location.host}/api/shell/ws/${currentShellService.value.id}?token=${token}`;
   console.log('WebSocket URL:', wsUrl);
   websocket = new WebSocket(wsUrl);
   
+  websocket.binaryType = 'arraybuffer';
+  
   websocket.onopen = () => {
     console.log('WebSocket connected');
     shellConnected.value = true;
-    shellOutputText.value += '[已连接到服务器]\n';
-    shellPrompt.value = '$ ';
+    // 连接成功后强制聚焦终端的 textarea 输入元素
+    setTimeout(() => {
+      if (terminalRef.value) {
+        // xterm 使用 textarea 接收输入，直接聚焦到 textarea
+        const textarea = terminalRef.value.querySelector('.xterm-helper-textarea');
+        if (textarea) {
+          textarea.focus();
+          console.log('Focused on xterm textarea');
+        }
+      }
+      if (terminal) {
+        terminal.focus();
+      }
+    }, 500);
   };
   
   websocket.onmessage = (event) => {
     console.log('WebSocket received:', event.data);
-    let output = event.data;
-    output = output.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    output = output.replace(/\n/g, '<br>').replace(/\r/g, '');
-    output = output.replace(/ /g, '&nbsp;');
-    shellOutputText.value += output;
-    setTimeout(() => {
-      const shellOutput = document.querySelector('.shell-output');
-      if (shellOutput) {
-        shellOutput.scrollTop = shellOutput.scrollHeight;
-      }
-    }, 10);
+    if (event.data instanceof ArrayBuffer) {
+      terminal.write(new Uint8Array(event.data));
+    } else {
+      terminal.write(event.data);
+    }
   };
   
   websocket.onerror = (error) => {
     console.error('WebSocket error:', error);
-    shellOutputText.value += `[错误] 连接失败\n`;
+    terminal.write('[错误] 连接失败\r\n');
     shellConnected.value = false;
   };
   
   websocket.onclose = (event) => {
     console.log('WebSocket closed:', event.code, event.reason);
-    shellOutputText.value += `[断开] 连接已关闭 (Code: ${event.code})\n`;
+    terminal.write(`[断开] 连接已关闭 (Code: ${event.code})\r\n`);
     shellConnected.value = false;
     websocket = null;
   };
@@ -1324,18 +1553,530 @@ const disconnectShell = () => {
   }
 };
 
-const sendShellCommand = () => {
-  if (!websocket || !shellConnected.value || !shellInputText.value.trim()) return;
-  
-  const command = shellInputText.value;
-  shellOutputText.value += `<span class="command">${shellInputText.value}</span><br>`;
-  websocket.send(command + '\n');
-  shellInputText.value = '';
-};
-
 const handleShellClose = () => {
   disconnectShell();
+  if (terminal) {
+    terminal.dispose();
+    terminal = null;
+  }
   showShellDialog.value = false;
+};
+
+const listRemoteFiles = async () => {
+  if (!currentShellService.value) return;
+  try {
+    const response = await axios.get(`/api/sftp/listdir`, {
+      params: {
+        service_id: currentShellService.value.id,
+        path: currentRemotePath.value
+      }
+    });
+    if (response.data.code === 0) {
+      remoteFiles.value = response.data.data.files;
+    } else {
+      ElMessage.error(response.data.message || '获取文件列表失败');
+    }
+  } catch (error) {
+    ElMessage.error('获取文件列表失败');
+  }
+};
+
+const navigateToDir = (dirName) => {
+  let newPath = currentRemotePath.value;
+  if (dirName === '..') {
+    const parts = currentRemotePath.value.split('/').filter(p => p);
+    parts.pop();
+    newPath = '/' + parts.join('/');
+  } else {
+    if (currentRemotePath.value === '/') {
+      newPath = '/' + dirName;
+    } else {
+      newPath += '/' + dirName;
+    }
+  }
+  
+  // 更新路径历史
+  if (newPath !== currentRemotePath.value) {
+    // 清除当前位置之后的历史记录
+    pathHistory.value = pathHistory.value.slice(0, pathHistoryIndex.value + 1);
+    // 添加新路径
+    pathHistory.value.push(newPath);
+    pathHistoryIndex.value = pathHistory.value.length - 1;
+    currentRemotePath.value = newPath;
+    listRemoteFiles();
+  }
+};
+
+const goBack = () => {
+  if (pathHistoryIndex.value > 0) {
+    pathHistoryIndex.value--;
+    currentRemotePath.value = pathHistory.value[pathHistoryIndex.value];
+    listRemoteFiles();
+  }
+};
+
+const goForward = () => {
+  if (pathHistoryIndex.value < pathHistory.value.length - 1) {
+    pathHistoryIndex.value++;
+    currentRemotePath.value = pathHistory.value[pathHistoryIndex.value];
+    listRemoteFiles();
+  }
+};
+
+const downloadRemoteFile = async (fileName) => {
+  if (!currentShellService.value) return;
+  const fullPath = currentRemotePath.value === '/' ? '/' + fileName : currentRemotePath.value + '/' + fileName;
+  try {
+    const response = await axios.get(`/api/sftp/download`, {
+      params: {
+        service_id: currentShellService.value.id,
+        remote_path: fullPath
+      },
+      responseType: 'blob'
+    });
+    const blob = new Blob([response.data]);
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+  } catch (error) {
+    ElMessage.error('下载文件失败');
+  }
+};
+
+const deleteRemoteFile = async (fileName) => {
+  if (!currentShellService.value) return;
+  
+  ElMessageBox.confirm(
+    `确定要删除 "${fileName}" 吗？此操作无法撤销。`,
+    '确认删除',
+    {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning'
+    }
+  ).then(async () => {
+    const fullPath = currentRemotePath.value === '/' ? '/' + fileName : currentRemotePath.value + '/' + fileName;
+    try {
+      await axios.delete(`/api/sftp/delete`, {
+        params: {
+          service_id: currentShellService.value.id,
+          remote_path: fullPath
+        }
+      });
+      ElMessage.success('删除成功');
+      listRemoteFiles();
+    } catch (error) {
+      ElMessage.error('删除失败');
+    }
+  }).catch(() => {
+    ElMessage.info('已取消删除');
+  });
+};
+
+const showContextMenu = (event, row, column, cell) => {
+  // 阻止浏览器默认右键菜单
+  event.preventDefault();
+  event.stopPropagation();
+  
+  // 只有在行数据存在时才显示菜单
+  if (!row || typeof row !== 'object') {
+    return;
+  }
+  
+  contextMenuFile.value = row;
+  contextMenuPosition.value = { x: event.clientX, y: event.clientY };
+  contextMenuVisible.value = true;
+  
+  // 点击其他地方关闭菜单
+  document.addEventListener('click', closeContextMenu);
+  document.addEventListener('contextmenu', closeContextMenu);
+};
+
+const showContextMenuDirect = (event, row) => {
+  // 直接处理右键菜单 - 支持 el-table 的 @row-contextmenu 事件
+  event.preventDefault();
+  event.stopPropagation();
+  
+  // 检查 row 是否有效
+  if (!row || typeof row !== 'object' || !row.filename) {
+    return;
+  }
+  
+  contextMenuFile.value = row;
+  contextMenuPosition.value = { x: event.clientX, y: event.clientY };
+  contextMenuVisible.value = true;
+  
+  document.addEventListener('click', closeContextMenu);
+  document.addEventListener('contextmenu', closeContextMenu);
+};
+
+const handleTableRowContextMenu = (event, row) => {
+  // 处理表格行右键菜单
+  // event 是原生事件对象
+  const nativeEvent = event;
+  
+  // 阻止浏览器默认右键菜单
+  nativeEvent.preventDefault();
+  nativeEvent.stopPropagation();
+  
+  // 检查 row 是否有效
+  if (!row || typeof row !== 'object' || !row.filename) {
+    return;
+  }
+  
+  contextMenuFile.value = row;
+  contextMenuPosition.value = { x: nativeEvent.clientX, y: nativeEvent.clientY };
+  contextMenuVisible.value = true;
+  
+  document.addEventListener('click', closeContextMenu);
+  document.addEventListener('contextmenu', closeContextMenu);
+};
+
+const handleTableRowContextMenuNative = (event) => {
+  // 使用原生事件处理右键菜单
+  event.preventDefault();
+  event.stopPropagation();
+  
+  // 通过点击位置查找对应的表格行
+  let target = event.target;
+  let rowElement = null;
+  
+  // 向上查找表格行
+  while (target && !rowElement) {
+    if (target.tagName === 'TR') {
+      rowElement = target;
+    } else {
+      target = target.parentElement;
+    }
+  }
+  
+  // 如果找到了行，获取行索引
+  if (rowElement) {
+    const table = rowElement.parentElement.parentElement;
+    const rows = Array.from(table.querySelectorAll('tbody tr'));
+    const rowIndex = rows.indexOf(rowElement);
+    
+    // 获取对应的数据
+    if (rowIndex >= 0 && rowIndex < remoteFiles.value.length) {
+      const rowData = remoteFiles.value[rowIndex];
+      
+      contextMenuFile.value = rowData;
+      contextMenuPosition.value = { x: event.clientX, y: event.clientY };
+      contextMenuVisible.value = true;
+      
+      document.addEventListener('click', closeContextMenu);
+      document.addEventListener('contextmenu', closeContextMenu);
+    }
+  }
+};
+
+const handleTableRowContextMenuElement = (row, event) => {
+  // Element Plus @row-contextmenu 事件处理
+  // 参数顺序: (row, event)
+  // 阻止浏览器默认右键菜单
+  event.preventDefault();
+  event.stopPropagation();
+  
+  // 检查 row 是否有效
+  if (!row || typeof row !== 'object' || !row.filename) {
+    return;
+  }
+  
+  contextMenuFile.value = row;
+  contextMenuPosition.value = { x: event.clientX, y: event.clientY };
+  contextMenuVisible.value = true;
+  
+  document.addEventListener('click', closeContextMenu);
+  document.addEventListener('contextmenu', closeContextMenu);
+};
+
+const handleTableRowContextMenuFinal = (arg1, arg2) => {
+  // 处理右键菜单 - 自动识别参数顺序
+  let event, row;
+  
+  // 判断哪个是事件对象，哪个是行数据
+  if (arg1 && arg1.preventDefault) {
+    // arg1 是事件对象
+    event = arg1;
+    row = arg2;
+  } else if (arg2 && arg2.preventDefault) {
+    // arg2 是事件对象
+    event = arg2;
+    row = arg1;
+  } else {
+    // 无法识别，尝试使用第一个作为行数据
+    row = arg1;
+    event = arg2 || { clientX: 0, clientY: 0, preventDefault: () => {}, stopPropagation: () => {} };
+  }
+  
+  // 阻止浏览器默认右键菜单
+  event.preventDefault();
+  event.stopPropagation();
+  
+  // 检查 row 是否有效
+  if (!row || typeof row !== 'object' || !row.filename) {
+    return;
+  }
+  
+  contextMenuFile.value = row;
+  contextMenuPosition.value = { x: event.clientX, y: event.clientY };
+  contextMenuVisible.value = true;
+  
+  document.addEventListener('click', closeContextMenu);
+  document.addEventListener('contextmenu', closeContextMenu);
+};
+
+const handlePanelContextMenu = (event) => {
+  // 点击面板空白处关闭菜单
+  if (contextMenuVisible.value) {
+    closeContextMenu();
+  }
+};
+
+const handlePanelContextMenuNew = (event) => {
+  // 处理面板上的右键菜单 - 直接绑定到容器
+  event.preventDefault();
+  event.stopPropagation();
+  
+  // 通过点击位置查找对应的表格行
+  let target = event.target;
+  let rowElement = null;
+  
+  // 向上查找表格行
+  while (target && !rowElement) {
+    if (target.tagName === 'TR' || target.classList.contains('el-table__row')) {
+      rowElement = target;
+    } else {
+      target = target.parentElement;
+    }
+  }
+  
+  // 如果找到了行，获取行索引
+  if (rowElement) {
+    // 查找 tbody 中的所有行
+    const tbody = rowElement.closest('tbody');
+    if (tbody) {
+      const rows = Array.from(tbody.querySelectorAll('tr'));
+      const rowIndex = rows.indexOf(rowElement);
+      
+      // 获取对应的数据
+      if (rowIndex >= 0 && rowIndex < remoteFiles.value.length) {
+        const rowData = remoteFiles.value[rowIndex];
+        
+        contextMenuFile.value = rowData;
+        contextMenuPosition.value = { x: event.clientX, y: event.clientY };
+        contextMenuVisible.value = true;
+        
+        document.addEventListener('click', closeContextMenu);
+        document.addEventListener('contextmenu', closeContextMenu);
+        return;
+      }
+    }
+  }
+  
+  // 如果没有找到行数据，关闭菜单
+  closeContextMenu();
+};
+
+const closeContextMenu = () => {
+  contextMenuVisible.value = false;
+  document.removeEventListener('click', closeContextMenu);
+  document.removeEventListener('contextmenu', closeContextMenu);
+};
+
+const handleContextMenuRename = () => {
+  if (contextMenuFile.value && contextMenuFile.value.filename !== '..') {
+    const newName = prompt('请输入新文件名:', contextMenuFile.value.filename);
+    if (newName && newName.trim() && newName !== contextMenuFile.value.filename) {
+      renameRemoteFile(contextMenuFile.value.filename, newName.trim());
+    }
+  }
+  closeContextMenu();
+};
+
+const handleContextMenuCopy = () => {
+  if (contextMenuFile.value) {
+    const fullPath = currentRemotePath.value === '/' 
+      ? '/' + contextMenuFile.value.filename 
+      : currentRemotePath.value + '/' + contextMenuFile.value.filename;
+    
+    // 降级方案：直接使用 textarea 方法，兼容性更好
+    const textarea = document.createElement('textarea');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    textarea.value = fullPath;
+    document.body.appendChild(textarea);
+    textarea.select();
+    
+    try {
+      const successful = document.execCommand('copy');
+      if (successful) {
+        ElMessage.success('路径已复制到剪贴板');
+      } else {
+        ElMessage.error('复制失败，请手动复制');
+      }
+    } catch (err) {
+      ElMessage.error('复制失败，请手动复制');
+    }
+    
+    document.body.removeChild(textarea);
+  }
+  closeContextMenu();
+};
+
+const renameRemoteFile = async (oldName, newName) => {
+  if (!currentShellService.value) return;
+  const oldPath = currentRemotePath.value === '/' ? '/' + oldName : currentRemotePath.value + '/' + oldName;
+  const newPath = currentRemotePath.value === '/' ? '/' + newName : currentRemotePath.value + '/' + newName;
+  
+  try {
+    await axios.post(`/api/sftp/rename`, null, {
+      params: {
+        service_id: currentShellService.value.id,
+        old_path: oldPath,
+        new_path: newPath
+      }
+    });
+    ElMessage.success('重命名成功');
+    listRemoteFiles();
+  } catch (error) {
+    ElMessage.error('重命名失败');
+  }
+};
+
+const handleContextMenuDownload = () => {
+  if (contextMenuFile.value) {
+    downloadRemoteFile(contextMenuFile.value.filename);
+  }
+  closeContextMenu();
+};
+
+const handleContextMenuDelete = () => {
+  if (contextMenuFile.value) {
+    deleteRemoteFile(contextMenuFile.value.filename);
+  }
+  closeContextMenu();
+};
+
+const createRemoteDir = async () => {
+  if (!currentShellService.value) return;
+  const dirName = prompt('请输入新文件夹名称:');
+  if (!dirName) return;
+  const fullPath = currentRemotePath.value === '/' ? '/' + dirName : currentRemotePath.value + '/' + dirName;
+  try {
+    await axios.post(`/api/sftp/mkdir`, null, {
+      params: {
+        service_id: currentShellService.value.id,
+        remote_path: fullPath
+      }
+    });
+    ElMessage.success('创建成功');
+    listRemoteFiles();
+  } catch (error) {
+    ElMessage.error('创建失败');
+  }
+};
+
+const triggerUpload = () => {
+  uploadFileInput.value?.click();
+};
+
+const handleFileUpload = (event) => {
+  const files = event.target.files;
+  if (!files || files.length === 0) return;
+  
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    // 获取相对路径，用于保持目录结构
+    const relativePath = file.webkitRelativePath || file.name;
+    localFiles.value.push({
+      name: file.name,
+      size: file.size,
+      file: file,
+      relativePath: relativePath
+    });
+  }
+  
+  event.target.value = '';
+};
+
+const handleDrop = (event) => {
+  const files = event.dataTransfer.files;
+  if (!files || files.length === 0) return;
+  
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    localFiles.value.push({
+      name: file.name,
+      size: file.size,
+      file: file
+    });
+  }
+  
+  ElMessage.success(`已添加 ${files.length} 个文件`);
+};
+
+const removeLocalFile = (index) => {
+  localFiles.value.splice(index, 1);
+};
+
+const uploadSelectedFile = async (fileInfo) => {
+  if (!currentShellService.value) return;
+  if (!fileInfo.file) return;
+  
+  const formData = new FormData();
+  formData.append('file', fileInfo.file);
+  
+  // 计算远程路径（保持目录结构）
+  let remoteFilePath = currentRemotePath.value;
+  if (fileInfo.relativePath && fileInfo.relativePath !== fileInfo.name) {
+    // 如果有相对路径，说明是目录上传，保持目录结构
+    const pathParts = fileInfo.relativePath.split('/');
+    pathParts.shift(); // 移除第一个空元素（如果有的话）
+    pathParts.pop(); // 移除文件名
+    if (pathParts.length > 0) {
+      remoteFilePath = remoteFilePath.replace(/\/$/, '') + '/' + pathParts.join('/');
+    }
+  }
+  
+  try {
+    await axios.post(`/api/sftp/upload`, formData, {
+      params: {
+        service_id: currentShellService.value.id,
+        remote_path: remoteFilePath,
+        preserve_path: fileInfo.relativePath !== fileInfo.name ? 'true' : 'false'
+      },
+      headers: {
+        'Content-Type': 'multipart/form-data'
+      }
+    });
+    ElMessage.success(`文件 ${fileInfo.name} 上传成功`);
+    listRemoteFiles();
+    // 从本地列表移除已上传的文件
+    const index = localFiles.value.findIndex(f => f.name === fileInfo.name && f.size === fileInfo.size);
+    if (index > -1) {
+      localFiles.value.splice(index, 1);
+    }
+  } catch (error) {
+    ElMessage.error(`文件 ${fileInfo.name} 上传失败`);
+  }
+};
+
+const formatFileSize = (size) => {
+  if (size < 1024) return size + ' B';
+  if (size < 1024 * 1024) return (size / 1024).toFixed(2) + ' KB';
+  if (size < 1024 * 1024 * 1024) return (size / (1024 * 1024)).toFixed(2) + ' MB';
+  return (size / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+};
+
+const formatTime = (timestamp) => {
+  const date = new Date(timestamp * 1000);
+  return date.toLocaleString('zh-CN');
 };
 
 const getDeployType = (type) => {
@@ -1564,12 +2305,24 @@ onUnmounted(() => {
 }
 
 .shell-container {
-  background: #1f2937;
+  background: #1e1e1e;
   border-radius: 8px;
-  padding: 15px;
-  height: calc(100vh - 320px);
+  padding: 10px;
+  height: 500px;
   display: flex;
   flex-direction: column;
+  box-sizing: border-box;
+}
+
+.terminal-container {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-height: 400px;
+}
+
+.terminal-container:focus {
+  outline: none;
 }
 
 .shell-output {
@@ -1631,5 +2384,163 @@ onUnmounted(() => {
   background: #fee2e2;
   color: #991b1b;
   border: none;
+}
+
+.file-manager {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.file-manager-panels {
+  display: flex;
+  height: 100%;
+}
+
+.file-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #e5e5e5;
+}
+
+.local-panel {
+  border-right: none;
+}
+
+.remote-panel {
+  border-left: none;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #f5f5f5;
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.panel-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.path-input {
+  flex: 1;
+  max-width: 200px;
+}
+
+.upload-input {
+  display: none;
+}
+
+.panel-body {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.file-table {
+  height: 100%;
+}
+
+.dir-icon, .file-icon {
+  margin-right: 6px;
+}
+
+.file-table .el-table__row {
+  cursor: pointer;
+}
+
+.file-table .el-table__row:hover {
+  background-color: #f9fafb;
+}
+
+.panel-divider {
+  width: 6px;
+  background-color: #e5e5e5;
+  cursor: col-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.divider-line {
+  width: 2px;
+  height: 30px;
+  background-color: #ccc;
+  border-radius: 1px;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: #999;
+}
+
+.drop-zone {
+  padding: 15px;
+  border-top: 1px dashed #ccc;
+  text-align: center;
+  color: #999;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.3s;
+}
+
+.drop-zone:hover {
+  background-color: #f9fafb;
+  color: #666;
+}
+
+.dir-clickable {
+  cursor: pointer;
+  color: #409eff;
+  text-decoration: underline;
+}
+
+.dir-clickable:hover {
+  color: #67c23a;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1;
+}
+
+.header-actions .path-input {
+  flex: 1;
+  min-width: 200px;
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 120px;
+  border: 1px solid #e4e7ed;
+  border-radius: 4px;
+  background: #fff;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+  padding: 5px 0;
+}
+
+.context-menu .el-menu-item {
+  padding: 8px 20px;
+  font-size: 14px;
+  color: #606266;
+  cursor: pointer;
+}
+
+.context-menu .el-menu-item:hover {
+  background-color: #f5f7fa;
+  color: #409eff;
 }
 </style>

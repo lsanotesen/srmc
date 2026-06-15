@@ -17,7 +17,7 @@ export default defineConfig({
         target: 'http://srmc-backend:8000',
         changeOrigin: true
       },
-      '/ws': {
+      '/api/shell/ws': {
         target: 'ws://srmc-backend:8000',
         ws: true,
         changeOrigin: true

@@ -2,5 +2,4 @@ from services.auth_service import authenticate_user, create_access_token, verify
 from services.audit_service import log_audit, clean_expired_audit_logs
 from services.monitor_service import check_service_status, update_all_service_statuses, get_service_status
 from services.batch_service import execute_service_operation
-from services.log_service import get_log_content, tail_log
 from services.import_export_service import import_services

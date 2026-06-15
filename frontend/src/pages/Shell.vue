@@ -1,242 +1,201 @@
 <template>
   <div class="shell-page">
-    <div class="page-header">
-      <h2>WebShell</h2>
-      <div v-if="targetServiceName" class="target-info">
-        <el-tag type="primary" size="large">
-          <el-icon name="server" :size="14" />
-          {{ targetServiceName }}
-        </el-tag>
+    <div class="shell-header">
+      <el-tag type="primary">{{ serviceName }}</el-tag>
+      <el-tag v-if="connected" class="connected-tag">已连接</el-tag>
+      <el-tag v-else class="disconnected-tag">未连接</el-tag>
+      <el-button @click="connect" v-if="!connected" type="primary">连接</el-button>
+      <el-button @click="disconnect" v-else type="danger">断开</el-button>
+      <el-button @click="goBack" type="default">返回</el-button>
+    </div>
+    <div class="shell-container">
+      <div class="shell-output" ref="shellOutput" v-html="output"></div>
+      <div class="shell-input-wrapper">
+        <span class="shell-prompt">{{ prompt }}</span>
+        <input 
+          ref="shellInput"
+          v-model="input" 
+          class="shell-input" 
+          @keydown.enter="sendCommand"
+          placeholder="输入命令..."
+          :disabled="!connected"
+          autofocus
+        />
       </div>
-      <el-select v-model="selectedServiceId" placeholder="选择服务" class="service-select">
-        <el-option v-for="service in services" :key="service.id" :label="service.service_name" :value="service.id" />
-      </el-select>
-      <el-button @click="connect" :disabled="!selectedServiceId || connected" type="primary">连接</el-button>
-      <el-button @click="disconnect" :disabled="!connected" type="danger">断开</el-button>
-    </div>
-    
-    <div class="terminal-container">
-      <div ref="terminalRef" class="terminal"></div>
-    </div>
-    
-    <div class="status-bar" v-if="connected">
-      <span class="status connected">已连接</span>
-      <span class="host-info">{{ currentHost }}</span>
-    </div>
-    <div class="status-bar" v-else>
-      <span class="status disconnected">未连接</span>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import { useRoute } from 'vue-router'
-import { Terminal } from 'xterm'
-import { FitAddon } from 'xterm-addon-fit'
-import { ElMessage } from 'element-plus'
-import axios from '@/utils/axios'
+import { ref, onMounted, onUnmounted } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import { ElMessage } from 'element-plus';
 
-const route = useRoute()
-const services = ref([])
-const selectedServiceId = ref('')
-const selectedServerId = ref('')
-const terminalRef = ref(null)
-const connected = ref(false)
-const currentHost = ref('')
-const targetServiceName = ref('')
+const route = useRoute();
+const router = useRouter();
+const serviceId = ref(route.query.serviceId);
+const serviceName = ref(route.query.serviceName || '远程终端');
+const connected = ref(false);
+const output = ref('');
+const input = ref('');
+const prompt = ref('$ ');
+let websocket = null;
 
-let terminal = null
-let websocket = null
+const goBack = () => {
+  router.push('/dashboard');
+};
 
-async function loadServices() {
-  const token = localStorage.getItem('token')
-  const response = await axios.get('/api/services', {
-    headers: { Authorization: `Bearer ${token}` }
-  })
-  if (response.data.code === 0) {
-    services.value = response.data.data.filter(s => s.work_dir && s.server_id)
-    
-    if (route.query.serviceId) {
-      selectedServiceId.value = parseInt(route.query.serviceId)
-      selectedServerId.value = route.query.serverId || ''
-      targetServiceName.value = route.query.serviceName || ''
-    }
+const connect = () => {
+  const token = localStorage.getItem('token');
+  if (!token) {
+    ElMessage.error('请先登录');
+    router.push('/login');
+    return;
   }
-}
 
-function initTerminal() {
-  if (!terminalRef.value) return
+  output.value = '[正在连接服务器...]\n';
   
-  terminal = new Terminal({
-    fontSize: 14,
-    fontFamily: 'Monaco, Menlo, monospace',
-    theme: {
-      background: '#1f2937',
-      foreground: '#e5e7eb',
-      cursor: '#ffffff',
-      selection: '#4b5563'
-    }
-  })
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = `${wsProtocol}//${window.location.host}/api/shell/ws/${serviceId.value}?token=${token}`;
   
-  const fitAddon = new FitAddon()
-  terminal.loadAddon(fitAddon)
-  terminal.open(terminalRef.value)
-  fitAddon.fit()
-  
-  terminal.onData((data) => {
-    if (websocket) {
-      websocket.send(data)
-    }
-  })
-  
-  window.addEventListener('resize', () => {
-    fitAddon.fit()
-  })
-}
-
-function connect() {
-  if (!selectedServiceId.value && !selectedServerId.value) {
-    ElMessage.error('请选择服务')
-    return
-  }
-  
-  const service = services.value.find(s => s.id === selectedServiceId.value)
-  if (service) {
-    currentHost.value = `${service.ip}:${service.port || '22'}`
-  }
-  
-  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const targetId = selectedServerId.value || selectedServiceId.value
-  websocket = new WebSocket(`${wsProtocol}//${window.location.host}/api/shell/ws/${targetId}`)
+  websocket = new WebSocket(wsUrl);
   
   websocket.onopen = () => {
-    connected.value = true
-    terminal.write('\r\n[连接中] 正在连接到服务器...\r\n')
-  }
+    connected.value = true;
+    output.value += '[已连接到服务器]\n';
+    prompt.value = '$ ';
+  };
   
   websocket.onmessage = (event) => {
-    terminal.write(event.data)
-  }
+    let data = event.data;
+    data = data.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    data = data.replace(/\n/g, '<br>').replace(/\r/g, '');
+    data = data.replace(/ /g, '&nbsp;');
+    output.value += data;
+    
+    setTimeout(() => {
+      const shellOutput = document.querySelector('.shell-output');
+      if (shellOutput) {
+        shellOutput.scrollTop = shellOutput.scrollHeight;
+      }
+    }, 10);
+  };
   
   websocket.onerror = (error) => {
-    terminal.write('\r\n[错误] 连接失败: ' + error.message + '\r\n')
-    connected.value = false
-  }
+    console.error('WebSocket error:', error);
+    output.value += `[错误] 连接失败\n`;
+    connected.value = false;
+  };
   
-  websocket.onclose = () => {
-    terminal.write('\r\n[断开] 连接已关闭\r\n')
-    connected.value = false
-    websocket = null
-  }
-}
+  websocket.onclose = (event) => {
+    output.value += `[断开] 连接已关闭 (Code: ${event.code})\n`;
+    connected.value = false;
+    websocket = null;
+  };
+};
 
-function disconnect() {
+const disconnect = () => {
   if (websocket) {
-    websocket.close()
+    websocket.close();
   }
-}
+};
 
-watch(selectedServiceId, () => {
-  if (connected.value) {
-    disconnect()
-  }
-})
+const sendCommand = () => {
+  if (!websocket || !connected.value || !input.value.trim()) return;
+  
+  const command = input.value;
+  output.value += `<span class="command">${input.value}</span><br>`;
+  websocket.send(command + '\n');
+  input.value = '';
+};
 
-onMounted(async () => {
-  await loadServices()
-  nextTick(() => {
-    initTerminal()
-    if (selectedServiceId.value) {
-      connect()
-    }
-  })
-})
+onMounted(() => {
+  connect();
+});
 
 onUnmounted(() => {
-  disconnect()
-  if (terminal) {
-    terminal.dispose()
-  }
-})
+  disconnect();
+});
 </script>
 
 <style scoped>
 .shell-page {
-  padding: 20px;
-  height: calc(100vh - 140px);
+  height: 100%;
   display: flex;
   flex-direction: column;
+  background: #1e1e1e;
 }
 
-.page-header {
+.shell-header {
+  padding: 16px 20px;
+  background: #2d2d2d;
   display: flex;
   align-items: center;
-  gap: 15px;
-  margin-bottom: 20px;
-  flex-wrap: wrap;
+  gap: 12px;
+  border-bottom: 1px solid #3d3d3d;
 }
 
-.page-header h2 {
-  margin: 0;
-}
-
-.target-info {
-  display: flex;
-  align-items: center;
-}
-
-.target-info .el-tag {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 16px;
-  font-size: 14px;
-}
-
-.service-select {
-  width: 200px;
-}
-
-.terminal-container {
+.shell-container {
   flex: 1;
-  background: #1f2937;
-  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
 
-.terminal {
-  width: 100%;
-  height: 100%;
+.shell-output {
+  flex: 1;
+  padding: 20px;
+  overflow-y: auto;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+  font-size: 14px;
+  color: #d4d4d4;
+  line-height: 1.5;
 }
 
-.status-bar {
-  margin-top: 10px;
-  padding: 8px 15px;
-  background: #f3f4f6;
-  border-radius: 4px;
+.shell-output .command {
+  color: #4ec9b0;
+}
+
+.shell-input-wrapper {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  padding: 12px 20px;
+  background: #2d2d2d;
+  border-top: 1px solid #3d3d3d;
 }
 
-.status {
-  font-weight: bold;
-  padding: 4px 12px;
-  border-radius: 4px;
+.shell-prompt {
+  color: #4ec9b0;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+  font-size: 14px;
+  margin-right: 8px;
 }
 
-.status.connected {
-  background: #d1fae5;
-  color: #065f46;
+.shell-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #d4d4d4;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+  font-size: 14px;
 }
 
-.status.disconnected {
-  background: #fee2e2;
-  color: #991b1b;
+.shell-input::placeholder {
+  color: #6b6b6b;
 }
 
-.host-info {
-  color: #6b7280;
+.shell-input:disabled {
+  opacity: 0.5;
+}
+
+.connected-tag {
+  background: #52c41a;
+  color: #fff;
+}
+
+.disconnected-tag {
+  background: #ff4d4f;
+  color: #fff;
 }
 </style>

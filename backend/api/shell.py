@@ -1,155 +1,205 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query
 from sqlalchemy.orm import Session
-from models.service import Service
 from models.app_service import AppService
-from models.server import Server
-from models.user import User
 from utils.ssh_pool import ssh_pool
 from utils.crypto import decrypt
-from services.audit_service import log_audit
 from core.database import get_db
-from core.config import settings
-from jose import jwt
 import asyncio
+import logging
 
 router = APIRouter()
+logger = logging.getLogger("shell")
 
-async def get_current_user_ws(token: str, db: Session):
-    """WebSocket 认证 - 从 query 参数获取 token"""
-    try:
-        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            return None
-        user = db.query(User).filter(User.username == username).first()
-        if user is None or not user.is_active:
-            return None
-        return user
-    except Exception:
+
+async def authenticate_token(token: str, db: Session = None):
+    from services.auth_service import decode_access_token
+    payload = decode_access_token(token)
+    if not payload:
         return None
+    return payload.get("sub")
+
 
 @router.websocket("/shell/ws/{service_id}")
-async def websocket_shell(
-    websocket: WebSocket, 
-    service_id: int, 
+async def websocket_endpoint(
+    websocket: WebSocket,
+    service_id: int,
     token: str = Query(...),
     db: Session = Depends(get_db)
 ):
-    # 先认证用户
-    user = await get_current_user_ws(token, db)
-    if not user:
-        await websocket.accept()
-        await websocket.send_text("Authentication failed")
-        await websocket.close()
-        return
+    logger.info(f"WebSocket connection attempt for service_id: {service_id}")
     
-    await websocket.accept()
-    
-    # 先尝试从 AppService 表查找（服务管理页面使用的模型）
-    service = db.query(AppService).filter(AppService.id == service_id).first()
-    
-    if service:
-        # AppService 模型
-        ip = service.ip
-        ssh_port = service.ssh_port or 22
-        username = service.username
-        password = decrypt(service.password) if service.password else None
-        private_key = None
-        work_dir = service.program_path
-        service_code = service.func_desc
-        server_id = None
-        service_type = service.service_type
-        deploy_type = service.deploy_type
-        container_name = service.container_name
-        cluster_name = service.cluster_name
-        master_node = service.master_node
-        
-    else:
-        # 尝试从 Service 表查找（旧模型）
-        service = db.query(Service).filter(Service.id == service_id).first()
-        if not service:
-            await websocket.send_text("Service not found")
-            await websocket.close()
-            return
-        
-        server = db.query(Server).filter(Server.id == service.server_id).first()
-        if not server:
-            await websocket.send_text("Server not found")
-            await websocket.close()
-            return
-        
-        ip = server.ip
-        ssh_port = server.ssh_port or 22
-        username = server.username
-        password = decrypt(server.password) if server.password else None
-        private_key = decrypt(server.private_key) if server.private_key else None
-        work_dir = service.work_dir
-        service_code = service.service_code
-        server_id = server.id
-        service_type = 'HOST_APP'
-        deploy_type = 'HOST'
-        container_name = None
-        cluster_name = None
-        master_node = None
-    
-    # 根据服务类型决定连接地址
-    # ES/SOLR 服务连接到 master/leader 节点
-    if service_type in ['ES', 'SOLR'] and master_node:
-        ip = master_node
-    
-    conn = await ssh_pool.get_connection(ip, ssh_port, username, password, private_key)
-    if not conn:
-        await websocket.send_text("SSH connection failed")
-        await websocket.close()
-        return
-    
+    conn = None
     shell = None
-    buffer = ""
+    read_task = None
+    heartbeat_task = None
+    last_activity = asyncio.get_event_loop().time()
     
     try:
-        shell = await conn.invoke_shell()
+        await websocket.accept()
+        logger.info("WebSocket accepted")
         
-        # 根据服务类型执行不同的初始化命令
-        if service_type == 'DOCKER' and container_name:
-            # Docker服务：进入容器
-            shell.send(f"docker exec -it {container_name} bash 2>/dev/null || docker exec -it {container_name} sh\n")
-        elif service_type in ['ES', 'SOLR'] and work_dir:
-            # ES/SOLR服务：进入安装目录
-            shell.send(f"cd {work_dir}\n")
-        elif service_type == 'HOST_APP' and work_dir:
-            # Host应用服务：进入程序目录
-            shell.send(f"cd {work_dir}\n")
+        user_id = await authenticate_token(token, db)
+        if not user_id:
+            logger.warning("Invalid token")
+            await websocket.send_text("[错误] 无效的认证token")
+            await websocket.close(code=1008)
+            return
         
-        async def read_from_shell():
-            while True:
-                if shell.recv_ready():
-                    output = shell.recv(4096).decode('utf-8', errors='ignore')
-                    await websocket.send_text(output)
-                await asyncio.sleep(0.1)
-        
-        asyncio.create_task(read_from_shell())
-        
-        while True:
-            data = await websocket.receive_text()
-            buffer += data
+        try:
+            service = db.query(AppService).filter(AppService.id == service_id).first()
+            if not service:
+                logger.warning(f"Service not found in app_services: {service_id}")
+                await websocket.send_text("[错误] 服务不存在")
+                await websocket.close(code=1008)
+                return
             
-            if '\r' in buffer or '\n' in buffer:
-                commands = buffer.split('\r') if '\r' in buffer else buffer.split('\n')
-                for cmd in commands:
-                    if cmd.strip():
-                        log_audit(db, user.id, user.username, "SERVICE_REMOTE_LOGIN", 
-                                  service_code=service_code,
-                                  ip=ip, result="success", output=cmd.strip())
-                
+            logger.info(f"Found service: {service.func_desc}, IP: {service.ip}, Port: {service.ssh_port}")
+            
+        except Exception as db_error:
+            logger.error(f"Database error: {db_error}")
+            await websocket.send_text(f"[错误] 数据库连接失败: {str(db_error)[:50]}...")
+            await websocket.close(code=1011)
+            return
+        
+        logger.info(f"Connecting to server: {service.ip}:{service.ssh_port}")
+        
+        password = decrypt(service.password) if service.password else None
+        
+        try:
+            conn = await ssh_pool.get_connection(
+                service.ip, 
+                service.ssh_port, 
+                service.username, 
+                password, 
+                None
+            )
+            
+            if not conn:
+                logger.error(f"Failed to establish SSH connection to {service.ip}")
+                await websocket.send_text("[错误] 无法连接到服务器，请检查SSH配置")
+                await websocket.close(code=1011)
+                return
+            
+            # 请求PTY伪终端（关键！），没有PTY就没有命令补全、颜色等功能
+            shell = await conn.invoke_shell(term_type='xterm', width=120, height=40)
+            if not shell:
+                logger.error(f"Failed to invoke shell on {service.ip}")
+                await websocket.send_text("[错误] 无法打开shell会话")
+                conn.close()
+                await websocket.close(code=1011)
+                return
+            
+            logger.info(f"Shell session established for service {service_id}")
+            # 等待shell初始化完成，不需要发送换行，bash会自动显示提示符
+            await asyncio.sleep(0.5)
+            
+            # 如果有程序路径，自动cd到该目录
+            if service.program_path:
+                program_dir = service.program_path
+                if program_dir.startswith('~'):
+                    program_dir = program_dir.replace('~', '$HOME')
+                shell.send(f'cd {program_dir}\n')
+                logger.info(f"Auto cd to program path: {program_dir}")
+            
+            # 心跳任务：定期发送心跳防止连接断开
+            async def heartbeat():
+                nonlocal last_activity
+                while True:
+                    try:
+                        # 检查是否超过5分钟无活动
+                        if asyncio.get_event_loop().time() - last_activity > 300:
+                            logger.warning("Connection timeout due to inactivity")
+                            await websocket.send_text("[警告] 连接超时，即将断开...")
+                            break
+                        # 发送心跳（空消息或ping）
+                        await asyncio.sleep(30)
+                    except Exception as e:
+                        logger.debug(f"Heartbeat error: {e}")
+                        break
+            
+            heartbeat_task = asyncio.create_task(heartbeat())
+            
+            # 读取输出任务
+            async def read_output():
+                nonlocal last_activity
                 buffer = ""
+                while True:
+                    try:
+                        if shell.recv_ready():
+                            data = shell.recv(8192)
+                            if data:
+                                # 尝试解码，优先utf-8，失败则用gbk
+                                try:
+                                    output = data.decode('utf-8')
+                                except UnicodeDecodeError:
+                                    try:
+                                        output = data.decode('gbk')
+                                    except:
+                                        output = data.decode('utf-8', errors='replace')
+                                # 直接发送原始输出，不做任何修改
+                                await websocket.send_text(output)
+                                last_activity = asyncio.get_event_loop().time()
+                        await asyncio.sleep(0.02)
+                    except asyncio.CancelledError:
+                        break
+                    except Exception as e:
+                        logger.error(f"Error reading output: {e}")
+                        break
+                if buffer:
+                    await websocket.send_text(buffer)
             
-            shell.send(data)
-    
-    except WebSocketDisconnect:
-        pass
+            read_task = asyncio.create_task(read_output())
+            
+            # 主循环：接收客户端消息
+            try:
+                while True:
+                    data = await asyncio.wait_for(websocket.receive_text(), timeout=350)
+                    last_activity = asyncio.get_event_loop().time()
+                    logger.debug(f"Received command: {data[:50]}...")
+                    if data.strip().lower() == 'exit':
+                        break
+                    # 发送数据到shell（xterm会自动处理换行，不需要额外添加\n）
+                    shell.send(data)
+            except asyncio.TimeoutError:
+                logger.info("WebSocket timeout")
+            except WebSocketDisconnect:
+                logger.info("WebSocket disconnected by client")
+            except Exception as e:
+                logger.error(f"Error during WebSocket communication: {e}")
+                try:
+                    await websocket.send_text(f"[错误] {str(e)}")
+                except:
+                    pass
+            finally:
+                logger.info(f"Closing connection for service {service_id}")
+                
+        except Exception as ssh_error:
+            logger.error(f"SSH connection error: {ssh_error}")
+            await websocket.send_text(f"[错误] SSH连接失败: {str(ssh_error)[:50]}...")
+            await websocket.close(code=1011)
+            return
+            
+    except Exception as e:
+        logger.error(f"Unexpected error in WebSocket endpoint: {e}")
+        try:
+            await websocket.send_text(f"[错误] {str(e)[:50]}...")
+        except:
+            pass
     finally:
+        # 清理资源
+        if read_task:
+            read_task.cancel()
+        if heartbeat_task:
+            heartbeat_task.cancel()
         if shell:
-            shell.close()
-            log_audit(db, user.id, user.username, "SERVICE_REMOTE_LOGIN", 
-                      service_code=service_code, ip=ip, result="success", 
-                      output="Connection closed")
+            try:
+                shell.close()
+            except:
+                pass
+        if conn:
+            conn.close()
+        try:
+            await websocket.close()
+        except:
+            pass
+        logger.info(f"Connection fully closed for service {service_id}")

@@ -30,3 +30,10 @@ def authenticate_user(db: Session, login_request: LoginRequest):
     if not verify_password(login_request.password, user.password):
         return None
     return user
+
+def decode_access_token(token: str):
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        return payload
+    except JWTError:
+        return None

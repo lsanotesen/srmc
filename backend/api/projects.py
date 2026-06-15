@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, File, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload, joinedload
 from models.project import Project
 from models.subsystem_group_relation import SubsystemGroupRelation
 from schemas.project import ProjectCreate, ProjectUpdate, ProjectResponse
@@ -53,26 +53,22 @@ async def get_project_tree(
 ):
     from models.subsystem import Subsystem
     from models.service_group import ServiceGroup
+    from sqlalchemy import select, func
     
-    projects = db.query(Project).all()
+    # 使用预加载优化查询性能，避免N+1问题
+    projects = db.query(Project).options(
+        selectinload(Project.subsystems).joinedload(Subsystem.group_relations).joinedload(SubsystemGroupRelation.group)
+    ).all()
     
     result = []
     for project in projects:
-        subsystems = db.query(Subsystem).filter(Subsystem.project_id == project.id).order_by(Subsystem.display_order).all()
-        
         project_data = {
             "id": project.id,
             "name": project.name,
             "subsystems": []
         }
         
-        for subsystem in subsystems:
-            # 从关联表获取该子系统关联的分类ID
-            relations = db.query(SubsystemGroupRelation).filter(
-                SubsystemGroupRelation.subsystem_id == subsystem.id
-            ).all()
-            group_ids = [r.group_id for r in relations]
-            
+        for subsystem in project.subsystems:
             subsystem_data = {
                 "id": subsystem.id,
                 "subsystem_name": subsystem.subsystem_name,
@@ -80,14 +76,13 @@ async def get_project_tree(
                 "service_groups": []
             }
             
-            # 只返回该子系统关联的分类
-            if group_ids:
-                groups = db.query(ServiceGroup).filter(ServiceGroup.id.in_(group_ids)).all()
-                for group in groups:
+            # 通过预加载的关联关系获取服务组
+            for relation in subsystem.group_relations:
+                if relation.group:
                     subsystem_data["service_groups"].append({
-                        "id": group.id,
-                        "group_name": group.group_name,
-                        "group_code": group.group_code
+                        "id": relation.group.id,
+                        "group_name": relation.group.group_name,
+                        "group_code": relation.group.group_code
                     })
             
             project_data["subsystems"].append(subsystem_data)

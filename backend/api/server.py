@@ -12,9 +12,28 @@ from api.dependencies import get_current_user, require_permission
 router = APIRouter()
 
 @router.get("/servers", response_model=ResponseModel)
-async def get_servers(db: Session = Depends(get_db), user = Depends(require_permission("service_view"))):
-    servers = db.query(Server).all()
-    return ResponseModel(data=servers)
+async def get_servers(
+    db: Session = Depends(get_db),
+    user = Depends(require_permission("service_view")),
+    page: int = 1,
+    page_size: int = 20,
+    keyword: str | None = None,
+):
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 100)
+
+    query = db.query(Server)
+    if keyword:
+        like = f"%{keyword.strip()}%"
+        query = query.filter(
+            (Server.hostname.ilike(like))
+            | (Server.ip.ilike(like))
+            | (Server.username.ilike(like))
+        )
+
+    total = query.count()
+    servers = query.order_by(Server.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return ResponseModel(data={"items": servers, "total": total, "page": page, "page_size": page_size})
 
 @router.get("/servers/{server_id}", response_model=ResponseModel)
 async def get_server(server_id: int, db: Session = Depends(get_db), user = Depends(require_permission("service_view"))):

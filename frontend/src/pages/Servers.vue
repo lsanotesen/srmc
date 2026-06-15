@@ -1,28 +1,56 @@
 <template>
   <div class="servers-page">
     <div class="page-header">
-      <h2>服务器管理</h2>
-      <el-button type="success" @click="showAddDialog = true">
+      <div>
+        <h2>服务器管理</h2>
+        <p class="page-subtitle">当前支持几十台平稳使用，并为后续扩展到 100 台预留分页与检索能力。</p>
+      </div>
+      <el-button type="success" @click="openCreateDialog">
         <el-icon component="Plus" />
         新增服务器
       </el-button>
     </div>
-    
-    <el-table :data="servers" border>
-      <el-table-column prop="hostname" label="主机名" />
-      <el-table-column prop="ip" label="IP地址" />
-      <el-table-column prop="ssh_port" label="SSH端口" />
-      <el-table-column prop="username" label="用户名" />
-      <el-table-column prop="os_type" label="操作系统" />
-      <el-table-column prop="created_at" label="创建时间" />
-      <el-table-column label="操作">
+
+    <div class="toolbar">
+      <el-input
+        v-model="searchKeyword"
+        placeholder="按主机名 / IP / 用户名搜索"
+        clearable
+        style="max-width: 320px"
+        @clear="handleSearch"
+        @keyup.enter="handleSearch"
+      />
+      <el-button @click="handleSearch">搜索</el-button>
+    </div>
+
+    <el-table :data="servers" border v-loading="loading">
+      <el-table-column prop="hostname" label="主机名" min-width="140" />
+      <el-table-column prop="ip" label="IP地址" min-width="140" />
+      <el-table-column prop="ssh_port" label="SSH端口" width="100" />
+      <el-table-column prop="username" label="用户名" width="120" />
+      <el-table-column prop="os_type" label="操作系统" width="120" />
+      <el-table-column prop="created_at" label="创建时间" min-width="160" />
+      <el-table-column label="操作" width="220" fixed="right">
         <template #default="scope">
           <el-button size="small" @click="testConnection(scope.row)">测试连接</el-button>
           <el-button size="small" @click="editServer(scope.row)">编辑</el-button>
-          <el-button size="small" @click="deleteServer(scope.row)">删除</el-button>
+          <el-button size="small" type="danger" @click="deleteServer(scope.row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
+
+    <div class="pagination-wrap">
+      <el-pagination
+        background
+        layout="total, sizes, prev, pager, next, jumper"
+        :total="total"
+        :current-page="page"
+        :page-size="pageSize"
+        :page-sizes="[10, 20, 50, 100]"
+        @current-change="handlePageChange"
+        @size-change="handleSizeChange"
+      />
+    </div>
     
     <el-dialog title="新增/编辑服务器" :visible="showAddDialog" @close="resetForm">
       <el-form :model="serverForm" label-width="120px">
@@ -67,12 +95,17 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import axios from '@/utils/axios'
 
 const servers = ref([])
 const showAddDialog = ref(false)
 const authType = ref('password')
+const loading = ref(false)
+const searchKeyword = ref('')
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
 
 const serverForm = reactive({
   id: null,
@@ -99,6 +132,11 @@ function resetForm() {
   authType.value = 'password'
 }
 
+function openCreateDialog() {
+  resetForm()
+  showAddDialog.value = true
+}
+
 function toggleAuthType() {
   if (authType.value === 'password') {
     serverForm.private_key = ''
@@ -108,10 +146,40 @@ function toggleAuthType() {
 }
 
 async function loadServers() {
-  const response = await axios.get('/api/servers')
-  if (response.data.code === 0) {
-    servers.value = response.data.data
+  loading.value = true
+  try {
+    const response = await axios.get('/api/servers', {
+      params: {
+        page: page.value,
+        page_size: pageSize.value,
+        keyword: searchKeyword.value || undefined
+      }
+    })
+    if (response.data.code === 0) {
+      servers.value = response.data.data.items
+      total.value = response.data.data.total
+      page.value = response.data.data.page
+      pageSize.value = response.data.data.page_size
+    }
+  } finally {
+    loading.value = false
   }
+}
+
+function handleSearch() {
+  page.value = 1
+  loadServers()
+}
+
+function handlePageChange(nextPage) {
+  page.value = nextPage
+  loadServers()
+}
+
+function handleSizeChange(nextSize) {
+  pageSize.value = nextSize
+  page.value = 1
+  loadServers()
 }
 
 async function saveServer() {

@@ -102,8 +102,7 @@ async def get_user_menu(db: Session = Depends(get_db), user = Depends(get_curren
             ]
         },
         {"id": "servers", "name": "服务器管理", "icon": "computer", "path": "/servers", "children": []},
-        {"id": "logs", "name": "日志中心", "icon": "file-text", "path": "/logs", "children": []},
-        {"id": "shell", "name": "WebShell", "icon": "terminal", "path": "/shell", "children": []}
+        {"id": "monitoring", "name": "监控中心", "icon": "cpu", "path": "/monitoring", "children": []}
     ]
 
     service_types = db.query(Service.service_type).distinct().all()

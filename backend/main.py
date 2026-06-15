@@ -13,8 +13,8 @@ from api.service import router as service_router
 from api.processes import router as processes_router
 from api.programs import router as programs_router
 from api.monitor import router as monitor_router
-from api.log import router as log_router
 from api.shell import router as shell_router
+from api.sftp import router as sftp_router
 from api.sql import router as sql_router
 from api.es import router as es_router
 from api.user import router as user_router
@@ -25,6 +25,7 @@ from api.services import router as services_router
 from api.subsystems import router as subsystems_router
 from api.service_groups import router as service_groups_router
 from api.subsystem_groups import router as subsystem_groups_router
+from api.metrics import router as metrics_router
 from services.monitor_service import update_all_service_statuses
 from core.database import get_db
 from schemas.common import ResponseModel
@@ -81,8 +82,8 @@ app.include_router(service_router, prefix="/api/monitor", tags=["service"])
 app.include_router(processes_router, prefix="/api", tags=["processes"])
 app.include_router(programs_router, prefix="/api", tags=["programs"])
 app.include_router(monitor_router, prefix="/api", tags=["monitor"])
-app.include_router(log_router, prefix="/api", tags=["log"])
 app.include_router(shell_router, prefix="/api", tags=["shell"])
+app.include_router(sftp_router, prefix="/api/sftp", tags=["sftp"])
 app.include_router(sql_router, prefix="/api", tags=["sql"])
 app.include_router(es_router, prefix="/api", tags=["es"])
 app.include_router(user_router, prefix="/api", tags=["user"])
@@ -93,6 +94,7 @@ app.include_router(services_router, prefix="/api", tags=["services"])
 app.include_router(subsystems_router, prefix="/api", tags=["subsystems"])
 app.include_router(service_groups_router, prefix="/api", tags=["service_groups"])
 app.include_router(subsystem_groups_router, prefix="/api", tags=["subsystem_groups"])
+app.include_router(metrics_router, prefix="", tags=["metrics"])
 
 @app.get("/health")
 async def health_check(db: Session = Depends(get_db)):
