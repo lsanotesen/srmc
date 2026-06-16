@@ -81,7 +81,7 @@ async def websocket_endpoint(
                 return
             
             # 请求PTY伪终端（关键！），没有PTY就没有命令补全、颜色等功能
-            shell = await conn.invoke_shell(term_type='xterm', width=120, height=40)
+            shell = await conn.invoke_shell(term_type='xterm', width=80, height=24)
             if not shell:
                 logger.error(f"Failed to invoke shell on {service.ip}")
                 await websocket.send_text("[错误] 无法打开shell会话")

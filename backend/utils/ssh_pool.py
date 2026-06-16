@@ -89,11 +89,18 @@ class SSHConnection:
             if not transport or not transport.is_active():
                 return None
             
-            self.shell = self.client.invoke_shell(
+            # 使用transport打开session并请求PTY
+            self.shell = transport.open_session()
+            # 请求PTY伪终端
+            self.shell.get_pty(
                 term=term_type,
                 width=width,
-                height=height
+                height=height,
+                width_pixels=width * 8,
+                height_pixels=height * 24
             )
+            # 启动shell
+            self.shell.invoke_shell()
             self.shell.settimeout(0.05)
             self.last_used = datetime.now()
             return self.shell

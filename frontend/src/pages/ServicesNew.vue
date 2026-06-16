@@ -552,6 +552,7 @@ import axios from '@/utils/axios';
 import ProjectTree from '@/components/ProjectTree.vue';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
+import { WebLinksAddon } from 'xterm-addon-web-links';
 import 'xterm/css/xterm.css';
 
 const services = ref([]);
@@ -1449,35 +1450,41 @@ const initTerminal = () => {
     fontSize: 14,
     fontFamily: 'Consolas, Monaco, "Courier New", monospace',
     cursorBlink: true,
-    scrollback: 1000,
+    scrollback: 10000,
     convertEol: true,
     disableStdin: false,
+    rendererType: 'canvas',
+    screenKeys: true,
     theme: {
       background: '#1e1e1e',
       foreground: '#d4d4d4',
       cursor: '#d4d4d4',
       selection: '#264f78',
       black: '#000000',
-      red: '#ff0000',
-      green: '#00ff00',
-      yellow: '#ffff00',
-      blue: '#0000ff',
-      magenta: '#ff00ff',
-      cyan: '#00ffff',
-      white: '#ffffff',
-      brightBlack: '#808080',
-      brightRed: '#ff0000',
-      brightGreen: '#00ff00',
-      brightYellow: '#ffff00',
-      brightBlue: '#0000ff',
-      brightMagenta: '#ff00ff',
-      brightCyan: '#00ffff',
-      brightWhite: '#ffffff'
+      red: '#cd3131',
+      green: '#0dbc79',
+      yellow: '#e5e510',
+      blue: '#2472c8',
+      magenta: '#bc3fbc',
+      cyan: '#11a8cd',
+      white: '#e5e5e5',
+      brightBlack: '#666666',
+      brightRed: '#f14c4c',
+      brightGreen: '#23d18b',
+      brightYellow: '#f5f543',
+      brightBlue: '#3b8eea',
+      brightMagenta: '#d670d6',
+      brightCyan: '#29b8db',
+      brightWhite: '#e5e5e5'
     }
   });
   
   fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
+  
+  // 添加web链接支持
+  const webLinksAddon = new WebLinksAddon();
+  terminal.loadAddon(webLinksAddon);
   
   terminal.open(terminalRef.value);
   
@@ -2070,16 +2077,37 @@ const handleDirUpload = (event) => {
   const files = event.target.files;
   if (!files || files.length === 0) return;
   
+  console.log('选择目录:', files.length, '个文件');
+  
+  let addedCount = 0;
+  
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     // 获取相对路径，用于保持目录结构
-    const relativePath = file.webkitRelativePath || file.name;
-    localFiles.value.push({
-      name: file.name,
-      size: file.size,
-      file: file,
-      relativePath: relativePath
-    });
+    const relativePath = file.webkitRelativePath || file.webkitFullPath || file.name;
+    
+    // 检查是否已存在相同的文件（通过相对路径判断）
+    const exists = localFiles.value.some(f => f.relativePath === relativePath);
+    if (!exists) {
+      console.log('添加文件:', relativePath);
+      localFiles.value.push({
+        name: file.name,
+        size: file.size,
+        file: file,
+        relativePath: relativePath
+      });
+      addedCount++;
+    } else {
+      console.log('跳过重复文件:', relativePath);
+    }
+  }
+  
+  console.log('已添加到列表:', addedCount, '个新文件，总文件数:', localFiles.value.length);
+  
+  if (addedCount > 0) {
+    ElMessage.success(`已添加 ${addedCount} 个文件`);
+  } else {
+    ElMessage.info('所选目录中的文件已全部在列表中');
   }
   
   event.target.value = '';
