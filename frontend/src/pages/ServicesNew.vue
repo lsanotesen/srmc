@@ -361,8 +361,19 @@
             <div class="file-panel local-panel">
               <div class="panel-header">
                 <span class="panel-title">📁 本地文件</span>
-                <input type="file" ref="uploadFileInput" class="upload-input" @change="handleFileUpload" multiple webkitdirectory directory />
-                <el-button @click="triggerUpload" size="small">选择文件</el-button>
+                <input type="file" ref="uploadFileInput" class="upload-input" @change="handleFileUpload" multiple />
+                <input type="file" ref="uploadDirInput" class="upload-input" @change="handleDirUpload" multiple webkitdirectory directory />
+                <el-button @click="triggerFileUpload" size="small">选择文件</el-button>
+                <el-button @click="triggerDirUpload" size="small">选择目录</el-button>
+                <el-button 
+                  v-if="localFiles.length > 0" 
+                  @click="uploadAllFiles" 
+                  size="small" 
+                  type="primary"
+                  :disabled="uploadingAll"
+                >
+                  {{ uploadingAll ? '上传中...' : '全部上传' }}
+                </el-button>
               </div>
               <div class="panel-body">
                 <div v-if="localFiles.length === 0" class="empty-state">
@@ -370,10 +381,10 @@
                   <p style="font-size: 12px; color: #999;">或拖拽文件到此处</p>
                 </div>
                 <el-table :data="localFiles" class="file-table" v-else>
-                  <el-table-column prop="name" label="文件名">
+                  <el-table-column prop="relativePath" label="文件路径">
                     <template #default="scope">
                       <span class="file-icon">📄</span>
-                      {{ scope.row.name }}
+                      <span class="file-path">{{ scope.row.relativePath }}</span>
                     </template>
                   </el-table-column>
                   <el-table-column prop="size" label="大小">
@@ -454,6 +465,45 @@
           </div>
         </div>
       </div>
+    </el-dialog>
+
+    <!-- 文件覆盖确认对话框 -->
+    <el-dialog 
+      title="确认覆盖" 
+      v-model="overwriteDialogVisible" 
+      width="450px" 
+      :close-on-click-modal="false" 
+      :show-close="true"
+      append-to-body
+      style="z-index: 9999 !important;"
+      :before-close="handleOverwriteDialogClose"
+    >
+      <div style="margin-bottom: 15px;">
+        <p style="font-size: 14px; color: #666;">此文件夹已包含同名文件</p>
+        <p style="margin-top: 10px; font-size: 16px; font-weight: bold;">{{ overwriteDialogFile }}</p>
+      </div>
+      
+      <div style="margin-bottom: 20px; padding: 15px; background-color: #f5f5f5; border-radius: 4px;">
+        <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+          <span style="color: #999;">目标文件大小:</span>
+          <span>2.05 MB</span>
+        </div>
+        <div style="display: flex; justify-content: space-between;">
+          <span style="color: #999;">源文件大小:</span>
+          <span>2.05 MB</span>
+        </div>
+      </div>
+      
+      <div style="margin-bottom: 20px; text-align: right;">
+        <el-checkbox v-model="overwriteAllSelected" style="margin-right: 8px;">全部应用</el-checkbox>
+        <span style="color: #999; font-size: 12px;">对所有后续同名文件执行相同操作</span>
+      </div>
+      
+      <template #footer>
+        <el-button @click="handleOverwriteCancel">取消</el-button>
+        <el-button @click="handleOverwriteSkip">跳过</el-button>
+        <el-button type="primary" @click="handleOverwriteConfirm">覆盖</el-button>
+      </template>
     </el-dialog>
 
     <!-- 右键菜单 -->
@@ -544,8 +594,17 @@ const currentRemotePath = ref('/');
 const pathHistory = ref(['/']);
 const pathHistoryIndex = ref(0);
 const uploadFileInput = ref(null);
+const uploadDirInput = ref(null);
 const localFiles = ref([]);
+const uploadingAll = ref(false);
 const selectedLogService = ref(null);
+
+// 覆盖确认相关
+const overwriteOption = ref(''); // 'overwrite', 'skip', 'overwrite_all', 'skip_all'
+const overwriteDialogVisible = ref(false);
+const overwriteDialogFile = ref('');
+const overwriteAllSelected = ref(false);
+const overwriteResolve = ref(null);
 
 // 右键菜单相关
 const contextMenuVisible = ref(false);
@@ -1982,11 +2041,32 @@ const createRemoteDir = async () => {
   }
 };
 
-const triggerUpload = () => {
+const triggerFileUpload = () => {
   uploadFileInput.value?.click();
 };
 
+const triggerDirUpload = () => {
+  uploadDirInput.value?.click();
+};
+
 const handleFileUpload = (event) => {
+  const files = event.target.files;
+  if (!files || files.length === 0) return;
+  
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    localFiles.value.push({
+      name: file.name,
+      size: file.size,
+      file: file,
+      relativePath: file.name
+    });
+  }
+  
+  event.target.value = '';
+};
+
+const handleDirUpload = (event) => {
   const files = event.target.files;
   if (!files || files.length === 0) return;
   
@@ -2011,10 +2091,13 @@ const handleDrop = (event) => {
   
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
+    // 获取相对路径，用于保持目录结构
+    const relativePath = file.webkitRelativePath || file.name;
     localFiles.value.push({
       name: file.name,
       size: file.size,
-      file: file
+      file: file,
+      relativePath: relativePath
     });
   }
   
@@ -2023,6 +2106,50 @@ const handleDrop = (event) => {
 
 const removeLocalFile = (index) => {
   localFiles.value.splice(index, 1);
+};
+
+const uploadAllFiles = async () => {
+  if (!currentShellService.value) return;
+  if (localFiles.value.length === 0) return;
+  
+  uploadingAll.value = true;
+  let successCount = 0;
+  let failCount = 0;
+  
+  // 重置覆盖选项
+  resetOverwriteOption();
+  
+  // 创建文件列表副本，避免循环过程中数组被修改导致索引错乱
+  const filesToUpload = [...localFiles.value];
+  
+  for (let i = 0; i < filesToUpload.length; i++) {
+    const fileInfo = filesToUpload[i];
+    try {
+      await uploadSelectedFile(fileInfo);
+      successCount++;
+    } catch (error) {
+      // 如果是用户取消上传，立即停止整个流程
+      if (error.code === 'UPLOAD_CANCELLED') {
+        ElMessage.info('用户取消上传');
+        uploadingAll.value = false;
+        resetOverwriteOption();
+        return;
+      }
+      failCount++;
+    }
+  }
+  
+  uploadingAll.value = false;
+  
+  // 重置覆盖选项
+  resetOverwriteOption();
+  
+  if (failCount === 0) {
+    ElMessage.success(`全部上传完成！共上传 ${successCount} 个文件`);
+    localFiles.value = [];
+  } else {
+    ElMessage.warning(`上传完成！成功 ${successCount} 个，失败 ${failCount} 个`);
+  }
 };
 
 const uploadSelectedFile = async (fileInfo) => {
@@ -2034,14 +2161,55 @@ const uploadSelectedFile = async (fileInfo) => {
   
   // 计算远程路径（保持目录结构）
   let remoteFilePath = currentRemotePath.value;
+  
   if (fileInfo.relativePath && fileInfo.relativePath !== fileInfo.name) {
-    // 如果有相对路径，说明是目录上传，保持目录结构
-    const pathParts = fileInfo.relativePath.split('/');
-    pathParts.shift(); // 移除第一个空元素（如果有的话）
-    pathParts.pop(); // 移除文件名
-    if (pathParts.length > 0) {
-      remoteFilePath = remoteFilePath.replace(/\/$/, '') + '/' + pathParts.join('/');
+    // 获取目录部分（去掉文件名）
+    const dirPath = fileInfo.relativePath.substring(0, fileInfo.relativePath.lastIndexOf('/'));
+    remoteFilePath = remoteFilePath.replace(/\/$/, '') + '/' + dirPath;
+  }
+  
+  // 构建完整的远程文件路径
+  const fullRemotePath = remoteFilePath.replace(/\/$/, '') + '/' + fileInfo.name;
+  
+  // 检查文件是否存在
+  try {
+    const response = await axios.get(`/api/sftp/exists`, {
+      params: {
+        service_id: currentShellService.value.id,
+        path: fullRemotePath
+      }
+    });
+    
+    if (response.data?.code === 0 && response.data?.data?.exists) {
+      // 文件已存在，需要确认如何处理
+      if (overwriteOption.value === 'overwrite_all') {
+        // 自动覆盖所有，不提示
+      } else if (overwriteOption.value === 'skip_all') {
+        // 自动跳过所有
+        ElMessage.info(`跳过文件 ${fileInfo.name}`);
+        return;
+      } else {
+        // 弹出 Element Plus 确认对话框
+        const action = await showOverwriteDialog(fileInfo.name);
+        
+        if (action === 'skip' || action === 'skip_all') {
+          ElMessage.info(`跳过文件 ${fileInfo.name}`);
+          return;
+        } else if (action === 'cancel') {
+          // 用户取消上传，抛出特殊错误以停止整个上传流程
+          const error = new Error('用户取消上传');
+          error.code = 'UPLOAD_CANCELLED';
+          throw error;
+        }
+        // overwrite 或 overwrite_all 继续上传
+      }
     }
+  } catch (error) {
+    // 如果是用户取消上传，重新抛出错误让外层处理
+    if (error.code === 'UPLOAD_CANCELLED') {
+      throw error;
+    }
+    // 其他错误（检查失败），继续上传
   }
   
   try {
@@ -2057,7 +2225,6 @@ const uploadSelectedFile = async (fileInfo) => {
     });
     ElMessage.success(`文件 ${fileInfo.name} 上传成功`);
     listRemoteFiles();
-    // 从本地列表移除已上传的文件
     const index = localFiles.value.findIndex(f => f.name === fileInfo.name && f.size === fileInfo.size);
     if (index > -1) {
       localFiles.value.splice(index, 1);
@@ -2065,6 +2232,98 @@ const uploadSelectedFile = async (fileInfo) => {
   } catch (error) {
     ElMessage.error(`文件 ${fileInfo.name} 上传失败`);
   }
+};
+
+const resetOverwriteOption = () => {
+  overwriteOption.value = '';
+};
+
+const handleOverwriteConfirm = () => {
+  // 覆盖当前文件
+  if (overwriteAllSelected.value) {
+    // 用户勾选了"全部应用"，设置全局覆盖选项
+    overwriteOption.value = 'overwrite_all';
+    if (overwriteResolve.value) {
+      overwriteResolve.value('overwrite_all');
+      overwriteResolve.value = null;
+    }
+  } else {
+    // 用户没有勾选"全部应用"，只覆盖当前文件
+    if (overwriteResolve.value) {
+      overwriteResolve.value('overwrite');
+      overwriteResolve.value = null;
+    }
+  }
+  overwriteDialogVisible.value = false;
+};
+
+const handleOverwriteSkip = () => {
+  // 跳过当前文件
+  if (overwriteAllSelected.value) {
+    // 用户勾选了"全部应用"，设置全局跳过选项
+    overwriteOption.value = 'skip_all';
+    if (overwriteResolve.value) {
+      overwriteResolve.value('skip_all');
+      overwriteResolve.value = null;
+    }
+  } else {
+    // 用户没有勾选"全部应用"，只跳过当前文件
+    if (overwriteResolve.value) {
+      overwriteResolve.value('skip');
+      overwriteResolve.value = null;
+    }
+  }
+  overwriteDialogVisible.value = false;
+};
+
+const handleOverwriteCancel = () => {
+  // 取消上传
+  if (overwriteResolve.value) {
+    overwriteResolve.value('cancel');
+    overwriteResolve.value = null;
+  }
+  overwriteDialogVisible.value = false;
+};
+
+const handleOverwriteDialogClose = (done) => {
+  // 对话框关闭前的处理（点击右上角关闭按钮时触发）
+  if (overwriteResolve.value) {
+    overwriteResolve.value('cancel');
+    overwriteResolve.value = null;
+  }
+  done(); // 关闭对话框
+};
+
+const showOverwriteDialog = (filename) => {
+  return new Promise((resolve) => {
+    overwriteDialogFile.value = filename;
+    overwriteAllSelected.value = false;
+    overwriteResolve.value = resolve;
+    overwriteDialogVisible.value = true;
+  });
+};
+
+const showOverwriteDialogSimple = (filename) => {
+  return new Promise((resolve) => {
+    const action = window.confirm(`文件 "${filename}" 已存在，是否覆盖？`);
+    if (action) {
+      const applyAll = window.confirm('是否应用到所有后续同名文件？');
+      if (applyAll) {
+        overwriteOption.value = 'overwrite_all';
+        resolve('overwrite_all');
+      } else {
+        resolve('overwrite');
+      }
+    } else {
+      const applyAll = window.confirm('是否跳过所有后续同名文件？');
+      if (applyAll) {
+        overwriteOption.value = 'skip_all';
+        resolve('skip_all');
+      } else {
+        resolve('skip');
+      }
+    }
+  });
 };
 
 const formatFileSize = (size) => {
