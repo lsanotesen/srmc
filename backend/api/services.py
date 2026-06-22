@@ -1416,7 +1416,7 @@ async def download_import_template():
     """下载导入模板"""
     wb = Workbook()
     ws = wb.active
-    ws.title = "服务导入模板"
+    ws.title = "Service Import Template"
     
     # 添加表头
     headers = ["功能描述", "对应模块", "IP地址", "程序路径", "用户名", "密码", 
@@ -1431,11 +1431,10 @@ async def download_import_template():
     wb.save(buffer)
     buffer.seek(0)
     
-    # 对中文文件名进行 URL 编码
-    filename = quote("服务导入模板.xlsx")
+    filename = "service_import_template.xlsx"
     
     return StreamingResponse(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={filename}; filename*=UTF-8''{filename}"}
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
