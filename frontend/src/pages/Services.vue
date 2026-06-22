@@ -755,7 +755,7 @@ const handleSizeChange = (size) => {
 };
 const downloadTemplate = async () => {
  try {
- const response = await axios.get('/api/services/export', { responseType: 'blob' });
+ const response = await axios.get('/api/services/template', { responseType: 'blob' });
  const blob = new Blob([response.data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
  const url = window.URL.createObjectURL(blob);
  const a = document.createElement('a');
