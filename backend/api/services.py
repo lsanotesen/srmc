@@ -1431,8 +1431,11 @@ async def download_import_template():
     wb.save(buffer)
     buffer.seek(0)
     
+    # 对中文文件名进行 URL 编码
+    filename = quote("服务导入模板.xlsx")
+    
     return StreamingResponse(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=服务导入模板.xlsx"}
+        headers={"Content-Disposition": f"attachment; filename={filename}; filename*=UTF-8''{filename}"}
     )
