@@ -3,7 +3,7 @@
     <el-aside :width="isCollapse ? '64px' : '250px'" class="aside">
       <div class="logo" :class="{ 'logo-collapsed': isCollapse }">
         <div class="logo-icon">
-          <el-icon name="server" :size="28" />
+          🖥️
         </div>
         <div v-if="!isCollapse" class="logo-text">
           <h2>SRMC</h2>
@@ -11,8 +11,8 @@
         </div>
       </div>
 
-      <div class="collapse-btn" @click="isCollapse = !isCollapse">
-        <el-icon :name="isCollapse ? 'chevron-right' : 'chevron-left'" :size="18" />
+      <div class="collapse-btn" :class="{ 'collapse-btn-collapsed': isCollapse }" @click="isCollapse = !isCollapse">
+        <span class="collapse-icon">{{ isCollapse ? '›' : '‹' }}</span>
       </div>
 
       <el-menu
@@ -21,24 +21,26 @@
         router
         :collapse="isCollapse"
         :unique-opened="true"
-        background-color="#0f172a"
-        text-color="#cbd5e1"
-        active-text-color="#60a5fa"
+        background-color="transparent"
+        text-color="#666666"
+        active-text-color="#1890ff"
         :collapse-transition="true"
       >
         <template v-for="item in menu" :key="item.id">
           <el-sub-menu v-if="item.children && item.children.length > 0" :index="item.id">
             <template #title>
-              <el-icon :name="getIconName(item.icon)" :size="20" />
+              <el-icon :size="18"><component :is="getIconComponent(item.icon)" /></el-icon>
               <span>{{ item.name }}</span>
             </template>
             <el-menu-item v-for="child in item.children" :key="child.id" :index="child.path">
-              <el-icon :name="getIconName(child.icon)" :size="18" />
+              <el-icon :size="18"><component :is="getIconComponent(child.icon)" /></el-icon>
               <span>{{ child.name }}</span>
             </el-menu-item>
           </el-sub-menu>
           <el-menu-item v-else :index="item.path">
-            <el-icon :name="getIconName(item.icon)" :size="20" />
+            <el-tooltip :content="item.name" placement="right" :disabled="!isCollapse">
+              <el-icon :size="18"><component :is="getIconComponent(item.icon)" /></el-icon>
+            </el-tooltip>
             <span>{{ item.name }}</span>
           </el-menu-item>
         </template>
@@ -109,7 +111,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useUserStore } from '../stores/user'
 
@@ -117,7 +119,22 @@ const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
 
-const isCollapse = ref(false)
+// 初始化时直接从localStorage读取折叠状态，避免刷新时闪烁
+const savedCollapse = localStorage.getItem('sidebarCollapse')
+const isCollapse = ref(savedCollapse !== null ? savedCollapse === 'true' : false)
+
+// 监听折叠状态变化并保存到localStorage
+watch(isCollapse, (newValue) => {
+  localStorage.setItem('sidebarCollapse', String(newValue))
+})
+
+onMounted(() => {
+  if (userStore.token && !userStore.menu.length) {
+    userStore.fetchMenu().catch(err => {
+      console.error('Layout 加载菜单失败:', err)
+    })
+  }
+})
 const user = computed(() => userStore.user)
 const menu = computed(() => {
   if (userStore.menu.length > 0) {
@@ -175,24 +192,27 @@ const breadcrumb = computed(() => {
 })
 
 const iconNameMap = {
-  dashboard: 'house',
-  server: 'server',
-  cpu: 'cpu',
-  computer: 'monitor',
-  'file-text': 'file-text',
-  terminal: 'terminal',
-  database: 'database',
-  search: 'search',
-  'file-search': 'search',
-  users: 'users',
-  settings: 'settings',
-  plus: 'plus',
-  'folder-opened': 'folder-opened',
-  folder: 'folder'
+  dashboard: 'DataBoard',
+  server: 'Folder',
+  cpu: 'Cpu',
+  computer: 'Monitor',
+  'file-text': 'FileText',
+  terminal: 'Terminal',
+  database: 'Database',
+  search: 'Search',
+  'file-search': 'Search',
+  users: 'User',
+  settings: 'Setting',
+  'folder-opened': 'FolderOpened',
+  folder: 'Folder',
+  default: 'Folder'
 }
 
-function getIconName(iconName) {
-  return iconNameMap[iconName] || 'server'
+function getIconComponent(iconName) {
+  if (!iconName || iconName === '') {
+    return iconNameMap.default
+  }
+  return iconNameMap[iconName] || iconNameMap.default
 }
 
 async function logout() {
@@ -203,14 +223,6 @@ async function logout() {
 function handleRefresh() {
   window.location.reload()
 }
-
-onMounted(() => {
-  if (userStore.token && !userStore.menu.length) {
-    userStore.fetchMenu().catch(err => {
-      console.error('Layout 加载菜单失败:', err)
-    })
-  }
-})
 </script>
 
 <style scoped>
@@ -222,21 +234,22 @@ onMounted(() => {
 }
 
 .aside {
-  background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
-  color: #fff;
+  background: #ffffff;
+  color: #333333;
   position: relative;
   flex-shrink: 0;
-  box-shadow: 4px 0 20px rgba(0, 0, 0, 0.15);
-  transition: width 0.3s ease;
+  border-right: 1px solid #e8e8e8;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
 }
 
 .logo {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 24px 20px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(0, 0, 0, 0.1);
+  padding: 16px 20px;
+  border-bottom: 1px solid #e8e8e8;
+  background: #ffffff;
 }
 
 .logo-icon {
@@ -255,16 +268,13 @@ onMounted(() => {
   margin: 0;
   font-size: 20px;
   font-weight: 700;
-  background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: #1e293b;
 }
 
 .logo-text p {
   margin: 4px 0 0;
   font-size: 12px;
-  color: #94a3b8;
+  color: #64748b;
 }
 
 .logo-collapsed {
@@ -274,26 +284,59 @@ onMounted(() => {
 
 .collapse-btn {
   position: absolute;
-  right: -12px;
+  right: -18px;
   top: 50%;
   transform: translateY(-50%);
-  width: 24px;
-  height: 48px;
-  background: #1e293b;
-  border: 1px solid #334155;
-  border-radius: 0 12px 12px 0;
+  width: 36px;
+  height: 36px;
+  background: #ffffff;
+  border: 1px solid #d9d9d9;
+  border-left: none;
+  border-radius: 0 6px 6px 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #94a3b8;
   cursor: pointer;
   z-index: 100;
-  transition: all 0.3s ease;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
 .collapse-btn:hover {
-  background: #334155;
-  color: #fff;
+  background: #f5f5f5;
+  border-color: #bfbfbf;
+}
+
+.collapse-icon {
+  font-size: 20px;
+  font-weight: bold;
+  line-height: 1;
+  color: #666666;
+  margin: 0;
+  padding: 0;
+  margin-left: -4px;
+}
+
+.collapse-btn:hover .collapse-icon {
+  color: #333333;
+}
+
+.collapse-btn-collapsed {
+  right: auto;
+  left: -18px;
+  border-left: 1px solid #d9d9d9;
+  border-right: none;
+  border-radius: 6px 0 0 6px;
+}
+
+.collapse-btn-collapsed .collapse-icon {
+  color: #666666;
+  margin-left: 0;
+  margin-right: -4px;
+}
+
+.collapse-btn-collapsed:hover .collapse-icon {
+  color: #333333;
 }
 
 .menu {
@@ -309,12 +352,12 @@ onMounted(() => {
 }
 
 .menu :deep(.el-menu-item:hover) {
-  background: rgba(96, 165, 250, 0.15);
+  background: #f5f5f5;
 }
 
 .menu :deep(.el-menu-item.is-active) {
-  background: linear-gradient(135deg, rgba(59, 130, 246, 0.3) 0%, rgba(139, 92, 246, 0.3) 100%);
-  box-shadow: 0 4px 15px rgba(59, 130, 246, 0.2);
+  background: #e6f7ff;
+  color: #1890ff;
 }
 
 .menu :deep(.el-menu-item.is-active::before) {
@@ -325,7 +368,7 @@ onMounted(() => {
   transform: translateY(-50%);
   width: 4px;
   height: 24px;
-  background: linear-gradient(180deg, #3b82f6 0%, #8b5cf6 100%);
+  background: #1890ff;
   border-radius: 0 4px 4px 0;
 }
 
