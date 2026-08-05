@@ -1,0 +1,12 @@
+[Unit]
+Description=SRMC Agent
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/srmc-agent -config /etc/srmc-agent/config.yaml
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

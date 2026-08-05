@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  srmc-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: srmc-agent:latest
+    container_name: srmc-agent
+    restart: always
+    pid: host
+    network_mode: host
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config.yaml:/etc/srmc-agent/config.yaml:ro
+      - /var/log/srmc-agent:/var/log/srmc-agent
+      - /proc:/proc:ro
+      - /home:/home:ro
+      - /u01:/u01:ro
+      - /u02:/u02:ro
+    environment:
+      - SERVER_URL=${SERVER_URL:-wss://srmc.example.com/ws/agent/}
+      - AGENT_TOKEN=${AGENT_TOKEN:-your-token}
+      - TZ=Asia/Shanghai
+      - DOCKER_API_VERSION=1.44

@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     
     LOG_LEVEL: str = "INFO"
     
+    AGENT_TOKEN: str = ""
+    
     model_config = SettingsConfigDict(env_file=".env")
 
 settings = Settings()

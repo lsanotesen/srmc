@@ -89,6 +89,7 @@
               <el-dropdown-menu>
                 <el-dropdown-item icon="user">个人中心</el-dropdown-item>
                 <el-dropdown-item icon="settings">账户设置</el-dropdown-item>
+                <el-dropdown-item icon="book-open" @click="goToUsageGuide">使用说明</el-dropdown-item>
                 <el-divider style="margin: 4px 0;" />
                 <el-dropdown-item icon="logout" @click="logout">退出登录</el-dropdown-item>
               </el-dropdown-menu>
@@ -128,10 +129,20 @@ watch(isCollapse, (newValue) => {
   localStorage.setItem('sidebarCollapse', String(newValue))
 })
 
-onMounted(() => {
+onMounted(async () => {
   if (userStore.token && !userStore.menu.length) {
-    userStore.fetchMenu().catch(err => {
+    await userStore.fetchMenu().catch(err => {
       console.error('Layout 加载菜单失败:', err)
+    })
+  }
+  if (userStore.token && !userStore.user) {
+    await userStore.fetchUserInfo().catch(err => {
+      console.error('Layout 获取用户信息失败:', err)
+    })
+  }
+  if (userStore.token && !userStore.permissions.length) {
+    await userStore.fetchPermissions().catch(err => {
+      console.error('Layout 加载权限失败:', err)
     })
   }
 })
@@ -155,9 +166,19 @@ const menu = computed(() => {
       ]
     },
     { id: 'servers', name: '服务器管理', icon: 'computer', path: '/servers', children: [] },
-    { id: 'monitoring', name: '监控中心', icon: 'cpu', path: '/monitoring', children: [] },
+    { id: 'agents', name: 'Agent管理', icon: 'cpu', path: '/agents', children: [] },
+    {
+      id: 'permission',
+      name: '权限管理',
+      icon: 'lock',
+      path: '',
+      children: [
+        { id: 'organization', name: '组织管理', icon: 'office-building', path: '/organization' },
+        { id: 'roles', name: '角色管理', icon: 'user', path: '/roles' },
+        { id: 'users', name: '用户管理', icon: 'users', path: '/users' }
+      ]
+    },
     { id: 'audit', name: '审计日志', icon: 'file-search', path: '/audit', children: [] },
-    { id: 'users', name: '用户管理', icon: 'users', path: '/users', children: [] },
     { id: 'settings', name: '系统设置', icon: 'settings', path: '/settings', children: [] }
   ]
 })
@@ -205,6 +226,8 @@ const iconNameMap = {
   settings: 'Setting',
   'folder-opened': 'FolderOpened',
   folder: 'Folder',
+  'office-building': 'OfficeBuilding',
+  lock: 'Lock',
   default: 'Folder'
 }
 
@@ -222,6 +245,10 @@ async function logout() {
 
 function handleRefresh() {
   window.location.reload()
+}
+
+function goToUsageGuide() {
+  router.push('/usage-guide')
 }
 </script>
 

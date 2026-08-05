@@ -92,16 +92,21 @@ async def check_server_services(server: Server, db: Session):
     finally:
         conn.close()
 
-async def update_all_service_statuses(db: Session):
-    servers = db.query(Server).all()
-    
-    if not servers:
-        return
-    
-    tasks = [check_server_services(server, db) for server in servers]
-    await asyncio.gather(*tasks, return_exceptions=True)
-    
-    await ssh_pool.close_idle_connections()
+async def update_all_service_statuses():
+    from core.database import SessionLocal
+    db = SessionLocal()
+    try:
+        servers = db.query(Server).all()
+        
+        if not servers:
+            return
+        
+        tasks = [check_server_services(server, db) for server in servers]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        await ssh_pool.close_idle_connections()
+    finally:
+        db.close()
 
 def get_service_status(service_id: int):
     status = redis_client.get(f"service_status:{service_id}")

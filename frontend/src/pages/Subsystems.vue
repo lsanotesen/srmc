@@ -3,7 +3,7 @@
     <div class="page-header">
       <h1>子系统管理</h1>
       <div class="actions">
-        <el-button type="primary" @click="showAddDialog = true">新增子系统</el-button>
+        <el-button v-if="hasPermission('project:add')" type="primary" @click="showAddDialog = true">新增子系统</el-button>
       </div>
     </div>
 
@@ -29,10 +29,10 @@
         <el-table-column label="操作" width="200" align="center">
           <template #default="scope">
             <div class="action-buttons">
-              <div class="action-btn edit-btn" @click="editSubsystem(scope.row)">
+              <div v-if="hasPermission('project:edit')" class="action-btn edit-btn" @click="editSubsystem(scope.row)">
                 <span>编辑</span>
               </div>
-              <div class="action-btn delete-btn" @click="deleteSubsystem(scope.row)">
+              <div v-if="hasPermission('project:delete')" class="action-btn delete-btn" @click="deleteSubsystem(scope.row)">
                 <span>删除</span>
               </div>
             </div>
@@ -87,6 +87,9 @@
 import { ref, reactive, onMounted } from 'vue';
 import { ElMessage } from 'element-plus';
 import axios from '@/utils/axios';
+import { usePermission } from '@/composables/usePermission';
+
+const { hasPermission } = usePermission();
 
 const subsystems = ref([]);
 const projects = ref([]);

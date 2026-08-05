@@ -21,6 +21,11 @@ export default defineConfig({
         target: 'ws://srmc-backend:8000',
         ws: true,
         changeOrigin: true
+      },
+      '/api/services/:service_id/log/ws': {
+        target: 'ws://srmc-backend:8000',
+        ws: true,
+        changeOrigin: true
       }
     }
   }

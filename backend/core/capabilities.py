@@ -91,20 +91,31 @@ SERVICE_TYPE_CAPABILITIES = {
 }
 
 ROLE_PERMISSIONS = {
-    "ADMIN": [
+    "SUPER_ADMIN": [
         "service_view", "service_operate", "service_manage", "webshell", "sql_execute",
         "log_view", "log_download", "import", "export", "audit_view",
-        "user_manage", "system_settings", "project_manage", "project_view"
+        "user_manage", "system_settings", "project_manage", "project_view",
+        "agent_view", "agent_manage", "role_manage", "organization_manage"
     ],
-    "OPS": [
+    "ORG_ADMIN": [
         "service_view", "service_operate", "service_manage", "webshell", "sql_execute",
         "log_view", "log_download", "import", "export", "audit_view",
-        "project_manage", "project_view"
+        "project_manage", "project_view",
+        "agent_view", "agent_manage", "user_view", "organization_view"
     ],
-    "DEV": [
-        "service_view", "log_view", "webshell", "sql_read", "project_view"
+    "DEPT_ADMIN": [
+        "service_view", "service_operate", "service_manage", "webshell",
+        "log_view", "log_download", "import", "export", "audit_view",
+        "project_manage", "project_view",
+        "agent_view", "agent_manage"
+    ],
+    "DEPT_MEMBER": [
+        "service_view", "service_operate", "webshell",
+        "log_view", "project_view",
+        "agent_view"
     ],
     "READONLY": [
-        "service_view", "log_view", "project_view"
+        "service_view", "log_view", "project_view",
+        "agent_view"
     ]
 }

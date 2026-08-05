@@ -1,587 +1,898 @@
 <template>
   <div class="import-services-page">
     <div class="page-header">
-      <h1>导入服务</h1>
-      <div class="actions">
-        <el-button @click="goBack">返回</el-button>
+      <div class="header-content">
+        <div class="title-section">
+          <el-icon class="title-icon"><Upload /></el-icon>
+          <h1>服务导入</h1>
+        </div>
+        <p class="subtitle">选择目标项目和子系统，上传Excel文件批量导入服务数据</p>
       </div>
     </div>
 
-    <div class="import-container">
-      <!-- 导入选项 -->
-      <div class="import-options">
-        <el-form :model="importForm" label-width="120px">
-          <el-form-item label="目标项目">
-            <el-select v-model="importForm.project_id" placeholder="请选择项目" @change="onProjectChange">
-              <el-option v-for="project in projects" :key="project.id" :label="project.project_name" :value="project.id" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="目标子系统">
-            <el-select v-model="importForm.subsystem_id" placeholder="请选择子系统" @change="onSubsystemChange">
-              <el-option v-for="subsystem in subsystems" :key="subsystem.id" :label="subsystem.subsystem_name" :value="subsystem.id" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="目标程序分类">
-            <el-select v-model="importForm.group_id" placeholder="请选择程序分类（可选）">
-              <el-option :key="0" label="不指定（按Sheet名称匹配）" :value="0" />
-              <el-option v-for="group in groups" :key="group.id" :label="group.group_name" :value="group.id" />
-            </el-select>
-          </el-form-item>
-          <el-form-item>
-            <el-upload
-              class="upload-demo"
-              :auto-upload="false"
-              :on-change="handleFileChange"
-              accept=".xlsx"
-              :show-file-list="false"
-            >
-              <el-button type="primary" :disabled="importing">选择Excel文件</el-button>
-            </el-upload>
-            <span v-if="importFile" class="file-name">{{ importFile.name }}</span>
-          </el-form-item>
+    <div class="page-content">
+      <div class="filter-card">
+        <div class="card-header">
+          <el-icon class="card-icon"><Filter /></el-icon>
+          <span>目标项目</span>
+        </div>
+        <el-form :model="importForm" label-width="120px" class="filter-form">
+          <el-row :gutter="20">
+            <el-col :span="12">
+              <el-form-item label="项目名称">
+                <el-select
+                  v-model="importForm.project_id"
+                  placeholder="请选择项目"
+                  clearable
+                  class="full-width"
+                  @change="handleProjectChange"
+                >
+                  <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="子系统">
+                <el-select
+                  v-model="importForm.subsystem_id"
+                  placeholder="请选择子系统"
+                  clearable
+                  class="full-width"
+                  @change="handleSubsystemChange"
+                >
+                  <el-option v-for="subsystem in subsystems" :key="subsystem.id" :label="subsystem.subsystem_name" :value="subsystem.id" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="20">
+            <el-col :span="12">
+              <el-form-item label="服务分组">
+                <el-select
+                  v-model="importForm.group_id"
+                  placeholder="请选择服务分组"
+                  clearable
+                  class="full-width"
+                  :disabled="!importForm.subsystem_id"
+                >
+                  <el-option label="全部方式" :value="null" />
+                  <el-option v-for="group in groups" :key="group.id" :label="group.group_name" :value="group.id" />
+                </el-select>
+                <div class="form-hint">
+                  <el-icon><InfoFilled /></el-icon>
+                  <span>若不选择，将根据Excel文件的Sheet名称自动匹配或创建服务分组</span>
+                </div>
+              </el-form-item>
+            </el-col>
+          </el-row>
         </el-form>
       </div>
 
-      <!-- 预览区域 -->
-      <div v-if="previewData.length > 0" class="preview-section">
-        <h3>数据预览（前5行）</h3>
-        <div class="preview-table">
-          <table>
-            <thead>
-              <tr>
-                <th>行号</th>
-                <th v-for="(header, index) in previewHeaders" :key="index">{{ header }}</th>
-                <th>状态</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(row, index) in previewData.slice(0, 5)" :key="index">
-                <td>{{ index + 2 }}</td>
-                <td v-for="(cell, cellIndex) in row" :key="cellIndex">{{ cell || '' }}</td>
-                <td>
-                  <span class="status-pending">待导入</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+      <div class="upload-card">
+        <div class="card-header">
+          <el-icon class="card-icon"><UploadFilled /></el-icon>
+          <span>上传文件</span>
+        </div>
+        
+        <div 
+          class="upload-area"
+          :class="{ 'upload-area-dragover': isDragover }"
+          @dragover.prevent="isDragover = true"
+          @dragleave="isDragover = false"
+          @drop.prevent="handleDrop"
+        >
+          <el-upload
+            class="upload-demo"
+            :auto-upload="false"
+            :on-change="handleFileChange"
+            :on-remove="handleFileRemove"
+            accept=".xlsx"
+            drag
+            :limit="1"
+            :disabled="importing"
+          >
+            <div class="upload-icon-wrapper">
+              <el-icon class="upload-icon"><UploadFilled /></el-icon>
+            </div>
+            <div class="upload-text">
+              <span class="upload-title">拖拽文件到此处</span>
+              <span class="upload-subtitle">或点击选择文件</span>
+            </div>
+            <template #tip>
+              <div class="upload-tip">
+                <el-icon class="tip-icon"><InfoFilled /></el-icon>
+                <span>支持 .xlsx 格式的Excel文件，文件大小不超过 10MB</span>
+              </div>
+            </template>
+          </el-upload>
+        </div>
+
+        <div class="template-section">
+          <el-button type="primary" link @click="downloadTemplate">
+            <el-icon><Download /></el-icon>
+            下载导入模板
+          </el-button>
         </div>
       </div>
 
-      <!-- 导入按钮 -->
-      <div class="import-actions">
-        <el-button type="success" @click="startImport" :disabled="!canImport || importing">
-          <span v-if="importing">导入中...</span>
-          <span v-else>开始导入</span>
-        </el-button>
-        <el-button @click="downloadTemplate">下载模板</el-button>
-      </div>
-
-      <!-- 导入进度 -->
-      <div v-if="importing" class="progress-section">
-        <el-progress :percentage="progress" :status="progressStatus" />
-        <div class="progress-info">
-          <span>已处理: {{ processedCount }} / {{ totalCount }}</span>
-          <span v-if="currentSheet">当前Sheet: {{ currentSheet }}</span>
+      <div v-if="importFile" class="preview-card">
+        <div class="card-header">
+          <el-icon class="card-icon"><Eye /></el-icon>
+          <span>文件预览</span>
         </div>
-      </div>
-
-      <!-- 导入结果 -->
-      <div v-if="importResult" class="result-section">
-        <div class="result-summary">
-          <div class="result-item success">
-            <span class="count">{{ importResult.added }}</span>
-            <span class="label">新增</span>
-          </div>
-          <div class="result-item updated">
-            <span class="count">{{ importResult.updated }}</span>
-            <span class="label">更新</span>
-          </div>
-          <div class="result-item failed">
-            <span class="count">{{ importResult.failed }}</span>
-            <span class="label">失败</span>
-          </div>
-        </div>
-
-        <!-- 失败详情 -->
-        <div v-if="importResult.failed_items && importResult.failed_items.length > 0" class="failed-details">
-          <h3>失败详情</h3>
-          <div class="failed-list">
-            <div v-for="(item, index) in importResult.failed_items" :key="index" class="failed-item">
-              <div class="failed-header">
-                <span class="sheet-name">{{ item.sheet }} - 第{{ item.row }}行</span>
-                <span class="reason-badge">{{ item.reason }}</span>
-              </div>
-              <div v-if="item.missing_fields && item.missing_fields.length > 0" class="failed-detail">
-                <span class="detail-label">缺失字段:</span>
-                <span class="missing-fields">
-                  <span v-for="(field, idx) in item.missing_fields" :key="idx" class="field-tag">{{ field }}</span>
-                </span>
-              </div>
-              <div v-if="item.row_data && Object.keys(item.row_data).length > 0" class="failed-detail">
-                <span class="detail-label">原始数据:</span>
-                <div class="row-data-container">
-                  <pre class="row-data">{{ formatRowData(item.row_data) }}</pre>
-                </div>
-              </div>
+        <div class="preview-content">
+          <div class="file-info">
+            <el-icon class="file-icon"><FileText /></el-icon>
+            <div class="file-details">
+              <span class="file-name">{{ importFile.name }}</span>
+              <span class="file-size">{{ formatFileSize(importFile.size) }}</span>
             </div>
           </div>
         </div>
+      </div>
+
+      <div v-if="importResult" class="result-card">
+        <div class="card-header">
+          <el-icon class="card-icon"><CheckCircle /></el-icon>
+          <span>导入结果</span>
+        </div>
+        <div class="result-content">
+          <div class="result-summary">
+            <div class="summary-item success">
+              <el-icon class="summary-icon"><CheckCircle /></el-icon>
+              <div class="summary-info">
+                <span class="summary-value">{{ importResult.success_count }}</span>
+                <span class="summary-label">成功导入</span>
+              </div>
+            </div>
+            <div class="summary-item warning">
+              <el-icon class="summary-icon"><WarningCircle /></el-icon>
+              <div class="summary-info">
+                <span class="summary-value">{{ importResult.updated_count }}</span>
+                <span class="summary-label">更新覆盖</span>
+              </div>
+            </div>
+            <div class="summary-item error">
+              <el-icon class="summary-icon"><CloseCircle /></el-icon>
+              <div class="summary-info">
+                <span class="summary-value">{{ importResult.failed_count }}</span>
+                <span class="summary-label">导入失败</span>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="importResult.failed_rows && importResult.failed_rows.length > 0" class="error-list">
+            <div class="error-list-header">
+              <el-icon class="error-icon"><AlertCircle /></el-icon>
+              <span>失败记录详情</span>
+            </div>
+            <el-table :data="importResult.failed_rows" border :max-height="300">
+              <el-table-column prop="row_num" label="行号" width="80" />
+              <el-table-column prop="error" label="失败原因" />
+            </el-table>
+          </div>
+        </div>
+      </div>
+
+      <div class="action-card">
+        <div class="action-left">
+          <el-button 
+            type="primary" 
+            size="large" 
+            @click="doImport" 
+            :loading="importing"
+            :disabled="!importFile || !importForm.project_id"
+          >
+            <el-icon><Upload /></el-icon>
+            {{ importing ? '导入中...' : '开始导入' }}
+          </el-button>
+          <el-button size="large" @click="resetForm">
+            <el-icon><Refresh /></el-icon>
+            重置
+          </el-button>
+        </div>
+        <div class="action-right">
+          <router-link to="/services" class="back-link">
+            <el-icon><ArrowLeft /></el-icon>
+            返回服务列表
+          </router-link>
+        </div>
+      </div>
+
+      <div class="history-card">
+        <div class="card-header">
+          <el-icon class="card-icon"><Clock /></el-icon>
+          <span>最近导入记录</span>
+        </div>
+        <div v-if="importHistory.length > 0" class="history-list">
+          <div v-for="(record, index) in importHistory" :key="index" class="history-item">
+            <div class="history-info">
+              <span class="history-name">{{ record.filename }}</span>
+              <span class="history-time">{{ record.time }}</span>
+            </div>
+            <el-tag v-if="record.success" type="success">成功</el-tag>
+            <el-tag v-else type="danger">失败</el-tag>
+          </div>
+        </div>
+        <div v-else class="empty-history">
+          <el-icon class="empty-icon"><FileText /></el-icon>
+          <p>暂无导入记录</p>
+        </div>
+      </div>
+
+      <div class="tips-card">
+        <div class="card-header">
+          <el-icon class="card-icon"><Lightbulb /></el-icon>
+          <span>导入提示</span>
+        </div>
+        <ul class="tips-list">
+          <li>
+            <el-icon class="tip-item-icon"><CheckCircle /></el-icon>
+            <span>建议先下载模板，按照模板格式填写数据</span>
+          </li>
+          <li>
+            <el-icon class="tip-item-icon"><CheckCircle /></el-icon>
+            <span>导入时会自动更新已存在的服务，新增不存在的服务</span>
+          </li>
+          <li>
+            <el-icon class="tip-item-icon"><CheckCircle /></el-icon>
+            <span>功能描述为必填项，其他字段根据需要填写</span>
+          </li>
+          <li>
+            <el-icon class="tip-item-icon"><CheckCircle /></el-icon>
+            <span>IP地址和端口号请确保格式正确</span>
+          </li>
+        </ul>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue';
-import { ElMessage, ElProgress } from 'element-plus';
+import { ref, reactive, onMounted, watch } from 'vue';
+import { ElMessage } from 'element-plus';
 import axios from '@/utils/axios';
 
-// 字段名中文映射
-const fieldNameMapping = {
-  'func_desc': '功能描述',
-  'module': '对应模块',
-  'ip': 'IP地址',
-  'username': '用户名',
-  'password': '密码',
-  'program_path': '程序路径',
-  'start_script': '启动脚本',
-  'stop_script': '停止脚本',
-  'log_path': '日志路径',
-  'port': '端口',
-  'owner': '责任人',
-  'remark': '备注'
-};
-
-// 格式化行数据为可读格式
-const formatRowData = (rowData) => {
-  if (!rowData) return '';
-  const lines = [];
-  for (const [key, value] of Object.entries(rowData)) {
-    const fieldName = fieldNameMapping[key] || key;
-    lines.push(`${fieldName}: ${value || ''}`);
-  }
-  return lines.join('\n');
-};
+const importForm = reactive({
+  project_id: null,
+  subsystem_id: null,
+  group_id: null
+});
 
 const projects = ref([]);
 const subsystems = ref([]);
 const groups = ref([]);
-const importForm = reactive({
-  project_id: null,
-  subsystem_id: null,
-  group_id: 0
-});
-
 const importFile = ref(null);
-const previewData = ref([]);
-const previewHeaders = ref([]);
 const importing = ref(false);
-const progress = ref(0);
-const progressStatus = ref('active');
-const processedCount = ref(0);
-const totalCount = ref(0);
-const currentSheet = ref('');
+const isDragover = ref(false);
 const importResult = ref(null);
+const importHistory = ref([]);
 
-const canImport = () => {
-  return importFile.value && importForm.project_id && importForm.subsystem_id;
-};
-
-const goBack = () => {
-  window.history.back();
-};
-
-const onProjectChange = async () => {
-  if (importForm.project_id) {
-    subsystems.value = [];
-    importForm.subsystem_id = null;
-    groups.value = [];
-    importForm.group_id = 0;
-    
-    try {
-      const response = await axios.get(`/api/subsystems?project_id=${importForm.project_id}`);
-      if (response.data.code === 0) {
-        // 后端返回的是分页格式，需要提取items
-        subsystems.value = response.data.data.items || response.data.data;
-      }
-    } catch (error) {
-      ElMessage.error('加载子系统列表失败');
+const loadProjects = async () => {
+  try {
+    const response = await axios.get('/api/projects', {
+      params: { page: 1, size: 100 }
+    });
+    if (response.data.code === 0) {
+      projects.value = response.data.data.items.map(p => ({
+        id: p.id,
+        name: p.name
+      }));
     }
+  } catch (error) {
+    console.error('加载项目列表失败', error);
   }
 };
 
-const onSubsystemChange = async () => {
-  if (importForm.subsystem_id) {
-    groups.value = [];
-    importForm.group_id = 0;
-    
-    try {
-      const response = await axios.get(`/api/subsystems/${importForm.subsystem_id}/groups`);
-      if (response.data.code === 0) {
-        // 后端返回的可能是数组或分页格式
-        const data = response.data.data;
-        groups.value = Array.isArray(data) ? data : (data.items || []);
-      }
-    } catch (error) {
-      ElMessage.error('加载程序分类列表失败');
+const loadSubsystems = async (projectId) => {
+  try {
+    const params = new URLSearchParams();
+    if (projectId) {
+      params.append('project_id', projectId);
     }
+    const response = await axios.get(`/api/subsystems?${params}`);
+    if (response.data.code === 0) {
+      subsystems.value = response.data.data.items;
+    }
+  } catch (error) {
+    console.error('加载子系统列表失败', error);
+    subsystems.value = [];
+  }
+};
+
+const loadGroups = async (subsystemId) => {
+  if (!subsystemId) {
+    groups.value = [];
+    return;
+  }
+  try {
+    const response = await axios.get(`/api/subsystems/${subsystemId}/groups`);
+    if (response.data.code === 0) {
+      groups.value = response.data.data;
+    }
+  } catch (error) {
+    console.error('加载服务分组列表失败', error);
+    groups.value = [];
+  }
+};
+
+const handleProjectChange = async (projectId) => {
+  importForm.subsystem_id = null;
+  importForm.group_id = null;
+  if (projectId) {
+    await loadSubsystems(projectId);
+  } else {
+    subsystems.value = [];
+    groups.value = [];
+  }
+};
+
+const handleSubsystemChange = async (subsystemId) => {
+  importForm.group_id = null;
+  if (subsystemId) {
+    await loadGroups(subsystemId);
+  } else {
+    groups.value = [];
   }
 };
 
 const handleFileChange = (file) => {
   importFile.value = file.raw;
-  previewData.value = [];
-  previewHeaders.value = [];
   importResult.value = null;
-  
-  // 预览文件内容
-  previewFile(file.raw);
 };
 
-const previewFile = async (file) => {
-  try {
-    const formData = new FormData();
-    formData.append('file', file);
-    
-    const response = await axios.post('/api/services/import/preview', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    });
-    
-    if (response.data.code === 0) {
-      previewHeaders.value = response.data.data.headers;
-      previewData.value = response.data.data.rows;
-    }
-  } catch (error) {
-    ElMessage.error('预览文件失败');
-  }
+const handleFileRemove = () => {
+  importFile.value = null;
+  importResult.value = null;
 };
 
-const startImport = async () => {
-  if (!canImport()) {
-    ElMessage.warning('请选择文件并填写目标项目和子系统');
-    return;
-  }
+const handleDrop = () => {
+  isDragover.value = false;
+};
 
-  importing.value = true;
-  progress.value = 0;
-  progressStatus.value = 'active';
-  processedCount.value = 0;
-  totalCount.value = 0;
-  importResult.value = null;
-
-  const formData = new FormData();
-  formData.append('file', importFile.value);
-  formData.append('project_id', importForm.project_id);
-  formData.append('subsystem_id', importForm.subsystem_id);
-  if (importForm.group_id && importForm.group_id !== 0) {
-    formData.append('group_id', importForm.group_id);
-  }
-
-  try {
-    const response = await axios.post('/api/services/import', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      onUploadProgress: (progressEvent) => {
-        if (progressEvent.total) {
-          progress.value = Math.round((progressEvent.loaded / progressEvent.total) * 100);
-        }
-      }
-    });
-
-    if (response.data.code === 0) {
-      importResult.value = response.data.data;
-      progress.value = 100;
-      progressStatus.value = 'success';
-      
-      if (importResult.value.failed > 0) {
-        ElMessage.warning(`导入完成，但有 ${importResult.value.failed} 条记录失败`);
-      } else {
-        ElMessage.success('导入成功');
-      }
-    } else {
-      ElMessage.error(response.data.message || '导入失败');
-      progressStatus.value = 'exception';
-    }
-  } catch (error) {
-    ElMessage.error(error.response?.data?.message || '导入失败');
-    progressStatus.value = 'exception';
-  } finally {
-    importing.value = false;
-  }
+const formatFileSize = (bytes) => {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
 };
 
 const downloadTemplate = async () => {
-  try {
-    const response = await axios.get('/api/services/import/template', {
-      responseType: 'blob'
-    });
-    
-    const url = window.URL.createObjectURL(new Blob([response.data]));
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute('download', '服务导入模板.xlsx');
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    window.URL.revokeObjectURL(url);
-  } catch (error) {
-    ElMessage.error('下载模板失败');
-  }
+    try {
+        const response = await axios.get('/api/services/template', {
+            responseType: 'blob'
+        });
+        const blob = new Blob([response.data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = '服务导入模板.xlsx';
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+    } catch (error) {
+        ElMessage.error('下载模板失败');
+    }
 };
 
-onMounted(async () => {
-  try {
-    const response = await axios.get('/api/projects');
-    if (response.data.code === 0) {
-      // 后端返回的是分页格式，需要提取items
-      projects.value = response.data.data.items || response.data.data;
+const doImport = async () => {
+    if (!importFile.value) {
+        ElMessage.error('请选择要导入的文件');
+        return;
     }
-  } catch (error) {
-    ElMessage.error('加载项目列表失败');
+    if (!importForm.project_id) {
+        ElMessage.error('请选择目标项目');
+        return;
+    }
+    
+    importing.value = true;
+    importResult.value = null;
+    
+    try {
+        const formData = new FormData();
+        formData.append('file', importFile.value);
+        formData.append('project_id', importForm.project_id);
+        if (importForm.subsystem_id) {
+            formData.append('subsystem_id', importForm.subsystem_id);
+        }
+        if (importForm.group_id) {
+            formData.append('group_id', importForm.group_id);
+        }
+        
+        const response = await axios.post('/api/services/import', formData, {
+            headers: {
+                'Content-Type': 'multipart/form-data'
+            }
+        });
+        
+        if (response.data.code === 0) {
+            const data = response.data.data;
+            importResult.value = {
+                success_count: data.added || 0,
+                updated_count: data.updated || 0,
+                failed_count: data.failed || 0,
+                failed_rows: data.failed_items?.map((item, idx) => ({
+                    row_num: idx + 2,
+                    error: item.reason
+                })) || []
+            };
+            
+            let message = `导入完成！成功：${importResult.value.success_count}条，更新：${importResult.value.updated_count}条`;
+            if (importResult.value.failed_count > 0) {
+                message += `，失败：${importResult.value.failed_count}条`;
+            }
+            ElMessage.success(message);
+            
+            // 更新历史记录
+            importHistory.value.unshift({
+                filename: importFile.value.name,
+                time: new Date().toLocaleString('zh-CN'),
+                success: importResult.value.failed_count === 0
+            });
+            if (importHistory.value.length > 5) {
+                importHistory.value.pop();
+            }
+        } else {
+            ElMessage.error(response.data.message || '导入失败');
+        }
+    } catch (error) {
+        ElMessage.error(error.response?.data?.message || '导入失败');
+    } finally {
+        importing.value = false;
+    }
+};
+
+const resetForm = () => {
+  importForm.project_id = null;
+  importForm.subsystem_id = null;
+  importForm.group_id = null;
+  importFile.value = null;
+  importResult.value = null;
+  subsystems.value = [];
+  groups.value = [];
+};
+
+onMounted(() => {
+  loadProjects();
+  // 先从本地存储加载历史记录
+  const savedHistory = localStorage.getItem('importHistory');
+  if (savedHistory) {
+    importHistory.value = JSON.parse(savedHistory);
   }
 });
+
+// 监听历史记录变化，保存到本地
+watch(importHistory, (newVal) => {
+  localStorage.setItem('importHistory', JSON.stringify(newVal));
+}, { deep: true });
 </script>
 
 <style scoped>
 .import-services-page {
-  padding: 20px;
-  max-width: 900px;
-  margin: 0 auto;
+  min-height: 100vh;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  padding: 40px 20px;
 }
 
 .page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  text-align: center;
   margin-bottom: 30px;
 }
 
+.header-content {
+  color: #fff;
+}
+
+.title-section {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 15px;
+  margin-bottom: 10px;
+}
+
+.title-icon {
+  font-size: 36px;
+}
+
 .page-header h1 {
-  font-size: 24px;
+  font-size: 32px;
+  font-weight: 600;
   margin: 0;
 }
 
-.import-container {
-  background: #fff;
-  border-radius: 8px;
-  padding: 24px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
-}
-
-.import-options {
-  margin-bottom: 24px;
-}
-
-.file-name {
-  margin-left: 12px;
-  color: #666;
-}
-
-.preview-section {
-  margin-bottom: 24px;
-  padding: 16px;
-  background: #fafafa;
-  border-radius: 8px;
-}
-
-.preview-section h3 {
-  margin: 0 0 16px 0;
+.subtitle {
   font-size: 16px;
+  opacity: 0.9;
+  margin: 0;
+}
+
+.page-content {
+  max-width: 900px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.filter-card,
+.upload-card,
+.preview-card,
+.result-card,
+.action-card,
+.history-card,
+.tips-card {
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 24px;
+  background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+  border-bottom: 1px solid #e8e8e8;
+}
+
+.card-icon {
+  color: #667eea;
+  font-size: 18px;
+}
+
+.card-header span {
+  font-weight: 600;
   color: #333;
 }
 
-.preview-table {
-  overflow-x: auto;
+.filter-form {
+  padding: 24px;
 }
 
-.preview-table table {
+.full-width {
   width: 100%;
-  border-collapse: collapse;
-  font-size: 14px;
 }
 
-.preview-table th,
-.preview-table td {
-  border: 1px solid #e8e8e8;
-  padding: 8px 12px;
-  text-align: left;
-}
-
-.preview-table th {
-  background: #f5f5f5;
-  font-weight: 500;
-}
-
-.status-pending {
-  color: #1890ff;
-  font-size: 12px;
-}
-
-.import-actions {
+.form-hint {
   display: flex;
-  gap: 12px;
-  margin-bottom: 24px;
-}
-
-.progress-section {
-  margin-bottom: 24px;
-}
-
-.progress-info {
-  display: flex;
-  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
   margin-top: 8px;
-  font-size: 14px;
-  color: #666;
+  font-size: 12px;
+  color: #909399;
 }
 
-.result-section {
-  padding: 20px;
+.form-hint el-icon {
+  font-size: 12px;
+  color: #667eea;
+}
+
+.upload-area {
+  margin: 24px;
+  border: 2px dashed #d9d9d9;
+  border-radius: 12px;
+  padding: 40px 20px;
+  text-align: center;
+  transition: all 0.3s ease;
   background: #fafafa;
+}
+
+.upload-area:hover {
+  border-color: #667eea;
+  background: #f5f7ff;
+}
+
+.upload-area-dragover {
+  border-color: #667eea;
+  background: #f0f4ff;
+  transform: scale(1.02);
+}
+
+.upload-icon-wrapper {
+  width: 80px;
+  height: 80px;
+  margin: 0 auto 16px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.upload-icon {
+  font-size: 40px;
+  color: #fff;
+}
+
+.upload-text {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.upload-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #333;
+}
+
+.upload-subtitle {
+  font-size: 14px;
+  color: #999;
+}
+
+.upload-tip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 16px;
+  color: #999;
+  font-size: 13px;
+}
+
+.tip-icon {
+  font-size: 14px;
+}
+
+.template-section {
+  padding: 0 24px 24px;
+  text-align: center;
+}
+
+.preview-content {
+  padding: 24px;
+}
+
+.file-info {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.file-icon {
+  width: 50px;
+  height: 50px;
   border-radius: 8px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 24px;
+}
+
+.file-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.file-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: #333;
+}
+
+.file-size {
+  font-size: 13px;
+  color: #999;
+}
+
+.result-content {
+  padding: 24px;
 }
 
 .result-summary {
   display: flex;
   justify-content: center;
-  gap: 60px;
+  gap: 40px;
   margin-bottom: 24px;
 }
 
-.result-item {
-  text-align: center;
+.summary-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 24px;
+  border-radius: 12px;
 }
 
-.result-item .count {
-  display: block;
-  font-size: 36px;
-  font-weight: bold;
+.summary-item.success {
+  background: #f6ffed;
+  border: 1px solid #b7eb8f;
 }
 
-.result-item.success .count {
+.summary-item.success .summary-icon {
   color: #52c41a;
 }
 
-.result-item.updated .count {
-  color: #1890ff;
+.summary-item.warning {
+  background: #fff7e6;
+  border: 1px solid #ffd591;
 }
 
-.result-item.failed .count {
-  color: #f5222d;
+.summary-item.warning .summary-icon {
+  color: #faad14;
 }
 
-.result-item .label {
-  font-size: 14px;
-  color: #666;
+.summary-item.error {
+  background: #fff2f0;
+  border: 1px solid #ffccc7;
 }
 
-.failed-details h3 {
-  margin: 0 0 16px 0;
-  font-size: 16px;
-  color: #333;
+.summary-item.error .summary-icon {
+  color: #ff4d4f;
 }
 
-.failed-list {
-  max-height: 300px;
-  overflow-y: auto;
+.summary-icon {
+  font-size: 24px;
 }
 
-.failed-item {
-  padding: 12px;
-  background: #fff;
-  border-radius: 4px;
-  margin-bottom: 12px;
-  border-left: 4px solid #f5222d;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-}
-
-.failed-header {
+.summary-info {
   display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 10px;
+  flex-direction: column;
 }
 
-.sheet-name {
+.summary-value {
+  font-size: 24px;
   font-weight: 600;
   color: #333;
+}
+
+.summary-label {
+  font-size: 13px;
+  color: #999;
+}
+
+.error-list {
+  border: 1px solid #ffccc7;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.error-list-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: #fff2f0;
+  border-bottom: 1px solid #ffccc7;
+}
+
+.error-icon {
+  color: #ff4d4f;
+}
+
+.error-list-header span {
+  font-weight: 600;
+  color: #ff4d4f;
+}
+
+.action-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 24px;
+}
+
+.action-left {
+  display: flex;
+  gap: 12px;
+}
+
+.action-right {
+  display: flex;
+  align-items: center;
+}
+
+.back-link {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #11998e;
+  text-decoration: none;
   font-size: 14px;
 }
 
-.reason-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 4px 10px;
-  background: #fff2f0;
-  border: 1px solid #ffccc7;
-  border-radius: 4px;
-  color: #f5222d;
-  font-size: 12px;
-  font-weight: 500;
-  flex-shrink: 0;
+.back-link:hover {
+  text-decoration: underline;
 }
 
-.failed-detail {
+.history-list {
+  padding: 24px;
+}
+
+.history-item {
   display: flex;
-  align-items: flex-start;
-  padding: 10px 12px;
-  background: #fafafa;
-  border-radius: 4px;
-  margin-bottom: 10px;
-  font-size: 13px;
-}
-
-.failed-detail:last-child {
-  margin-bottom: 0;
-}
-
-.missing-fields {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-left: 8px;
-}
-
-.field-tag {
-  display: inline-flex;
+  justify-content: space-between;
   align-items: center;
-  padding: 4px 10px;
-  background: #fff2f0;
-  border: 1px solid #ffccc7;
-  border-radius: 20px;
-  color: #f5222d;
-  font-size: 12px;
+  padding: 12px 0;
+  border-bottom: 1px dashed #eee;
+}
+
+.history-item:last-child {
+  border-bottom: none;
+}
+
+.history-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history-name {
+  font-size: 14px;
   font-weight: 500;
+  color: #333;
 }
 
-.row-data-container {
-  margin-left: 8px;
-  flex: 1;
-}
-
-.row-data {
-  margin: 0;
-  padding: 8px;
-  background: #fff;
-  border: 1px solid #e8e8e8;
-  border-radius: 4px;
-  font-family: 'Monaco', 'Menlo', monospace;
+.history-time {
   font-size: 12px;
-  color: #666;
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 150px;
-  overflow-y: auto;
-}
-
-.detail-label {
   color: #999;
-  font-weight: 500;
-  flex-shrink: 0;
-  margin-right: 8px;
 }
 
-.detail-value {
+.empty-history {
+  padding: 40px;
+  text-align: center;
+  color: #999;
+}
+
+.empty-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  display: block;
+  opacity: 0.5;
+}
+
+.tips-list {
+  padding: 20px 24px;
+  margin: 0;
+  list-style: none;
+}
+
+.tips-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px dashed #eee;
+}
+
+.tips-list li:last-child {
+  border-bottom: none;
+}
+
+.tip-item-icon {
+  color: #52c41a;
+  font-size: 16px;
+}
+
+.tips-list li span {
+  font-size: 14px;
   color: #666;
-  word-break: break-all;
+}
+
+@media (max-width: 768px) {
+  .result-summary {
+    flex-direction: column;
+    gap: 15px;
+  }
+  
+  .action-card {
+    flex-direction: column;
+    gap: 15px;
+    align-items: stretch;
+  }
+  
+  .action-left {
+    flex-direction: column;
+  }
+  
+  .action-right {
+    justify-content: center;
+  }
 }
 </style>

@@ -19,6 +19,19 @@ from typing import List, Optional
 import asyncio
 import io
 
+def format_script_command(script: str) -> str:
+    """格式化脚本命令，支持多行脚本，将换行转换为 ; 连接（确保所有命令都执行）"""
+    lines = script.strip().split('\n')
+    formatted_lines = []
+    for line in lines:
+        line = line.strip()
+        if line:
+            # 如果是脚本文件名（不含空格）且没有路径前缀，添加 ./ 前缀
+            if ' ' not in line and not line.startswith('./') and not line.startswith('/') and not line.startswith('~'):
+                line = f"./{line}"
+            formatted_lines.append(line)
+    return '; '.join(formatted_lines)
+
 router = APIRouter()
 
 @router.get("/programs", response_model=ResponseModel)
@@ -247,7 +260,7 @@ async def execute_program_script(
                     return ProgramOperationResult(success=False, message="缺少停止或启动脚本")
                 
                 # 执行停止
-                stop_cmd = f"cd {program.program_path} && {stop_script}"
+                stop_cmd = f"cd {program.program_path} && {format_script_command(stop_script)}"
                 stop_output, stop_error, stop_success = await conn.execute_command(stop_cmd)
                 
                 if not stop_success:
@@ -262,12 +275,12 @@ async def execute_program_script(
                 await asyncio.sleep(2)
                 
                 # 执行启动
-                start_cmd = f"cd {program.program_path} && {start_script}"
+                start_cmd = f"cd {program.program_path} && {format_script_command(start_script)}"
                 output, error, success = await conn.execute_command(start_cmd)
             else:
                 return ProgramOperationResult(success=False, message=f"缺少{action}脚本")
         else:
-            command = f"cd {program.program_path} && {script}"
+            command = f"cd {program.program_path} && {format_script_command(script)}"
             output, error, success = await conn.execute_command(command)
         
         if success:

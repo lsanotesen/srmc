@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from sqlalchemy.sql import func
 from core.database import Base
 
@@ -27,4 +27,4 @@ class Process(Base):
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     
-    project = relationship('Project', backref='processes')
+    project = relationship('Project', backref=backref('processes', lazy='noload'))

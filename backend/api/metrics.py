@@ -42,7 +42,7 @@ async def get_metrics(db: Session = Depends(get_db)):
         service_count.labels(
             project=service.project_id,
             deploy_type=service.deploy_type or 'HOST',
-            status=service.status or 'UNKNOWN'
+            status='UNKNOWN'
         ).set(1)
     
     return PlainTextResponse(content=generate_latest(), media_type="text/plain")

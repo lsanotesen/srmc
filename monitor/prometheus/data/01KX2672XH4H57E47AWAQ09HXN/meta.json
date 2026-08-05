@@ -1,0 +1,18 @@
+{
+	"ulid": "01KX2672XH4H57E47AWAQ09HXN",
+	"minTime": 1783548000441,
+	"maxTime": 1783555200000,
+	"stats": {
+		"numSamples": 865920,
+		"numFloatSamples": 865920,
+		"numSeries": 1804,
+		"numChunks": 7216
+	},
+	"compaction": {
+		"level": 1,
+		"sources": [
+			"01KX2672XH4H57E47AWAQ09HXN"
+		]
+	},
+	"version": 1
+}

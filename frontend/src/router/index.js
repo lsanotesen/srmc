@@ -18,15 +18,20 @@ const routes = [
       { path: '/shell', name: 'Shell', component: () => import('../pages/Shell.vue') },
       { path: '/monitoring', name: 'Monitoring', component: () => import('../pages/Monitoring.vue') },
       { path: '/import-services', name: 'ImportServices', component: () => import('../pages/ImportServices.vue') },
+      { path: '/export-services', name: 'ExportServices', component: () => import('../pages/ExportServices.vue') },
       { path: '/subsystems', name: 'Subsystems', component: () => import('../pages/Subsystems.vue') },
       { path: '/service-groups', name: 'ServiceGroups', component: () => import('../pages/ServiceGroups.vue') },
       { path: '/servers', name: 'Servers', component: () => import('../pages/Servers.vue') },
+      { path: '/agents', name: 'Agents', component: () => import('../pages/Agents.vue') },
       
       { path: '/sql', name: 'SQL', component: () => import('../pages/SQL.vue') },
       { path: '/es', name: 'ES', component: () => import('../pages/ES.vue') },
       { path: '/audit', name: 'Audit', component: () => import('../pages/Audit.vue') },
       { path: '/users', name: 'Users', component: () => import('../pages/Users.vue') },
-      { path: '/settings', name: 'Settings', component: () => import('../pages/Settings.vue') }
+      { path: '/settings', name: 'Settings', component: () => import('../pages/Settings.vue') },
+      { path: '/organization', name: 'Organization', component: () => import('../pages/Organization.vue') },
+      { path: '/roles', name: 'RoleManagement', component: () => import('../pages/RoleManagement.vue') },
+      { path: '/usage-guide', name: 'UsageGuide', component: () => import('../pages/UsageGuide.vue') }
     ]
   }
 ]

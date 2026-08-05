@@ -5,6 +5,15 @@ from utils.redis_client import get_redis
 from core.config import settings
 import os
 
+async def execute_command_with_retry(conn, command, max_retries=2):
+    """执行SSH命令，支持重试"""
+    for attempt in range(max_retries):
+        output, error, success = await conn.execute_command(command)
+        if success:
+            return output, error, success
+        await asyncio.sleep(0.5)
+    return "", "Command failed after retries", False
+
 async def check_port_status(ip: str, port: int) -> bool:
     """通过端口检测程序状态"""
     try:
@@ -124,33 +133,117 @@ async def get_batch_program_status(programs: list) -> dict:
                                     status = "RUNNING"
                                 else:
                                     status = "STOPPED"
-                    else:
-                        # 主机部署：优先端口检测
-                        if prog['port']:
-                            if await check_port_status(ip, prog['port']):
+                    elif deploy_type == 'DOCKER_COMPOSE':
+                        # Docker Compose部署：检测compose项目状态
+                        if conn:
+                            program_path = prog.get('program_path', '')
+                            if program_path:
+                                command = f"cd {program_path} && docker-compose ps -q 2>/dev/null || docker compose ps -q 2>/dev/null"
+                            else:
+                                command = "docker-compose ps -q 2>/dev/null || docker compose ps -q 2>/dev/null"
+                            output, error, success = await conn.execute_command(command)
+                            if success and output.strip() != '':
                                 status = "RUNNING"
-                        else:
-                            # SSH进程检测
-                            if conn and prog['program_path']:
-                                keyword = os.path.basename(prog['program_path'])
-                                command = f"ps -ef | grep -E '{keyword}' | grep -v grep"
-                                output, error, success = await conn.execute_command(command)
+                            else:
+                                status = "STOPPED"
+                    else:
+                        # 主机部署：优先脚本解析，端口检测为辅
+                        if conn and prog['program_path']:
+                            program_path = prog['program_path']
+                            if program_path.startswith('~'):
+                                program_path = program_path.replace('~', '/home/' + first_prog['username'])
+                            
+                            base_dir = os.path.dirname(program_path)
+                            
+                            # 策略1：解析 start.sh 获取真实启动命令和端口
+                            start_sh_path = os.path.join(base_dir, 'start.sh')
+                            start_command = f"cat {start_sh_path} 2>/dev/null | head -50"
+                            output, error, success = await execute_command_with_retry(conn, start_command)
+                            if success and output.strip() != '':
+                                import re
+                                start_content = output.strip()
+                                
+                                # 从 start.sh 提取端口
+                                port_match = re.search(r'-p\s+(\d+)|--port\s+(\d+)|port=(\d+)', start_content)
+                                if port_match:
+                                    extracted_port = port_match.group(1) or port_match.group(2) or port_match.group(3)
+                                    if extracted_port and extracted_port.isdigit():
+                                        if await check_port_status(ip, int(extracted_port)):
+                                            status = "RUNNING"
+                                        else:
+                                            ssh_port_command = f"netstat -tlnp 2>/dev/null | grep ': {extracted_port} ' || ss -tlnp 2>/dev/null | grep ': {extracted_port} '"
+                                            p_output, p_error, p_success = await execute_command_with_retry(conn, ssh_port_command)
+                                            if p_success and p_output.strip() != '':
+                                                status = "RUNNING"
+                            
+                                # 从 start.sh 提取启动命令（java/python/node等）
+                                if status != "RUNNING":
+                                    exec_match = re.search(r'(java|python|node|npm)\s+(.+)', start_content)
+                                    if exec_match:
+                                        exec_keyword = exec_match.group(1)
+                                        args = exec_match.group(2)
+                                        jar_match = re.search(r'(\S+\.jar)', args)
+                                        py_match = re.search(r'(\S+\.py)', args)
+                                        if jar_match:
+                                            exec_keyword = jar_match.group(1)
+                                        elif py_match:
+                                            exec_keyword = py_match.group(1)
+                                        ps_command = f"ps -ef | grep '{exec_keyword}' | grep -v grep"
+                                        p_output, p_error, p_success = await execute_command_with_retry(conn, ps_command)
+                                        if p_success and p_output.strip() != '':
+                                            status = "RUNNING"
+                            
+                            # 策略2：完整路径匹配
+                            if status != "RUNNING":
+                                full_path_command = f"ps -ef | grep '{program_path}' | grep -v grep"
+                                output, error, success = await execute_command_with_retry(conn, full_path_command)
+                                if success and output.strip() != '':
+                                    status = "RUNNING"
+                            
+                            # 策略3：端口检测（配置的端口）
+                            if status != "RUNNING" and prog['port']:
+                                ports = str(prog['port']).split(',')
+                                for port in ports:
+                                    port = port.strip()
+                                    if port.isdigit():
+                                        if await check_port_status(ip, int(port)):
+                                            status = "RUNNING"
+                                            break
+                                        else:
+                                            ssh_port_command = f"netstat -tlnp 2>/dev/null | grep ': {port} ' || ss -tlnp 2>/dev/null | grep ': {port} '"
+                                            p_output, p_error, p_success = await execute_command_with_retry(conn, ssh_port_command)
+                                            if p_success and p_output.strip() != '':
+                                                status = "RUNNING"
+                                                break
+                            
+                            # 策略4：父目录名匹配（兜底）
+                            if status != "RUNNING":
+                                keyword = os.path.basename(base_dir)
+                                if keyword in ['server', 'client', 'bin', 'app']:
+                                    keyword = os.path.basename(os.path.dirname(base_dir))
+                                parent_command = f"ps -ef | grep '{keyword}' | grep -v grep"
+                                output, error, success = await execute_command_with_retry(conn, parent_command)
                                 if success and output.strip() != '':
                                     status = "RUNNING"
                                 else:
                                     status = "STOPPED"
-                            else:
-                                status = "STOPPED"
+                        else:
+                            status = "STOPPED"
                 except Exception as e:
                     status = "UNKNOWN"
                 
                 result[prog['id']] = status
                 
-                # 缓存状态到Redis
+                # 缓存状态到Redis：只有状态真正改变时才更新
                 try:
                     redis = get_redis()
                     if redis:
-                        redis.setex(f"program_status:{prog['id']}", 12, status)
+                        cache_key = f"service_status:{prog['id']}"
+                        cache_source_key = f"service_status_source:{prog['id']}"
+                        old_status = redis.get(cache_key)
+                        if old_status != status:
+                            redis.setex(cache_key, 60, status)
+                            redis.setex(cache_source_key, 60, 'SSH')
                 except:
                     pass
         except Exception:

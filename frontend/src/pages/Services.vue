@@ -3,10 +3,10 @@
     <div class="page-header">
       <h1>服务管理</h1>
       <div class="actions">
-        <el-button type="primary" @click="showAddDialog = true">新增服务</el-button>
-        <el-button @click="downloadTemplate">下载模板</el-button>
-        <el-button @click="showImportDialog = true">导入服务</el-button>
-        <el-button @click="exportServices">导出服务</el-button>
+        <el-button v-if="hasPermission('service:view')" type="primary" @click="showAddDialog = true">新增服务</el-button>
+        <el-button v-if="hasPermission('service:view')" @click="downloadTemplate">下载模板</el-button>
+        <el-button v-if="hasPermission('service:view')" @click="showImportDialog = true">导入服务</el-button>
+        <el-button v-if="hasPermission('service:view')" @click="goToExport">导出服务</el-button>
       </div>
     </div>
 
@@ -14,6 +14,12 @@
       <el-select v-model="filters.project_id" placeholder="选择项目" clearable class="project-select">
         <el-option label="全部项目" value="" />
         <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
+      </el-select>
+      <el-select v-model="filters.deploy_type" placeholder="部署方式" clearable class="deploy-select">
+        <el-option label="全部" value="" />
+        <el-option label="主机部署" value="HOST" />
+        <el-option label="Docker容器" value="DOCKER" />
+        <el-option label="Docker Compose" value="DOCKER_COMPOSE" />
       </el-select>
       <el-input v-model="filters.keyword" placeholder="搜索功能描述或模块" class="search-input" @keyup.enter="loadServices" />
       <el-input v-model="filters.ip" placeholder="搜索IP地址" class="ip-input" @keyup.enter="loadServices" />
@@ -34,14 +40,6 @@
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="service_type" label="服务类型" min-width="120">
-        <template #default="scope">
-          <el-tag :type="getServiceType(scope.row.service_type).type">
-            {{ getServiceType(scope.row.service_type).label }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="instance_name" label="运行实例" min-width="120" show-overflow-tooltip />
       <el-table-column prop="ip" label="IP地址" min-width="120" />
       <el-table-column prop="username" label="用户名" min-width="100" />
       <el-table-column prop="program_path" label="程序路径" min-width="180" show-overflow-tooltip />
@@ -58,10 +56,10 @@
             <div class="action-btn view-btn" @click="viewService(scope.row)">
               <span>查看</span>
             </div>
-            <div class="action-btn edit-btn" @click="editService(scope.row)">
+            <div v-if="hasPermission('service:edit-config')" class="action-btn edit-btn" @click="editService(scope.row)">
               <span>编辑</span>
             </div>
-            <div class="action-btn delete-btn" @click="deleteService(scope.row)">
+            <div v-if="hasPermission('service:edit-config')" class="action-btn delete-btn" @click="deleteService(scope.row)">
               <span>删除</span>
             </div>
           </div>
@@ -70,7 +68,7 @@
       <el-table-column label="日志" width="80" align="center">
         <template #default="scope">
           <div class="action-buttons">
-            <div class="action-btn log-btn" @click="viewLog(scope.row)">
+            <div v-if="hasPermission('log:view')" class="action-btn log-btn" @click="viewLog(scope.row)">
               <span>日志</span>
             </div>
           </div>
@@ -80,15 +78,15 @@
         <template #default="scope">
           <div class="action-buttons">
             <template v-if="scope.row.status !== 'RUNNING'">
-              <div class="action-btn start-btn" @click="startService(scope.row)">
+              <div v-if="hasPermission('service:start')" class="action-btn start-btn" @click="startService(scope.row)">
                 <span>启动</span>
               </div>
             </template>
             <template v-else>
-              <div class="action-btn stop-btn" @click="stopService(scope.row)">
+              <div v-if="hasPermission('service:stop')" class="action-btn stop-btn" @click="stopService(scope.row)">
                 <span>停止</span>
               </div>
-              <div class="action-btn restart-btn" @click="restartService(scope.row)">
+              <div v-if="hasPermission('service:restart')" class="action-btn restart-btn" @click="restartService(scope.row)">
                 <span>重启</span>
               </div>
             </template>
@@ -98,7 +96,7 @@
       <el-table-column label="远程登录" width="100" align="center">
         <template #default="scope">
           <div class="action-buttons">
-            <div class="action-btn login-btn" @click="webShell(scope.row)">
+            <div v-if="hasPermission('webshell:login')" class="action-btn login-btn" @click="webShell(scope.row)">
               <span>登录</span>
             </div>
           </div>
@@ -178,12 +176,6 @@
             {{ getDeployType(selectedService.deploy_type).label }}
           </el-tag>
         </el-descriptions-item>
-        <el-descriptions-item label="服务类型">
-          <el-tag :type="getServiceType(selectedService.service_type).type">
-            {{ getServiceType(selectedService.service_type).label }}
-          </el-tag>
-        </el-descriptions-item>
-        <el-descriptions-item label="运行实例">{{ selectedService.instance_name || '-' }}</el-descriptions-item>
         <el-descriptions-item label="IP地址">{{ selectedService.ip || '-' }}</el-descriptions-item>
         <el-descriptions-item label="SSH端口">{{ selectedService.ssh_port || '-' }}</el-descriptions-item>
         <el-descriptions-item label="SSH用户名">{{ selectedService.username || '-' }}</el-descriptions-item>
@@ -201,34 +193,8 @@
         <template v-else-if="selectedService.service_type === 'DOCKER'">
           <el-descriptions-item label="容器名称">{{ selectedService.container_name || '-' }}</el-descriptions-item>
           <el-descriptions-item label="镜像名称">{{ selectedService.image_name || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="镜像版本">{{ selectedService.image_tag || '-' }}</el-descriptions-item>
           <el-descriptions-item label="容器ID">{{ selectedService.container_id || '-' }}</el-descriptions-item>
           <el-descriptions-item label="端口映射">{{ selectedService.port_mapping || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="Volume挂载">{{ selectedService.volume_mapping || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="网络模式">{{ selectedService.network_mode || '-' }}</el-descriptions-item>
-        </template>
-        
-        <!-- ES服务信息 -->
-        <template v-else-if="selectedService.service_type === 'ES'">
-          <el-descriptions-item label="集群名称">{{ selectedService.cluster_name || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="节点数量">{{ selectedService.node_count || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="Master节点">{{ selectedService.master_node || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="Data节点">{{ selectedService.data_nodes || '-' }}</el-descriptions-item>
-        </template>
-        
-        <!-- Redis服务信息 -->
-        <template v-else-if="selectedService.service_type === 'REDIS'">
-          <el-descriptions-item label="角色">{{ selectedService.redis_role || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="内存使用率">{{ selectedService.redis_memory_usage || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="Key数量">{{ selectedService.redis_key_count || '-' }}</el-descriptions-item>
-        </template>
-        
-        <!-- MySQL服务信息 -->
-        <template v-else-if="selectedService.service_type === 'MYSQL'">
-          <el-descriptions-item label="版本">{{ selectedService.mysql_version || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="连接数">{{ selectedService.mysql_connection_count || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="主从状态">{{ selectedService.mysql_slave_status || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="数据库数量">{{ selectedService.mysql_db_count || '-' }}</el-descriptions-item>
         </template>
         
         <!-- 默认信息（其他服务类型） -->
@@ -246,12 +212,6 @@
             {{ selectedService.status || '未知' }}
           </el-tag>
         </el-descriptions-item>
-        
-        <!-- 监控信息 -->
-        <el-descriptions-item label="CPU使用率">{{ selectedService.cpu_usage || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="内存使用率">{{ selectedService.memory_usage || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="磁盘使用率">{{ selectedService.disk_usage || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="网络IO">{{ selectedService.network_io || '-' }}</el-descriptions-item>
         
         <el-descriptions-item label="备注" :span="2">{{ selectedService.remark || '-' }}</el-descriptions-item>
       </el-descriptions>
@@ -281,7 +241,34 @@
       </div>
     </el-dialog>
 
-    <el-dialog title="远程终端" v-model="showShellDialog" width="900px" height="600px" :before-close="handleShellClose">
+    <!-- 最小化窗口条 - 使用 Teleport 确保在最顶层 -->
+    <Teleport to="body">
+      <div v-if="shellMinimized" class="shell-minimized-bar" @click="restoreShell">
+        <span class="shell-minimized-title">远程终端</span>
+        <el-icon class="shell-minimized-icon"><Promotion /></el-icon>
+      </div>
+    </Teleport>
+
+    <!-- 远程终端对话框 -->
+    <el-dialog 
+      v-model="showShellDialog" 
+      width="900px" 
+      height="600px" 
+      :before-close="handleShellClose"
+      draggable
+      destroy-on-close
+      class="shell-dialog"
+      append-to-body
+    >
+      <template #header>
+        <div class="shell-dialog-header">
+          <span class="shell-dialog-title">远程终端</span>
+          <div class="shell-dialog-controls">
+            <el-icon class="shell-control-icon" @click.stop="minimizeShell"><Minus /></el-icon>
+            <el-icon class="shell-control-icon" @click.stop="showShellDialog = false"><Close /></el-icon>
+          </div>
+        </div>
+      </template>
       <div class="shell-header">
         <el-tag type="primary" v-if="currentShellService">{{ currentShellService.func_desc }}</el-tag>
         <el-tag v-if="shellConnected" class="connected-tag">已连接</el-tag>
@@ -305,27 +292,73 @@
       </div>
     </el-dialog>
 
-    <el-dialog title="导入服务" v-model="showImportDialog">
-      <el-upload
-        class="upload-demo"
-        :auto-upload="false"
-        :on-change="handleFileChange"
-        accept=".xlsx"
-      >
-        <el-button type="primary">选择文件</el-button>
-      </el-upload>
-      <p class="import-tip">支持.xlsx格式文件，可先下载模板</p>
+    <el-dialog title="导入服务" v-model="showImportDialog" width="600px">
+      <div class="import-container">
+        <el-alert
+          title="导入说明"
+          type="info"
+          :closable="false"
+          show-icon
+          class="import-alert"
+        >
+          <template #default>
+            <ul class="import-tips">
+              <li>支持 .xlsx 格式的Excel文件</li>
+              <li>建议先下载模板，按照模板格式填写数据</li>
+              <li>导入时会自动更新已存在的服务，新增不存在的服务</li>
+              <li>功能描述为必填项，其他字段根据需要填写</li>
+            </ul>
+          </template>
+        </el-alert>
+        
+        <div class="upload-section">
+          <el-upload
+            class="upload-demo"
+            :auto-upload="false"
+            :on-change="handleFileChange"
+            :on-remove="handleFileRemove"
+            accept=".xlsx"
+            drag
+            :limit="1"
+          >
+            <el-icon class="el-icon--upload"><upload-filled /></el-icon>
+            <div class="el-upload__text">
+              拖拽文件到此处或 <em>点击上传</em>
+            </div>
+            <template #tip>
+              <div class="el-upload__tip">
+                只能上传 xlsx 文件，且不超过 10MB
+              </div>
+            </template>
+          </el-upload>
+        </div>
+        
+        <div class="template-section">
+          <el-button type="primary" link @click="downloadTemplate">
+            <el-icon><download /></el-icon>
+            下载导入模板
+          </el-button>
+        </div>
+      </div>
       <template #footer>
         <el-button @click="showImportDialog = false">取消</el-button>
-        <el-button type="primary" @click="doImport">导入</el-button>
+        <el-button type="primary" @click="doImport" :loading="importing" :disabled="!importFile">
+          {{ importing ? '导入中...' : '开始导入' }}
+        </el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
-<script setup>import { ref, reactive, onMounted, onUnmounted } from 'vue';
+<script setup>import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue';
 import { ElMessage } from 'element-plus';
+import { UploadFilled, Download, Minus, Close, Promotion } from '@element-plus/icons-vue';
+import { useRouter } from 'vue-router';
 import axios from '@/utils/axios';
+import { usePermission } from '@/composables/usePermission';
+
+const { hasPermission } = usePermission();
+const router = useRouter();
 const services = ref([]);
 const projects = ref([]);
 const pagination = reactive({
@@ -335,6 +368,7 @@ const pagination = reactive({
 });
 const filters = reactive({
  project_id: '',
+ deploy_type: '',
  keyword: '',
  ip: ''
 });
@@ -343,7 +377,9 @@ const showDetailDialog = ref(false);
 const showLogDialog = ref(false);
 const showImportDialog = ref(false);
 const showShellDialog = ref(false);
+const shellMinimized = ref(false);
 const importFile = ref(null);
+const importing = ref(false);
 const selectedService = reactive({});
 const selectedLogService = ref(null);
 const currentShellService = ref(null);
@@ -355,6 +391,7 @@ const logLines = ref(200);
 const logContentText = ref('');
 const logFiles = ref([]);
 const selectedLogFile = ref('');
+const subsystems = ref([]);
 const serviceForm = reactive({
  id: null,
  project_id: '',
@@ -393,33 +430,16 @@ const getStatusType = (status) => {
 };
 
 const deployTypeMap = {
- 'HOST': { label: 'Host', type: 'primary' },
- 'DOCKER': { label: 'Docker', type: 'success' },
- 'CLUSTER': { label: 'Cluster', type: 'warning' }
+ 'HOST': { label: '主机部署', type: 'primary' },
+ 'DOCKER': { label: 'Docker容器', type: 'success' },
+ 'DOCKER_COMPOSE': { label: 'Docker Compose', type: 'warning' },
+ 'CLUSTER': { label: '集群部署', type: 'danger' }
 };
 
 const getDeployType = (deployType) => {
  return deployTypeMap[deployType] || { label: deployType || '未知', type: 'info' };
 };
 
-const serviceTypeMap = {
- 'HOST_APP': { label: '应用服务', type: 'primary' },
- 'DOCKER': { label: 'Docker容器', type: 'success' },
- 'ES': { label: 'Elasticsearch', type: 'warning' },
- 'SOLR': { label: 'Solr', type: 'warning' },
- 'REDIS': { label: 'Redis', type: 'danger' },
- 'MYSQL': { label: 'MySQL', type: 'info' },
- 'POSTGRESQL': { label: 'PostgreSQL', type: 'info' },
- 'KAFKA': { label: 'Kafka', type: 'primary' },
- 'ROCKETMQ': { label: 'RocketMQ', type: 'primary' },
- 'RABBITMQ': { label: 'RabbitMQ', type: 'primary' },
- 'NGINX': { label: 'Nginx', type: 'success' },
- 'AI_MODEL': { label: 'AI服务', type: 'danger' }
-};
-
-const getServiceType = (serviceType) => {
- return serviceTypeMap[serviceType] || { label: serviceType || '未知', type: 'info' };
-};
 const loadServices = async () => {
  try {
  const params = new URLSearchParams();
@@ -427,6 +447,9 @@ const loadServices = async () => {
  params.append('size', pagination.size);
  if (filters.project_id) {
  params.append('project_id', filters.project_id);
+ }
+ if (filters.deploy_type) {
+ params.append('deploy_type', filters.deploy_type);
  }
  if (filters.keyword) {
  params.append('func_desc', filters.keyword);
@@ -459,6 +482,24 @@ const loadProjects = async () => {
  }
  catch (error) {
  console.error('加载项目列表失败', error);
+ }
+};
+const loadSubsystems = async (projectId) => {
+ try {
+ const response = await axios.get(`/api/projects/${projectId}/subsystems`);
+ if (response.data.code === 0) {
+ subsystems.value = response.data.data || [];
+ }
+ }
+ catch (error) {
+ console.error('加载子系统列表失败', error);
+ subsystems.value = [];
+ }
+};
+const handleProjectChange = (projectId) => {
+ subsystems.value = [];
+ if (projectId) {
+ loadSubsystems(projectId);
  }
 };
 const updateStatuses = async () => {
@@ -770,34 +811,21 @@ const downloadTemplate = async () => {
  ElMessage.error('下载模板失败');
  }
 };
-const exportServices = async () => {
- try {
- const params = new URLSearchParams();
- if (filters.project_id)
- params.append('project_id', filters.project_id);
- const response = await axios.get(`/api/services/export?${params}`, { responseType: 'blob' });
- const blob = new Blob([response.data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
- const url = window.URL.createObjectURL(blob);
- const a = document.createElement('a');
- a.href = url;
- a.download = 'services.xlsx';
- document.body.appendChild(a);
- a.click();
- window.URL.revokeObjectURL(url);
- document.body.removeChild(a);
- }
- catch (error) {
- ElMessage.error('导出失败');
- }
+const goToExport = () => {
+ router.push('/export-services');
 };
 const handleFileChange = (file) => {
  importFile.value = file.raw;
+};
+const handleFileRemove = () => {
+ importFile.value = null;
 };
 const doImport = async () => {
  if (!importFile.value) {
  ElMessage.error('请选择要导入的文件');
  return;
  }
+ importing.value = true;
  const formData = new FormData();
  formData.append('file', importFile.value);
  try {
@@ -805,7 +833,11 @@ const doImport = async () => {
  headers: { 'Content-Type': 'multipart/form-data' }
  });
  if (response.data.code === 0) {
- ElMessage.success(response.data.data.message);
+ const result = response.data.data;
+ ElMessage.success(`导入成功！新增 ${result.added} 条，更新 ${result.updated} 条，失败 ${result.failed} 条`);
+ if (result.failed > 0 && result.failed_items && result.failed_items.length > 0) {
+ console.error('导入失败的项目:', result.failed_items);
+ }
  showImportDialog.value = false;
  loadServices();
  }
@@ -816,6 +848,9 @@ const doImport = async () => {
  catch (error) {
  ElMessage.error(error.response?.data?.message || '导入失败');
  }
+ finally {
+ importing.value = false;
+ }
 };
 
 let websocket = null;
@@ -825,11 +860,52 @@ const webShell = (service) => {
  shellOutputText.value = '';
  shellInputText.value = '';
  shellConnected.value = false;
+ shellMinimized.value = false;
  showShellDialog.value = true;
+ 
+ // 确保对话框正常显示
+ nextTick(() => {
+    const dialog = document.querySelector('.shell-dialog');
+    const overlay = dialog?.parentElement?.querySelector('.v-modal');
+    if (dialog?.parentElement) {
+      dialog.parentElement.style.display = '';
+    }
+    if (overlay) {
+      overlay.style.display = '';
+    }
+  });
  
  setTimeout(() => {
  connectShell();
  }, 100);
+};
+
+const minimizeShell = () => {
+ shellMinimized.value = true;
+ // 找到对话框的 wrapper 并隐藏
+ nextTick(() => {
+    const dialog = document.querySelector('.shell-dialog');
+    const overlay = dialog?.parentElement?.querySelector('.v-modal');
+    if (dialog?.parentElement) {
+      dialog.parentElement.style.display = 'none';
+    }
+    if (overlay) {
+      overlay.style.display = 'none';
+    }
+  });
+};
+
+const restoreShell = () => {
+ shellMinimized.value = false;
+ // 恢复显示对话框
+ const dialog = document.querySelector('.shell-dialog');
+ const overlay = dialog?.parentElement?.querySelector('.v-modal');
+ if (dialog?.parentElement) {
+   dialog.parentElement.style.display = '';
+ }
+ if (overlay) {
+   overlay.style.display = '';
+ }
 };
 
 const connectShell = () => {
@@ -902,6 +978,7 @@ const sendShellCommand = () => {
 
 const handleShellClose = () => {
  disconnectShell();
+ shellMinimized.value = false;
  showShellDialog.value = false;
 };
 
@@ -956,6 +1033,46 @@ onUnmounted(() => {
 
 .ip-input {
   width: 150px;
+}
+
+/* 导入导出样式 */
+.import-container {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.import-alert {
+  margin-bottom: 10px;
+}
+
+.import-tips {
+  margin: 0;
+  padding-left: 20px;
+  line-height: 1.8;
+}
+
+.import-tips li {
+  margin: 5px 0;
+}
+
+.upload-section {
+  border: 2px dashed #dcdfe6;
+  border-radius: 6px;
+  padding: 20px;
+  text-align: center;
+  transition: all 0.3s;
+}
+
+.upload-section:hover {
+  border-color: #409eff;
+}
+
+.template-section {
+  text-align: center;
+  padding: 10px;
+  background: #f5f7fa;
+  border-radius: 4px;
 }
 
 .import-tip {
@@ -1135,5 +1252,85 @@ onUnmounted(() => {
   background: #fee2e2;
   color: #991b1b;
   border: none;
+}
+
+/* 最小化窗口条 */
+.shell-minimized-bar {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+  color: white;
+  padding: 12px 20px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 4px 12px rgba(6, 182, 212, 0.4);
+  z-index: 2000;
+  transition: all 0.3s ease;
+}
+
+.shell-minimized-bar:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(6, 182, 212, 0.5);
+}
+
+.shell-minimized-title {
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.shell-minimized-icon {
+  font-size: 18px;
+}
+
+/* 自定义对话框头部 */
+.shell-dialog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.shell-dialog-title {
+  font-weight: 600;
+  font-size: 16px;
+}
+
+.shell-dialog-controls {
+  display: flex;
+  gap: 12px;
+}
+
+.shell-control-icon {
+  cursor: pointer;
+  font-size: 18px;
+  color: #606266;
+  transition: all 0.2s ease;
+  padding: 4px;
+  border-radius: 4px;
+}
+
+.shell-control-icon:hover {
+  color: #409eff;
+  background: #ecf5ff;
+}
+
+/* 对话框样式 */
+:deep(.shell-dialog .el-dialog__header) {
+  padding: 15px 20px;
+  border-bottom: 1px solid #e4e7ed;
+  margin-right: 0;
+}
+
+:deep(.shell-dialog .el-dialog__body) {
+  padding: 20px;
+}
+
+/* 最小化时隐藏对话框 */
+.shell-dialog-minimized {
+  display: none !important;
 }
 </style>

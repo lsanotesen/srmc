@@ -8,13 +8,13 @@
         <div class="page-header">
           <h1>服务管理</h1>
           <div class="actions">
-            <el-button type="danger" @click="confirmBatchDelete" :disabled="selectedServices.length === 0">
+            <el-button v-if="hasPermission('service:edit-config')" type="danger" @click="confirmBatchDelete" :disabled="selectedServices.length === 0">
               批量删除 ({{ selectedServices.length }})
             </el-button>
-            <el-button type="primary" @click="showAddDialog = true">新增服务</el-button>
+            <el-button v-if="hasPermission('service:view')" type="primary" @click="showAddDialog = true">新增服务</el-button>
             <el-button @click="downloadTemplate">下载模板</el-button>
-            <el-button type="primary" @click="goToImport">导入服务</el-button>
-            <el-button @click="exportServices">导出服务</el-button>
+            <el-button v-if="hasPermission('service:view')" type="primary" @click="goToImport">导入服务</el-button>
+            <el-button v-if="hasPermission('service:view')" @click="goToExport">导出服务</el-button>
           </div>
         </div>
 
@@ -58,34 +58,42 @@
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="service_type" label="服务类型" min-width="120">
+            <el-table-column prop="agent_status" label="Agent状态" width="100">
               <template #default="scope">
-                <el-tag :type="getServiceType(scope.row.service_type).type">
-                  {{ getServiceType(scope.row.service_type).label }}
+                <el-tag v-if="scope.row.agent_uuid" :type="scope.row.agent_status === 'online' ? 'success' : 'danger'">
+                  {{ scope.row.agent_status === 'online' ? '在线' : '离线' }}
                 </el-tag>
+                <span v-else style="color: #999;">未关联</span>
               </template>
             </el-table-column>
-            <el-table-column prop="instance_name" label="运行实例" min-width="120" show-overflow-tooltip />
             <el-table-column prop="ip" label="IP地址" min-width="120" />
             <el-table-column prop="username" label="用户名" min-width="100" />
             <el-table-column prop="program_path" label="程序路径" min-width="180" show-overflow-tooltip />
-            <el-table-column prop="status" label="状态" width="120">
+            <el-table-column prop="status" label="状态" width="140">
               <template #default="scope">
-                <el-tag :type="getStatusType(scope.row.status)">
-                  {{ scope.row.status || '未知' }}
-                </el-tag>
+                <div class="status-cell">
+                  <el-tag :type="getStatusType(scope.row.status)">
+                    {{ getStatusText(scope.row.status) }}
+                  </el-tag>
+                  <span v-if="scope.row.status_source === 'AGENT'" class="status-source agent-source">
+                    Agent
+                  </span>
+                  <span v-else class="status-source ssh-source">
+                    SSH
+                  </span>
+                </div>
               </template>
             </el-table-column>
             <el-table-column label="操作" width="200" align="center">
               <template #default="scope">
                 <div class="action-buttons">
                   <div class="action-btn view-btn" @click="viewService(scope.row)">
-                    <span>查看</span>
+                    <span>详情</span>
                   </div>
-                  <div class="action-btn edit-btn" @click="editService(scope.row)">
+                  <div v-if="hasPermission('service:edit-config')" class="action-btn edit-btn" @click="editService(scope.row)">
                     <span>编辑</span>
                   </div>
-                  <div class="action-btn delete-btn" @click="deleteService(scope.row)">
+                  <div v-if="hasPermission('service:edit-config')" class="action-btn delete-btn" @click="deleteService(scope.row)">
                     <span>删除</span>
                   </div>
                 </div>
@@ -94,7 +102,7 @@
             <el-table-column label="日志" width="80" align="center">
               <template #default="scope">
                 <div class="action-buttons">
-                  <div class="action-btn log-btn" @click="viewLog(scope.row)">
+                  <div v-if="hasPermission('log:view')" class="action-btn log-btn" @click="viewLog(scope.row)">
                     <span>日志</span>
                   </div>
                 </div>
@@ -103,18 +111,18 @@
             <el-table-column label="启停控制" width="160" align="center">
               <template #default="scope">
                 <div class="action-buttons">
-                  <template v-if="scope.row.status !== 'RUNNING'">
-                    <div class="action-btn start-btn" :class="{ 'disabled': operatingServices.has(scope.row.id) }" @click="startService(scope.row)">
+                  <template v-if="!isRunning(scope.row.status)">
+                    <div v-if="hasPermission('service:start')" class="action-btn start-btn" :class="{ 'disabled': operatingServices.has(scope.row.id) }" @click="startService(scope.row)">
                       <span v-if="operatingServices.has(scope.row.id)">启动中...</span>
                       <span v-else>启动</span>
                     </div>
                   </template>
                   <template v-else>
-                    <div class="action-btn stop-btn" :class="{ 'disabled': operatingServices.has(scope.row.id) }" @click="stopService(scope.row)">
+                    <div v-if="hasPermission('service:stop')" class="action-btn stop-btn" :class="{ 'disabled': operatingServices.has(scope.row.id) }" @click="stopService(scope.row)">
                       <span v-if="operatingServices.has(scope.row.id)">停止中...</span>
                       <span v-else>停止</span>
                     </div>
-                    <div class="action-btn restart-btn" :class="{ 'disabled': operatingServices.has(scope.row.id) }" @click="restartService(scope.row)">
+                    <div v-if="hasPermission('service:restart')" class="action-btn restart-btn" :class="{ 'disabled': operatingServices.has(scope.row.id) }" @click="restartService(scope.row)">
                       <span v-if="operatingServices.has(scope.row.id)">重启中...</span>
                       <span v-else>重启</span>
                     </div>
@@ -125,7 +133,7 @@
             <el-table-column label="远程登录" width="100" align="center">
               <template #default="scope">
                 <div class="action-buttons">
-                  <div class="action-btn login-btn" @click="webShell(scope.row)">
+                  <div v-if="hasPermission('webshell:login')" class="action-btn login-btn" @click="webShell(scope.row)">
                     <span>登录</span>
                   </div>
                 </div>
@@ -169,6 +177,14 @@
         <el-form-item label="对应模块">
           <el-input v-model="serviceForm.module" placeholder="请输入模块名称" />
         </el-form-item>
+        <el-form-item label="部署方式" required>
+          <el-select v-model="serviceForm.deploy_type" placeholder="请选择部署方式">
+            <el-option label="主机部署" value="HOST" />
+            <el-option label="Docker容器" value="DOCKER" />
+            <el-option label="Docker Compose" value="DOCKER_COMPOSE" />
+          </el-select>
+        </el-form-item>
+
         <el-form-item label="IP地址" required>
           <el-input v-model="serviceForm.ip" placeholder="请输入服务器IP地址" />
         </el-form-item>
@@ -182,7 +198,7 @@
           <el-input v-model="serviceForm.password" type="password" placeholder="编辑时留空表示不修改密码" />
         </el-form-item>
         <!-- 主机部署相关字段 -->
-        <template v-if="serviceForm.deploy_type === 'HOST' || !serviceForm.deploy_type">
+        <template v-if="serviceForm.deploy_type === 'HOST'">
           <el-form-item label="程序路径" required>
             <el-input v-model="serviceForm.program_path" placeholder="请输入程序路径" />
           </el-form-item>
@@ -200,18 +216,12 @@
           </el-form-item>
         </template>
 
-        <!-- Docker部署相关字段 -->
+        <!-- Docker容器部署相关字段 -->
         <template v-if="serviceForm.deploy_type === 'DOCKER'">
           <el-form-item label="程序路径" required>
-            <el-input v-model="serviceForm.program_path" placeholder="docker-compose.yml所在目录路径" />
+            <el-input v-model="serviceForm.program_path" placeholder="代码所在目录路径" />
           </el-form-item>
-          <el-form-item label="启动脚本" required>
-            <el-input v-model="serviceForm.start_script" placeholder="如: docker-compose up -d" />
-          </el-form-item>
-          <el-form-item label="停止脚本" required>
-            <el-input v-model="serviceForm.stop_script" placeholder="如: docker-compose down" />
-          </el-form-item>
-          <el-form-item label="容器名称">
+          <el-form-item label="容器名称" required>
             <el-input v-model="serviceForm.container_name" placeholder="请输入容器名称" />
           </el-form-item>
           <el-form-item label="镜像名称">
@@ -233,32 +243,25 @@
             <el-input v-model.number="serviceForm.port" placeholder="容器内部端口" />
           </el-form-item>
         </template>
-        <el-form-item label="服务类型">
-          <el-select v-model="serviceForm.service_type" placeholder="请选择服务类型">
-            <el-option label="主机应用" value="HOST_APP" />
-            <el-option label="Docker容器" value="DOCKER" />
-            <el-option label="Elasticsearch" value="ES" />
-            <el-option label="Solr" value="SOLR" />
-            <el-option label="Redis" value="REDIS" />
-            <el-option label="MySQL" value="MYSQL" />
-            <el-option label="PostgreSQL" value="POSTGRESQL" />
-            <el-option label="Kafka" value="KAFKA" />
-            <el-option label="RocketMQ" value="ROCKETMQ" />
-            <el-option label="RabbitMQ" value="RABBITMQ" />
-            <el-option label="Nginx" value="NGINX" />
-            <el-option label="AI模型" value="AI_MODEL" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="部署方式">
-          <el-select v-model="serviceForm.deploy_type" placeholder="请选择部署方式">
-            <el-option label="主机部署" value="HOST" />
-            <el-option label="Docker部署" value="DOCKER" />
-          </el-select>
-        </el-form-item>
-        <!-- 主机部署才显示运行实例 -->
-        <el-form-item label="运行实例" v-if="serviceForm.deploy_type === 'HOST' || !serviceForm.deploy_type">
-          <el-input v-model="serviceForm.instance_name" placeholder="实例名称或主机名（可选）" />
-        </el-form-item>
+
+        <!-- Docker Compose部署相关字段 -->
+        <template v-if="serviceForm.deploy_type === 'DOCKER_COMPOSE'">
+          <el-form-item label="程序路径" required>
+            <el-input v-model="serviceForm.program_path" placeholder="docker-compose.yml所在目录路径" />
+          </el-form-item>
+          <el-form-item label="日志类型">
+            <el-select v-model="serviceForm.log_type" placeholder="请选择日志类型">
+              <el-option label="主机目录" value="HOST_DIR" />
+              <el-option label="Docker Logs" value="DOCKER_LOGS" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="日志路径" v-if="serviceForm.log_type === 'HOST_DIR'">
+            <el-input v-model="serviceForm.log_path" placeholder="挂载到主机的日志目录路径" />
+          </el-form-item>
+          <el-form-item label="程序端口">
+            <el-input v-model.number="serviceForm.port" placeholder="服务端口" />
+          </el-form-item>
+        </template>
         <el-form-item label="负责人">
           <el-input v-model="serviceForm.owner" placeholder="请输入负责人" />
         </el-form-item>
@@ -288,24 +291,58 @@
         <el-descriptions-item label="启动脚本">{{ selectedService.start_script || '-' }}</el-descriptions-item>
         <el-descriptions-item label="停止脚本">{{ selectedService.stop_script || '-' }}</el-descriptions-item>
         <el-descriptions-item label="日志路径">{{ selectedService.log_path || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="服务类型">
-          <el-tag :type="getServiceType(selectedService.service_type).type">
-            {{ getServiceType(selectedService.service_type).label }}
-          </el-tag>
-        </el-descriptions-item>
         <el-descriptions-item label="部署方式">
           <el-tag :type="getDeployType(selectedService.deploy_type).type">
             {{ getDeployType(selectedService.deploy_type).label }}
           </el-tag>
         </el-descriptions-item>
-        <el-descriptions-item label="运行实例">{{ selectedService.instance_name || '-' }}</el-descriptions-item>
+        <template v-if="selectedService.deploy_type === 'DOCKER'">
+          <el-descriptions-item label="容器名称">{{ selectedService.container_name || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="镜像名称">{{ selectedService.image_name || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="端口映射">{{ selectedService.port_mapping || '-' }}</el-descriptions-item>
+        </template>
         <el-descriptions-item label="状态">
-          <el-tag :type="getStatusType(selectedService.status)">
-            {{ selectedService.status || '未知' }}
-          </el-tag>
+          <div class="status-cell">
+            <el-tag :type="getStatusType(selectedService.status)">
+              {{ getStatusText(selectedService.status) }}
+            </el-tag>
+            <span v-if="selectedService.status_source === 'AGENT'" class="status-source agent-source">
+              Agent
+            </span>
+            <span v-else class="status-source ssh-source">
+              SSH
+            </span>
+          </div>
         </el-descriptions-item>
         <el-descriptions-item label="备注">{{ selectedService.remark || '-' }}</el-descriptions-item>
       </el-descriptions>
+
+      <!-- Docker Compose 容器状态列表 -->
+      <div v-if="selectedService.containers && selectedService.containers.length > 0" class="containers-section">
+        <div class="containers-header">
+          <span class="containers-title">容器状态</span>
+          <span class="containers-summary">
+            共 {{ selectedService.containers.length }} 个容器，
+            <span class="text-success">{{ getRunningContainers(selectedService.containers) }} 个运行中</span>，
+            <span class="text-danger">{{ selectedService.containers.length - getRunningContainers(selectedService.containers) }} 个已停止</span>
+          </span>
+        </div>
+        <el-table :data="selectedService.containers" border size="small" style="width: 100%">
+          <el-table-column prop="name" label="容器名称" min-width="160" show-overflow-tooltip />
+          <el-table-column prop="image" label="镜像" min-width="180" show-overflow-tooltip />
+          <el-table-column label="状态" width="120" align="center">
+            <template #default="scope">
+              <el-tag :type="scope.row.running ? 'success' : 'danger'" size="small">
+                {{ scope.row.running ? '运行中' : '已停止' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="state" label="详细状态" width="120" show-overflow-tooltip />
+          <el-table-column prop="ports" label="端口映射" min-width="150" show-overflow-tooltip />
+          <el-table-column prop="id" label="容器ID" width="130" show-overflow-tooltip />
+        </el-table>
+      </div>
+
       <template #footer>
         <el-button @click="showDetailDialog = false">关闭</el-button>
       </template>
@@ -313,11 +350,9 @@
 
     <el-dialog title="日志查看" v-model="showLogDialog" width="900px" :before-close="handleLogClose">
       <div class="log-header">
-        <!-- Docker Logs方式显示容器信息 -->
         <template v-if="selectedLogService?.deploy_type === 'DOCKER' && selectedLogService?.log_type === 'DOCKER_LOGS'">
           <el-tag type="info">Docker Logs - {{ selectedLogService.container_name || '未配置容器名称' }}</el-tag>
         </template>
-        <!-- 主机目录方式显示文件选择 -->
         <template v-else>
           <el-select v-model="selectedLogFile" style="width: 250px" placeholder="选择日志文件" @change="loadLog">
             <el-option label="最新日志" value="" />
@@ -332,6 +367,16 @@
         </el-select>
         <el-button @click="loadLogFileList">刷新列表</el-button>
         <el-button @click="refreshLog">刷新内容</el-button>
+        <el-button 
+          type="primary" 
+          :class="{ 'is-active': logStreaming }"
+          @click="toggleLogStream"
+          :disabled="!selectedLogService?.agent_uuid"
+        >
+          {{ logStreaming ? '停止实时' : '实时推送' }}
+        </el-button>
+        <el-tag v-if="selectedLogService?.agent_uuid && logStreaming" type="success">实时推送中</el-tag>
+        <el-tag v-if="!selectedLogService?.agent_uuid" type="warning">未关联Agent，无法实时推送</el-tag>
         <el-button @click="downloadLog" v-if="!(selectedLogService?.deploy_type === 'DOCKER' && selectedLogService?.log_type === 'DOCKER_LOGS')">下载日志</el-button>
       </div>
       <div class="log-content" ref="logContent">
@@ -339,7 +384,37 @@
       </div>
     </el-dialog>
 
-    <el-dialog title="远程终端" v-model="showShellDialog" width="900px" height="600px" :before-close="handleShellClose">
+    <!-- 最小化窗口条 -->
+    <Teleport to="body">
+      <div v-if="shellMinimized" class="shell-minimized-bar" @click="restoreShell">
+        <span class="shell-minimized-title">远程终端</span>
+        <el-icon class="shell-minimized-icon"><Promotion /></el-icon>
+      </div>
+    </Teleport>
+
+    <!-- 远程终端对话框 -->
+    <el-dialog 
+      v-model="showShellDialog" 
+      width="900px" 
+      height="600px" 
+      :before-close="handleShellClose"
+      draggable
+      append-to-body
+      :show-close="false"
+      :close-on-click-modal="false"
+      :modal="!shellMinimized"
+      class="shell-dialog"
+      :class="{ 'shell-dialog-hidden': shellMinimized }"
+    >
+      <template #header>
+        <div class="shell-dialog-header">
+          <span class="shell-dialog-title">远程终端</span>
+          <div class="shell-dialog-controls">
+            <el-icon class="shell-control-icon" @click.stop="minimizeShell"><Minus /></el-icon>
+            <el-icon class="shell-control-icon" @click.stop="showShellDialog = false"><Close /></el-icon>
+          </div>
+        </div>
+      </template>
       <div class="shell-header">
         <el-tag type="primary" v-if="currentShellService">{{ currentShellService.func_desc }}</el-tag>
         <el-tag v-if="shellConnected" class="connected-tag">已连接</el-tag>
@@ -545,16 +620,21 @@
   </div>
 </template>
 
-<script setup>
-import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue';
+<script setup>import { ref, reactive, onMounted, onUnmounted, nextTick, Teleport, watch } from 'vue';
 import { ElMessage, ElMessageBox, ElMenu, ElMenuItem } from 'element-plus';
+import { Minus, Close, Promotion } from '@element-plus/icons-vue';
+import { useRouter } from 'vue-router';
 import axios from '@/utils/axios';
+import { usePermission } from '@/composables/usePermission';
 import ProjectTree from '@/components/ProjectTree.vue';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { WebLinksAddon } from 'xterm-addon-web-links';
+
+const { hasPermission } = usePermission();
 import 'xterm/css/xterm.css';
 
+const router = useRouter();
 const services = ref([]);
 const selectedServices = ref([]);
 const serviceTable = ref(null);
@@ -565,6 +645,7 @@ const subsystems = ref([]);
 const groups = ref([]);
 const formSubsystems = ref([]);
 const formGroups = ref([]);
+const agents = ref([]);
 const pagination = reactive({
   page: 1,
   size: 10,
@@ -582,6 +663,7 @@ const showDetailDialog = ref(false);
 const showLogDialog = ref(false);
 const showImportDialog = ref(false);
 const showShellDialog = ref(false);
+const shellMinimized = ref(false);
 const importFile = ref(null);
 const selectedService = reactive({});
 const currentShellService = ref(null);
@@ -600,6 +682,14 @@ const localFiles = ref([]);
 const uploadingAll = ref(false);
 const selectedLogService = ref(null);
 
+// 保存事件监听器引用以便清理
+let windowResizeHandler = null;
+let terminalClickHandler = null;
+
+// 终端准备标志和消息队列
+let terminalReady = false;
+let messageQueue = [];
+
 // 覆盖确认相关
 const overwriteOption = ref(''); // 'overwrite', 'skip', 'overwrite_all', 'skip_all'
 const overwriteDialogVisible = ref(false);
@@ -616,6 +706,8 @@ const logContentText = ref('');
 const logFiles = ref([]);
 const selectedLogFile = ref('');
 const isSubmitting = ref(false);
+const logStreaming = ref(false);
+let logWebSocket = null;
 // 操作中的服务ID集合
 const operatingServices = ref(new Set());
 const serviceForm = reactive({
@@ -635,17 +727,17 @@ const serviceForm = reactive({
   log_path: '',
   log_type: '',
   port: null,
-  service_type: '',
   deploy_type: '',
-  instance_name: '',
+  owner: '',
+  remark: '',
   // Docker相关字段
   container_name: '',
   image_name: '',
-  port_mapping: '',
-  owner: '',
-  remark: ''
+  port_mapping: ''
 });
 let statusInterval = null;
+let isUpdatingStatus = false;  // 防止重入
+let statusAbortController = null;  // 请求取消
 
 // 缓存已加载的数据，避免重复请求
 const subsystemCache = ref({});
@@ -659,12 +751,57 @@ const formLoadingGroups = ref(false);
 const getStatusType = (status) => {
   switch (status) {
     case 'RUNNING':
+    case 'Running':
       return 'success';
     case 'STOPPED':
+    case 'Stopped':
       return 'danger';
-    default:
+    case 'PARTIAL':
+    case 'Partial':
       return 'warning';
+    case 'STARTING':
+    case 'Starting':
+      return 'warning';
+    case 'STOPPING':
+    case 'Stopping':
+      return 'warning';
+    case 'RESTARTING':
+    case 'Restarting':
+      return 'warning';
+    case 'FAILED':
+    case 'Failed':
+      return 'danger';
+    case 'UNKNOWN':
+    case 'Unknown':
+    default:
+      return 'info';
   }
+};
+
+const getStatusText = (status) => {
+  if (!status) return '未知';
+  const s = status.toLowerCase();
+  if (s === 'running') return '运行中';
+  if (s === 'stopped') return '已停止';
+  if (s === 'partial') return '部分运行';
+  if (s === 'starting') return '启动中';
+  if (s === 'stopping') return '停止中';
+  if (s === 'restarting') return '重启中';
+  if (s === 'failed') return '失败';
+  if (s === 'unknown') return '未知';
+  return status;
+};
+
+const getRunningContainers = (containers) => {
+  if (!containers) return 0;
+  return containers.filter(c => c.running).length;
+};
+
+const isRunning = (status) => {
+  if (!status) return false;
+  const s = status.toLowerCase();
+  // Partial 状态视为运行中，以便显示停止/重启按钮（操作针对所有容器）
+  return s === 'running' || s === 'partial';
 };
 
 const loadServices = async () => {
@@ -858,19 +995,134 @@ const handleFormSubsystemChange = async () => {
 };
 
 const updateStatuses = async () => {
+  // 防止重入：如果上一次请求还没完成，跳过本次
+  if (isUpdatingStatus) return;
+  isUpdatingStatus = true;
+  
+  // 取消上一次未完成的请求
+  if (statusAbortController) {
+    statusAbortController.abort();
+  }
+  statusAbortController = new AbortController();
+  const signal = statusAbortController.signal;
+  
   const serviceIds = services.value.map(s => s.id);
-  if (serviceIds.length === 0)
+  if (serviceIds.length === 0) {
+    isUpdatingStatus = false;
     return;
+  }
+  
   try {
-    const response = await axios.post('/api/services/status/batch', serviceIds);
-    if (response.data.code === 0) {
-      const statusMap = response.data.data;
+    const [redisStatusResponse, agentsResponse] = await Promise.all([
+      axios.post('/api/services/status/cache', serviceIds, { signal }),
+      axios.get('/api/agents/', { signal })
+    ]);
+    
+    // 如果请求被取消，直接返回
+    if (signal.aborted) {
+      isUpdatingStatus = false;
+      return;
+    }
+    
+    // 构建 agentMap：按 uuid 和按 ip 双索引，便于快速查找
+    const agentByUuid = {};
+    const agentByIp = {};
+    if (agentsResponse.data.code === 0) {
+      agentsResponse.data.data.forEach(agent => {
+        const info = {
+          uuid: agent.uuid,
+          status: agent.is_online ? 'online' : 'offline',
+          ip: agent.ip
+        };
+        agentByUuid[agent.uuid] = info;
+        if (agent.ip) {
+          agentByIp[agent.ip] = info;
+        }
+      });
+      
+      // 为每个服务标记其 IP 对应的在线 Agent
       services.value.forEach(service => {
-        service.status = statusMap[service.id] || 'UNKNOWN';
+        // 优先用 service.agent_uuid 查找，其次按 IP 查找
+        let agentInfo = service.agent_uuid ? agentByUuid[service.agent_uuid] : null;
+        if (!agentInfo && service.ip) {
+          agentInfo = agentByIp[service.ip];
+        }
+        service.agent_status = (agentInfo && agentInfo.status === 'online') ? 'online' : '';
       });
     }
+    
+    if (redisStatusResponse.data.code === 0) {
+      const statusMap = redisStatusResponse.data.data;
+      services.value.forEach(service => {
+        // 优先用 service.agent_uuid 查找，其次按 IP 查找在线 Agent
+        let agentInfo = service.agent_uuid ? agentByUuid[service.agent_uuid] : null;
+        if (!agentInfo && service.ip) {
+          agentInfo = agentByIp[service.ip];
+        }
+        const agentOnline = agentInfo && agentInfo.status === 'online';
+        
+        const cached = statusMap[service.id];
+        if (agentOnline && cached) {
+          // Agent 在线且有缓存 → 使用缓存
+          service.status = cached.status || 'UNKNOWN';
+          service.status_source = 'AGENT';
+        } else if (agentOnline) {
+          // Agent 在线但无缓存 → 等待 Agent 上报，不使用 SSH
+          // 保持当前状态不变，或显示"等待更新"
+          if (!service.status || service.status === 'UNKNOWN') {
+            service.status = 'UNKNOWN';
+            service.status_source = 'AGENT';
+          }
+        } else if (cached) {
+          // Agent 离线但有缓存 → 使用缓存
+          service.status = cached.status || 'UNKNOWN';
+          service.status_source = cached.source || 'SSH';
+        } else {
+          // Agent 离线且无缓存 → 标记为需要 SSH 查询
+          service.status = 'UNKNOWN';
+          service.status_source = 'SSH';
+        }
+      });
+    }
+    
+    // 只有 Agent 离线的服务才用 SSH 查询（慢路径）
+    // 限制 SSH 查询数量，避免卡顿
+    const servicesNeedSsh = services.value.filter(s => 
+      s.status === 'UNKNOWN' && s.status_source === 'SSH'
+    );
+    
+    if (servicesNeedSsh.length > 0 && servicesNeedSsh.length <= 10) {
+      // 只查询少量服务（≤10个），避免卡顿
+      const sshIds = servicesNeedSsh.map(s => s.id);
+      const sshResponse = await axios.post('/api/services/status/batch', sshIds, { signal });
+      if (sshResponse.data.code === 0 && !signal.aborted) {
+        const sshStatusMap = sshResponse.data.data;
+        servicesNeedSsh.forEach(service => {
+          service.status = sshStatusMap[service.id] || 'STOPPED';
+          service.status_source = 'SSH';
+        });
+      }
+    } else if (servicesNeedSsh.length > 10) {
+      // 超过10个服务需要SSH查询，只查询前10个
+      console.warn(`跳过 ${servicesNeedSsh.length - 10} 个服务的SSH状态查询，避免卡顿`);
+      const sshIds = servicesNeedSsh.slice(0, 10).map(s => s.id);
+      const sshResponse = await axios.post('/api/services/status/batch', sshIds, { signal });
+      if (sshResponse.data.code === 0 && !signal.aborted) {
+        const sshStatusMap = sshResponse.data.data;
+        servicesNeedSsh.slice(0, 10).forEach(service => {
+          service.status = sshStatusMap[service.id] || 'STOPPED';
+          service.status_source = 'SSH';
+        });
+      }
+    }
   } catch (error) {
+    // 如果是取消导致的错误，忽略
+    if (error.name === 'AbortError' || signal.aborted) {
+      return;
+    }
     console.error('更新状态失败', error);
+  } finally {
+    isUpdatingStatus = false;
   }
 };
 
@@ -891,9 +1143,7 @@ const resetForm = () => {
   serviceForm.log_path = '';
   serviceForm.log_type = '';
   serviceForm.port = null;
-  serviceForm.service_type = '';
-  serviceForm.deploy_type = '';
-  serviceForm.instance_name = '';
+  serviceForm.deploy_type = 'HOST';
   serviceForm.container_name = '';
   serviceForm.image_name = '';
   serviceForm.port_mapping = '';
@@ -921,17 +1171,29 @@ const viewService = async (service) => {
     if (response.data.code === 0) {
       Object.assign(selectedService, response.data.data);
       showDetailDialog.value = true;
-      // 异步获取状态，不阻塞弹窗显示
-      setTimeout(async () => {
-        try {
-          const statusResponse = await axios.post('/api/services/status/batch', [service.id]);
-          if (statusResponse.data.code === 0) {
-            selectedService.status = statusResponse.data.data[service.id] || 'UNKNOWN';
+      // 使用列表中实时的状态（列表会定时刷新），覆盖详情接口返回的 current_status
+      if (service.status) {
+        selectedService.status = service.status;
+        selectedService.status_source = service.status_source || 'SSH';
+      } else if (response.data.data.current_status) {
+        selectedService.status = response.data.data.current_status;
+        selectedService.status_source = response.data.data.status_source || 'SSH';
+      } else {
+        // 如果列表中没有状态，异步获取
+        setTimeout(async () => {
+          try {
+            const cacheResponse = await axios.post('/api/services/status/cache', [service.id]);
+            if (cacheResponse.data.code === 0 && cacheResponse.data.data[service.id]) {
+              const cached = cacheResponse.data.data[service.id];
+              selectedService.status = cached.status || 'UNKNOWN';
+              selectedService.status_source = cached.source === 'AGENT' ? 'AGENT' : 'SSH';
+            }
+          } catch (e) {
+            console.error('获取状态失败:', e);
           }
-        } catch (e) {
-          console.error('获取状态失败:', e);
-        }
-      }, 100);
+        }, 50);
+      }
+      // 容器列表已经在 response.data.data.containers 中（通过 Object.assign 赋值）
     } else {
       ElMessage.error('获取服务详情失败');
     }
@@ -955,12 +1217,15 @@ const editService = async (service) => {
   serviceForm.start_script = service.start_script || '';
   serviceForm.stop_script = service.stop_script || '';
   serviceForm.log_path = service.log_path || '';
+  serviceForm.log_type = service.log_type || '';
   serviceForm.port = service.port || null;
-  serviceForm.service_type = service.service_type || '';
   serviceForm.deploy_type = service.deploy_type || '';
-  serviceForm.instance_name = service.instance_name || '';
   serviceForm.owner = service.owner || '';
   serviceForm.remark = service.remark || '';
+  // Docker相关字段
+  serviceForm.container_name = service.container_name || '';
+  serviceForm.image_name = service.image_name || '';
+  serviceForm.port_mapping = service.port_mapping || '';
   
   formSubsystems.value = await loadSubsystems(service.project_id);
   if (service.subsystem_id) {
@@ -1014,12 +1279,13 @@ const saveService = async () => {
       ElMessage.error('请输入程序路径');
       return;
     }
-    if (!serviceForm.start_script.trim()) {
-      ElMessage.error('请输入启动脚本');
+    if (!serviceForm.container_name.trim()) {
+      ElMessage.error('请输入容器名称');
       return;
     }
-    if (!serviceForm.stop_script.trim()) {
-      ElMessage.error('请输入停止脚本');
+  } else if (serviceForm.deploy_type === 'DOCKER_COMPOSE') {
+    if (!serviceForm.program_path.trim()) {
+      ElMessage.error('请输入程序路径');
       return;
     }
   }
@@ -1048,9 +1314,9 @@ const saveService = async () => {
       log_path: serviceForm.log_path || null,
       log_type: serviceForm.log_type || null,
       port: serviceForm.port || null,
-      service_type: serviceForm.service_type || 'HOST_APP',
+      // 根据部署方式自动设置服务类型
       deploy_type: serviceForm.deploy_type || 'HOST',
-      instance_name: serviceForm.instance_name || null,
+      service_type: serviceForm.deploy_type === 'DOCKER' ? 'DOCKER' : (serviceForm.deploy_type === 'DOCKER_COMPOSE' ? 'DOCKER_COMPOSE' : 'HOST_APP'),
       // Docker相关字段
       container_name: serviceForm.container_name || null,
       image_name: serviceForm.image_name || null,
@@ -1264,6 +1530,8 @@ const viewLog = async (service) => {
   selectedLogService.value = service;
   showLogDialog.value = true;
   selectedLogFile.value = '';
+  logStreaming.value = false;
+  stopLogStream();
   await loadLogFileList();
   await loadLog();
 };
@@ -1338,6 +1606,78 @@ const downloadLog = async () => {
 const handleLogClose = () => {
   showLogDialog.value = false;
   logContentText.value = '';
+  stopLogStream();
+};
+
+const toggleLogStream = () => {
+  if (logStreaming.value) {
+    stopLogStream();
+  } else {
+    startLogStream();
+  }
+};
+
+const startLogStream = () => {
+  if (!selectedLogService.value || !selectedLogService.value.agent_uuid) {
+    ElMessage.warning('未关联Agent，无法实时推送日志');
+    return;
+  }
+  
+  stopLogStream();
+  
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = `${protocol}//${window.location.host}/api/services/${selectedLogService.value.id}/log/ws`;
+  
+  logWebSocket = new WebSocket(wsUrl);
+  
+  logWebSocket.onopen = () => {
+    logStreaming.value = true;
+    ElMessage.success('实时日志推送已开始');
+  };
+  
+  logWebSocket.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.type === 'log_line') {
+        if (data.line) {
+          logContentText.value += data.line + '\n';
+          scrollLogToBottom();
+        }
+      } else if (data.type === 'error') {
+        ElMessage.error(data.message);
+        stopLogStream();
+      }
+    } catch (e) {
+      console.error('解析日志消息失败:', e);
+    }
+  };
+  
+  logWebSocket.onerror = () => {
+    ElMessage.error('实时日志推送连接失败');
+    stopLogStream();
+  };
+  
+  logWebSocket.onclose = () => {
+    if (logStreaming.value) {
+      logStreaming.value = false;
+      ElMessage.info('实时日志推送已停止');
+    }
+  };
+};
+
+const stopLogStream = () => {
+  if (logWebSocket) {
+    logWebSocket.close();
+    logWebSocket = null;
+  }
+  logStreaming.value = false;
+};
+
+const scrollLogToBottom = () => {
+  const logContent = document.querySelector('.log-content');
+  if (logContent) {
+    logContent.scrollTop = logContent.scrollHeight;
+  }
 };
 
 const handlePageChange = (page) => {
@@ -1353,6 +1693,10 @@ const handleSizeChange = (size) => {
 
 const goToImport = () => {
   window.location.href = '/import-services';
+};
+
+const goToExport = () => {
+  window.location.href = '/export-services';
 };
 
 const downloadTemplate = async () => {
@@ -1442,9 +1786,8 @@ const doImport = async () => {
 let websocket = null;
 
 const initTerminal = () => {
-  if (terminal) {
-    terminal.dispose();
-  }
+  // 先清理旧的终端和监听器
+  cleanupTerminal();
   
   terminal = new Terminal({
     fontSize: 14,
@@ -1491,20 +1834,27 @@ const initTerminal = () => {
   // 确保终端容器有正确的尺寸和焦点
   setTimeout(() => {
     fitAddon.fit();
-    // 直接聚焦到 xterm 的 textarea 输入元素
     const textarea = terminalRef.value?.querySelector('.xterm-helper-textarea');
     if (textarea) {
       textarea.focus();
     }
     terminal.focus();
+    
+    // 终端准备好，设置标志并处理队列
+    terminalReady = true;
+    // 处理队列中缓存的消息
+    while (messageQueue.length > 0) {
+      const msg = messageQueue.shift();
+      if (msg) {
+        terminal.write(msg);
+      }
+    }
   }, 200);
   
   terminal.onData((data) => {
     console.log('Terminal onData:', data, 'websocket:', !!websocket, 'connected:', shellConnected.value);
-    // 不进行本地回显，让后端bash处理所有输出
     if (websocket && shellConnected.value) {
       websocket.send(data);
-      console.log('Sent data to websocket');
     }
   });
   
@@ -1514,37 +1864,111 @@ const initTerminal = () => {
     }
   });
   
-  // 直接为终端容器添加点击事件，确保聚焦到 textarea
-  terminalRef.value?.addEventListener('click', () => {
+  // 保存事件监听器引用
+  terminalClickHandler = () => {
     const textarea = terminalRef.value?.querySelector('.xterm-helper-textarea');
     if (textarea) {
       textarea.focus();
     }
     terminal.focus();
-  }, true);
+  };
   
-  // 窗口resize时重新适配
-  window.addEventListener('resize', () => {
+  terminalRef.value?.addEventListener('click', terminalClickHandler, true);
+  
+  windowResizeHandler = () => {
     if (fitAddon && terminal) {
       fitAddon.fit();
     }
-  });
+  };
+  
+  window.addEventListener('resize', windowResizeHandler);
+};
+
+// 清理终端相关资源
+const cleanupTerminal = () => {
+  if (terminal) {
+    terminal.dispose();
+    terminal = null;
+  }
+  
+  fitAddon = null;
+  
+  // 清理事件监听器
+  if (terminalClickHandler && terminalRef.value) {
+    terminalRef.value.removeEventListener('click', terminalClickHandler, true);
+    terminalClickHandler = null;
+  }
+  
+  if (windowResizeHandler) {
+    window.removeEventListener('resize', windowResizeHandler);
+    windowResizeHandler = null;
+  }
+  
+  // 重置终端标志和清空消息队列
+  terminalReady = false;
+  messageQueue = [];
+  
+  // 清理容器
+  if (terminalRef.value) {
+    terminalRef.value.innerHTML = '';
+  }
 };
 
 const webShell = (service) => {
   console.log('Opening shell for service:', service);
   currentShellService.value = service;
   shellConnected.value = false;
+  shellMinimized.value = false;
+  
+  // 先确保干净的状态
+  cleanupTerminal();
+  disconnectShell();
+  
   showShellDialog.value = true;
   
   // 设置默认远程目录为程序路径，如果没有则使用根目录
   currentRemotePath.value = service.program_path || '/';
   
+  // 给予足够的时间让 DOM 完全渲染
   setTimeout(() => {
-    initTerminal();
-    connectShell();
-  }, 100);
+    nextTick(() => {
+      if (terminalRef.value) {
+        console.log('Terminal ref found, initializing terminal');
+        initTerminal();
+        connectShell();
+      } else {
+        console.error('Terminal ref not found!');
+      }
+    });
+  }, 300);
 };
+
+const minimizeShell = () => {
+  shellMinimized.value = true;
+};
+
+const restoreShell = () => {
+  shellMinimized.value = false;
+};
+
+// 监听最小化状态变化
+watch(shellMinimized, (newValue) => {
+  nextTick(() => {
+    // 找到所有 dialog wrapper 和 overlay
+    const allElements = document.body.children;
+    for (let i = 0; i < allElements.length; i++) {
+      const el = allElements[i];
+      // 检查是否包含我们的对话框
+      if (el.querySelector && el.querySelector('.shell-dialog')) {
+        el.style.display = newValue ? 'none' : '';
+      }
+      // 检查是否是遮罩层
+      if (el.classList && el.classList.contains('v-modal')) {
+        el.style.display = newValue ? 'none' : '';
+      }
+    }
+  });
+});
 
 const connectShell = () => {
   if (!currentShellService.value) return;
@@ -1562,6 +1986,7 @@ const connectShell = () => {
     return;
   }
   
+  // 前端只显示一条简洁的连接消息，详细状态由后端发送
   terminal.write('[正在连接服务器...]\r\n');
   
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1592,10 +2017,19 @@ const connectShell = () => {
   
   websocket.onmessage = (event) => {
     console.log('WebSocket received:', event.data);
+    let msg;
     if (event.data instanceof ArrayBuffer) {
-      terminal.write(new Uint8Array(event.data));
+      msg = new Uint8Array(event.data);
     } else {
-      terminal.write(event.data);
+      msg = event.data;
+    }
+    
+    // 检查终端是否已准备好
+    if (terminalReady && terminal) {
+      terminal.write(msg);
+    } else {
+      // 终端未准备好，加入队列
+      messageQueue.push(msg);
     }
   };
   
@@ -1621,10 +2055,8 @@ const disconnectShell = () => {
 
 const handleShellClose = () => {
   disconnectShell();
-  if (terminal) {
-    terminal.dispose();
-    terminal = null;
-  }
+  cleanupTerminal();
+  shellMinimized.value = false;
   showShellDialog.value = false;
 };
 
@@ -2370,25 +2802,8 @@ const getDeployType = (type) => {
   const types = {
     'HOST': { label: '主机部署', type: 'primary' },
     'DOCKER': { label: 'Docker部署', type: 'success' },
+    'DOCKER_COMPOSE': { label: 'Docker Compose', type: 'success' },
     'CLUSTER': { label: '集群部署', type: 'warning' },
-  };
-  return types[type] || { label: type || '未知', type: 'info' };
-};
-
-const getServiceType = (type) => {
-  const types = {
-    'HOST_APP': { label: '主机应用', type: 'primary' },
-    'DOCKER': { label: 'Docker容器', type: 'success' },
-    'ES': { label: 'Elasticsearch', type: 'warning' },
-    'SOLR': { label: 'Solr', type: 'warning' },
-    'REDIS': { label: 'Redis', type: 'danger' },
-    'MYSQL': { label: 'MySQL', type: 'info' },
-    'POSTGRESQL': { label: 'PostgreSQL', type: 'info' },
-    'KAFKA': { label: 'Kafka', type: 'purple' },
-    'ROCKETMQ': { label: 'RocketMQ', type: 'purple' },
-    'RABBITMQ': { label: 'RabbitMQ', type: 'purple' },
-    'NGINX': { label: 'Nginx', type: 'primary' },
-    'AI_MODEL': { label: 'AI模型', type: 'danger' },
   };
   return types[type] || { label: type || '未知', type: 'info' };
 };
@@ -2396,7 +2811,8 @@ const getServiceType = (type) => {
 onMounted(() => {
   loadServices();
   loadProjects();
-  statusInterval = setInterval(updateStatuses, 10000);
+  loadAgents();
+  statusInterval = setInterval(updateStatuses, 5000);
   window.addEventListener('keydown', handleKeyDown);
   window.addEventListener('keyup', handleKeyUp);
 });
@@ -2408,6 +2824,17 @@ onUnmounted(() => {
   window.removeEventListener('keydown', handleKeyDown);
   window.removeEventListener('keyup', handleKeyUp);
 });
+
+const loadAgents = async () => {
+  try {
+    const response = await axios.get('/api/agents/');
+    if (response.data.code === 0) {
+      agents.value = response.data.data;
+    }
+  } catch (error) {
+    console.error('加载Agent列表失败', error);
+  }
+};
 </script>
 
 <style scoped>
@@ -2488,6 +2915,41 @@ onUnmounted(() => {
   margin-bottom: 15px;
 }
 
+/* Docker Compose 容器状态表格 */
+.containers-section {
+  margin-top: 20px;
+  border-top: 1px solid #ebeef5;
+  padding-top: 15px;
+}
+
+.containers-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.containers-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.containers-summary {
+  font-size: 13px;
+  color: #606266;
+}
+
+.text-success {
+  color: #67c23a;
+  font-weight: 500;
+}
+
+.text-danger {
+  color: #f56c6c;
+  font-weight: 500;
+}
+
 .log-content {
   max-height: 500px;
   overflow-y: auto;
@@ -2506,6 +2968,29 @@ onUnmounted(() => {
 
 .el-descriptions__label {
   font-weight: bold;
+}
+
+.status-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-source {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-weight: 500;
+}
+
+.agent-source {
+  background-color: #e8f5e9;
+  color: #2e7d32;
+}
+
+.ssh-source {
+  background-color: #fff3e0;
+  color: #e65100;
 }
 
 .action-buttons {
@@ -2829,5 +3314,80 @@ onUnmounted(() => {
 .context-menu .el-menu-item:hover {
   background-color: #f5f7fa;
   color: #409eff;
+}
+
+/* 最小化窗口条 */
+.shell-minimized-bar {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+  color: white;
+  padding: 12px 20px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 4px 12px rgba(6, 182, 212, 0.4);
+  z-index: 9999;
+  transition: all 0.3s ease;
+}
+
+.shell-minimized-bar:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(6, 182, 212, 0.5);
+}
+
+.shell-minimized-title {
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.shell-minimized-icon {
+  font-size: 18px;
+}
+
+/* 自定义对话框头部 */
+.shell-dialog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.shell-dialog-title {
+  font-weight: 600;
+  font-size: 16px;
+}
+
+.shell-dialog-controls {
+  display: flex;
+  gap: 12px;
+}
+
+.shell-control-icon {
+  cursor: pointer;
+  font-size: 18px;
+  color: #606266;
+  transition: all 0.2s ease;
+  padding: 4px;
+  border-radius: 4px;
+}
+
+.shell-control-icon:hover {
+  color: #409eff;
+  background: #ecf5ff;
+}
+
+/* 对话框样式 */
+:deep(.shell-dialog .el-dialog__header) {
+  padding: 15px 20px;
+  border-bottom: 1px solid #e4e7ed;
+  margin-right: 0;
+}
+
+:deep(.shell-dialog .el-dialog__body) {
+  padding: 20px;
 }
 </style>

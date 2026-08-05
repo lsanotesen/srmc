@@ -30,7 +30,7 @@ def init_admin():
         else:
             admin_user = User(
                 username='admin',
-                password='$2b$12$UkjGjVJJr59b4QDdKChcTedlPhESbyP5rTv8k1oCDdwn/Quz0TbSy',
+                password='$2b$12$KmhZBS0Kfv8fnTic8hWSy.VkXHhxE1J3JNP2HEthl7YSF9JB8lvF2',
                 role='ADMIN',
                 email='admin@example.com',
                 is_active=True

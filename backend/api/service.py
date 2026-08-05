@@ -14,7 +14,10 @@ router = APIRouter()
 
 def add_capabilities_to_service(service):
     capabilities = SERVICE_TYPE_CAPABILITIES.get(ServiceType(service.service_type), [])
-    service_dict = service.__dict__.copy()
+    service_dict = {}
+    for key in service.__dict__:
+        if not key.startswith('_'):
+            service_dict[key] = service.__dict__[key]
     service_dict['capabilities'] = [c.value for c in capabilities]
     return service_dict
 

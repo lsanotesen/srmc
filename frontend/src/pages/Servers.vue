@@ -5,7 +5,7 @@
         <h2>服务器管理</h2>
         <p class="page-subtitle">当前支持几十台平稳使用，并为后续扩展到 100 台预留分页与检索能力。</p>
       </div>
-      <el-button type="success" @click="openCreateDialog">
+      <el-button v-if="hasPermission('host:view')" type="success" @click="openCreateDialog">
         <el-icon component="Plus" />
         新增服务器
       </el-button>
@@ -33,8 +33,8 @@
       <el-table-column label="操作" width="220" fixed="right">
         <template #default="scope">
           <el-button size="small" @click="testConnection(scope.row)">测试连接</el-button>
-          <el-button size="small" @click="editServer(scope.row)">编辑</el-button>
-          <el-button size="small" type="danger" @click="deleteServer(scope.row)">删除</el-button>
+          <el-button v-if="hasPermission('host:view')" size="small" @click="editServer(scope.row)">编辑</el-button>
+          <el-button v-if="hasPermission('host:view')" size="small" type="danger" @click="deleteServer(scope.row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -97,6 +97,9 @@
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import axios from '@/utils/axios'
+import { usePermission } from '@/composables/usePermission'
+
+const { hasPermission } = usePermission()
 
 const servers = ref([])
 const showAddDialog = ref(false)

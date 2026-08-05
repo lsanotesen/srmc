@@ -25,10 +25,11 @@ class ServiceCreate(BaseModel):
     instance_name: Optional[str] = Field(None, max_length=255)
     container_name: Optional[str] = Field(None, max_length=255)
     image_name: Optional[str] = Field(None, max_length=255)
+    image_tag: Optional[str] = Field(None, max_length=100)
     port_mapping: Optional[str] = Field(None, max_length=500)
-    cluster_name: Optional[str] = Field(None, max_length=255)
-    node_count: Optional[int] = Field(None, ge=1)
-    master_node: Optional[str] = Field(None, max_length=45)
+    volume_mapping: Optional[str] = Field(None, max_length=1000)
+    network_mode: Optional[str] = Field(None, max_length=100)
+    agent_uuid: Optional[str] = Field(None, max_length=64)
 
 class ServiceUpdate(BaseModel):
     project_id: Optional[int] = Field(None, ge=1)
@@ -53,10 +54,11 @@ class ServiceUpdate(BaseModel):
     instance_name: Optional[str] = Field(None, max_length=255)
     container_name: Optional[str] = Field(None, max_length=255)
     image_name: Optional[str] = Field(None, max_length=255)
+    image_tag: Optional[str] = Field(None, max_length=100)
     port_mapping: Optional[str] = Field(None, max_length=500)
-    cluster_name: Optional[str] = Field(None, max_length=255)
-    node_count: Optional[int] = Field(None, ge=1)
-    master_node: Optional[str] = Field(None, max_length=45)
+    volume_mapping: Optional[str] = Field(None, max_length=1000)
+    network_mode: Optional[str] = Field(None, max_length=100)
+    agent_uuid: Optional[str] = Field(None, max_length=64)
 
 class ServiceResponse(BaseModel):
     id: int
@@ -78,7 +80,6 @@ class ServiceResponse(BaseModel):
     port: Optional[int]
     owner: Optional[str]
     remark: Optional[str]
-    status: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     service_type: Optional[str]
@@ -86,10 +87,12 @@ class ServiceResponse(BaseModel):
     instance_name: Optional[str]
     container_name: Optional[str]
     image_name: Optional[str]
+    image_tag: Optional[str]
+    container_id: Optional[str]
     port_mapping: Optional[str]
-    cluster_name: Optional[str]
-    node_count: Optional[int]
-    master_node: Optional[str]
+    volume_mapping: Optional[str]
+    network_mode: Optional[str]
+    log_type: Optional[str]
 
     class Config:
         from_attributes = True

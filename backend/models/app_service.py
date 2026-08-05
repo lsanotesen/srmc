@@ -6,17 +6,8 @@ from core.database import Base
 # 服务类型枚举
 ServiceType = Enum(
     'HOST_APP', 
-    'DOCKER', 
-    'ES', 
-    'SOLR', 
-    'REDIS', 
-    'MYSQL', 
-    'POSTGRESQL', 
-    'KAFKA', 
-    'ROCKETMQ', 
-    'RABBITMQ', 
-    'NGINX', 
-    'AI_MODEL',
+    'DOCKER',
+    'DOCKER_COMPOSE',
     name='service_type'
 )
 
@@ -24,6 +15,7 @@ ServiceType = Enum(
 DeployType = Enum(
     'HOST', 
     'DOCKER',
+    'DOCKER_COMPOSE',
     name='deploy_type'
 )
 
@@ -48,7 +40,7 @@ class AppService(Base):
     owner = Column(String(100), comment='负责人')
     remark = Column(Text, comment='备注')
     
-    # 新增字段
+    # 服务类型和部署方式
     service_type = Column(ServiceType, default='HOST_APP', comment='服务类型')
     deploy_type = Column(DeployType, default='HOST', comment='部署方式')
     instance_name = Column(String(255), comment='运行实例名称')
@@ -63,36 +55,19 @@ class AppService(Base):
     network_mode = Column(String(100), comment='网络模式')
     log_type = Column(String(50), comment='日志类型: HOST_DIR/DOCKER_LOGS')
     
-    # 集群相关字段
-    cluster_name = Column(String(255), comment='集群名称')
-    node_count = Column(Integer, comment='节点数量')
-    master_node = Column(String(45), comment='Master节点IP')
-    data_nodes = Column(String(500), comment='Data节点列表')
+    # Agent相关字段
+    agent_uuid = Column(String(64), comment='关联的Agent UUID')
+    health_url = Column(String(500), comment='健康检查URL')
+    pid_file = Column(String(500), comment='PID文件路径')
     
-    # Redis相关字段
-    redis_role = Column(String(50), comment='Redis角色')
-    redis_memory_usage = Column(String(50), comment='内存使用率')
-    redis_key_count = Column(BIGINT, comment='Key数量')
-    
-    # MySQL相关字段
-    mysql_version = Column(String(50), comment='MySQL版本')
-    mysql_connection_count = Column(Integer, comment='连接数')
-    mysql_slave_status = Column(String(50), comment='主从状态')
-    mysql_db_count = Column(Integer, comment='数据库数量')
-    
-    # 监控状态
-    status = Column(String(50), default='stopped', comment='运行状态：running/stopped/error/warning')
-    cpu_usage = Column(String(20), comment='CPU使用率')
-    memory_usage = Column(String(20), comment='内存使用率')
-    disk_usage = Column(String(20), comment='磁盘使用率')
-    network_io = Column(String(100), comment='网络IO')
+
     
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     
-    # 关系
-    subsystem = relationship('Subsystem', back_populates='services')
-    service_group = relationship('ServiceGroup', back_populates='services')
+    # 关系 - 使用 lazy='select' 延迟加载避免循环导入问题
+    subsystem = relationship('Subsystem', back_populates='services', lazy='select')
+    service_group = relationship('ServiceGroup', back_populates='services', lazy='select')
     
     __table_args__ = (
         Index('idx_subsystem_id', 'subsystem_id'),
