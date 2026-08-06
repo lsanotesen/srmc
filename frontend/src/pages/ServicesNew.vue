@@ -38,10 +38,12 @@
         </div>
 
         <div class="table-wrapper">
-          <el-table 
+          <el-table
             ref="serviceTable"
-            :data="services" 
-            border 
+            :data="services"
+            border
+            v-loading="loading"
+            element-loading-text="加载中..."
             @selection-change="handleSelectionChange"
             @select="handleSelect"
           >
@@ -739,9 +741,17 @@ let statusInterval = null;
 let isUpdatingStatus = false;  // 防止重入
 let statusAbortController = null;  // 请求取消
 
+// 服务列表加载状态与请求控制（防止快速切换时响应错乱导致界面卡住）
+const loading = ref(false);
+let loadServicesAbortController = null;
+let loadServicesRequestId = 0;
+
 // 缓存已加载的数据，避免重复请求
 const subsystemCache = ref({});
 const groupCache = ref({});
+// 正在进行的请求（in-flight 去重，避免同一 key 并发请求）
+const subsystemInflight = {};
+const groupInflight = {};
 // 加载状态
 const loadingSubsystems = ref(false);
 const loadingGroups = ref(false);
@@ -805,6 +815,18 @@ const isRunning = (status) => {
 };
 
 const loadServices = async () => {
+  // 递增请求ID，用于识别最新请求
+  const currentRequestId = ++loadServicesRequestId;
+
+  // 取消上一次未完成的请求，避免旧响应覆盖新数据导致界面卡住
+  if (loadServicesAbortController) {
+    loadServicesAbortController.abort();
+  }
+  loadServicesAbortController = new AbortController();
+  const signal = loadServicesAbortController.signal;
+
+  loading.value = true;
+
   try {
     const params = new URLSearchParams();
     params.append('page', pagination.page);
@@ -824,7 +846,13 @@ const loadServices = async () => {
     if (filters.ip) {
       params.append('ip', filters.ip);
     }
-    const response = await axios.get(`/api/services?${params}`);
+    const response = await axios.get(`/api/services?${params}`, { signal });
+
+    // 已被更新的请求取代，丢弃本次响应
+    if (currentRequestId !== loadServicesRequestId || signal.aborted) {
+      return;
+    }
+
     if (response.data.code === 0) {
       services.value = response.data.data.items;
       pagination.total = response.data.data.total;
@@ -832,7 +860,20 @@ const loadServices = async () => {
       updateStatuses();
     }
   } catch (error) {
+    // 请求被取消，静默处理
+    if (error.name === 'AbortError' || signal.aborted) {
+      return;
+    }
+    // 已被更新的请求取代，不显示错误
+    if (currentRequestId !== loadServicesRequestId) {
+      return;
+    }
     ElMessage.error('加载服务列表失败');
+  } finally {
+    // 仅最新请求才关闭 loading
+    if (currentRequestId === loadServicesRequestId) {
+      loading.value = false;
+    }
   }
 };
 
@@ -855,42 +896,56 @@ const loadProjects = async () => {
 const loadSubsystems = async (projectId = '', forForm = false) => {
   // 使用缓存键，空字符串表示全部子系统
   const cacheKey = projectId || 'all';
-  
-  // 检查缓存
+
+  // 命中缓存直接返回
   if (subsystemCache.value[cacheKey]) {
     return subsystemCache.value[cacheKey];
   }
-  
-  // 设置加载状态
-  if (forForm) {
-    formLoadingSubsystems.value = true;
-  } else {
-    loadingSubsystems.value = true;
+
+  // 正在进行的请求复用同一个 Promise，避免并发重复请求
+  if (subsystemInflight[cacheKey]) {
+    return subsystemInflight[cacheKey];
   }
-  
-  try {
-    const params = new URLSearchParams();
-    if (projectId) {
-      params.append('project_id', projectId);
-    }
-    const response = await axios.get(`/api/subsystems?${params}`);
-    if (response.data.code === 0) {
-      const data = response.data.data.items;
-      // 缓存结果
-      subsystemCache.value[cacheKey] = data;
-      return data;
-    }
-    return [];
-  } catch (error) {
-    console.error('加载子系统列表失败', error);
-    return [];
-  } finally {
-    // 清除加载状态
+
+  const promise = (async () => {
+    // 设置加载状态
     if (forForm) {
-      formLoadingSubsystems.value = false;
+      formLoadingSubsystems.value = true;
     } else {
-      loadingSubsystems.value = false;
+      loadingSubsystems.value = true;
     }
+
+    try {
+      const params = new URLSearchParams();
+      if (projectId) {
+        params.append('project_id', projectId);
+      }
+      const response = await axios.get(`/api/subsystems?${params}`);
+      if (response.data.code === 0) {
+        const data = response.data.data.items;
+        // 缓存结果
+        subsystemCache.value[cacheKey] = data;
+        return data;
+      }
+      return [];
+    } catch (error) {
+      console.error('加载子系统列表失败', error);
+      return [];
+    } finally {
+      // 清除加载状态
+      if (forForm) {
+        formLoadingSubsystems.value = false;
+      } else {
+        loadingSubsystems.value = false;
+      }
+    }
+  })();
+
+  subsystemInflight[cacheKey] = promise;
+  try {
+    return await promise;
+  } finally {
+    delete subsystemInflight[cacheKey];
   }
 };
 
@@ -898,86 +953,130 @@ const loadGroups = async (subsystemId = '', forForm = false) => {
   if (!subsystemId) {
     return [];
   }
-  
-  // 检查缓存
+
+  // 命中缓存直接返回
   if (groupCache.value[subsystemId]) {
     return groupCache.value[subsystemId];
   }
-  
-  // 设置加载状态
-  if (forForm) {
-    formLoadingGroups.value = true;
-  } else {
-    loadingGroups.value = true;
+
+  // 正在进行的请求复用同一个 Promise，避免并发重复请求
+  if (groupInflight[subsystemId]) {
+    return groupInflight[subsystemId];
   }
-  
-  try {
-    const response = await axios.get(`/api/subsystems/${subsystemId}/groups`);
-    if (response.data.code === 0) {
-      const data = response.data.data;
-      // 缓存结果
-      groupCache.value[subsystemId] = data;
-      return data;
-    }
-    return [];
-  } catch (error) {
-    console.error('加载程序分类列表失败', error);
-    return [];
-  } finally {
-    // 清除加载状态
+
+  const promise = (async () => {
+    // 设置加载状态
     if (forForm) {
-      formLoadingGroups.value = false;
+      formLoadingGroups.value = true;
     } else {
-      loadingGroups.value = false;
+      loadingGroups.value = true;
     }
+
+    try {
+      const response = await axios.get(`/api/subsystems/${subsystemId}/groups`);
+      if (response.data.code === 0) {
+        const data = response.data.data;
+        // 缓存结果
+        groupCache.value[subsystemId] = data;
+        return data;
+      }
+      return [];
+    } catch (error) {
+      console.error('加载程序分类列表失败', error);
+      return [];
+    } finally {
+      // 清除加载状态
+      if (forForm) {
+        formLoadingGroups.value = false;
+      } else {
+        loadingGroups.value = false;
+      }
+    }
+  })();
+
+  groupInflight[subsystemId] = promise;
+  try {
+    return await promise;
+  } finally {
+    delete groupInflight[subsystemId];
   }
 };
 
+// 项目树点击序列号，用于取消过时的异步操作
+let treeClickSeq = 0;
+
 const handleTreeClick = async (data) => {
+  // 递增序列号，本次点击的后续异步操作均以此 seq 标识
+  const seq = ++treeClickSeq;
+
   filters.subsystem_id = '';
   filters.group_id = '';
-  
+
   if (data.type === 'project') {
     // 点击项目，设置项目筛选并加载该项目下所有子系统和全局分类
     filters.project_id = data.id;
-    subsystems.value = await loadSubsystems(data.id);
+    const subs = await loadSubsystems(data.id);
+    // await 期间用户又点击了其他节点，放弃本次后续操作
+    if (seq !== treeClickSeq) return;
+    subsystems.value = subs;
     groups.value = await loadGroups();
+    if (seq !== treeClickSeq) return;
   } else if (data.type === 'subsystem') {
     // 点击子系统，设置项目和子系统筛选，加载该子系统的关联分类
     filters.project_id = data.project_id;
-    subsystems.value = await loadSubsystems(data.project_id);
+    const subs = await loadSubsystems(data.project_id);
+    if (seq !== treeClickSeq) return;
+    subsystems.value = subs;
     filters.subsystem_id = data.id;
     groups.value = await loadGroups(data.id);
+    if (seq !== treeClickSeq) return;
   } else if (data.type === 'service_group') {
     // 点击程序分类，设置项目、子系统和分类筛选
     filters.project_id = data.project_id;
-    subsystems.value = await loadSubsystems(data.project_id);
+    const subs = await loadSubsystems(data.project_id);
+    if (seq !== treeClickSeq) return;
+    subsystems.value = subs;
     filters.subsystem_id = data.subsystem_id;
     filters.group_id = data.id;
     groups.value = await loadGroups(data.subsystem_id);
+    if (seq !== treeClickSeq) return;
   }
-  
-  pagination.page = 1;
-  loadServices();
+
+  // 仅当本次点击仍是最新点击时，才加载服务列表
+  if (seq === treeClickSeq) {
+    pagination.page = 1;
+    loadServices();
+  }
 };
 
 const handleProjectChange = async () => {
+  // 记录当前选择的项目，用于 await 后判断是否已过期
+  const currentProjectId = filters.project_id;
   filters.subsystem_id = '';
   filters.group_id = '';
-  if (filters.project_id) {
-    subsystems.value = await loadSubsystems(filters.project_id);
+  if (currentProjectId) {
+    const subs = await loadSubsystems(currentProjectId);
+    // await 期间用户又切换了项目，放弃本次后续操作
+    if (filters.project_id !== currentProjectId) return;
+    subsystems.value = subs;
     groups.value = [];
   } else {
     subsystems.value = [];
     groups.value = [];
   }
-  pagination.page = 1;
-  loadServices();
+  if (filters.project_id === currentProjectId) {
+    pagination.page = 1;
+    loadServices();
+  }
 };
 
 const handleSubsystemChange = async () => {
+  const currentSubsystemId = filters.subsystem_id;
   filters.group_id = '';
-  groups.value = await loadGroups(filters.subsystem_id);
+  const grps = await loadGroups(currentSubsystemId);
+  // await 期间用户又切换了子系统，放弃本次后续操作
+  if (filters.subsystem_id !== currentSubsystemId) return;
+  groups.value = grps;
   pagination.page = 1;
   loadServices();
 };

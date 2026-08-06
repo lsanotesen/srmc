@@ -52,7 +52,7 @@
         <span>全局概览</span>
       </button>
       <button class="tab-btn" :class="{ active: activeTab === 'servers' }" @click="activeTab = 'servers'">
-        <el-icon :size="16"><Computer /></el-icon>
+        <el-icon :size="16"><Platform /></el-icon>
         <span>服务器监控</span>
       </button>
     </div>
@@ -153,7 +153,7 @@
       <!-- 服务器列表网格 -->
       <div class="server-grid" v-loading="loadingServers">
         <div v-if="!serverList.length" class="empty-state">
-          <el-icon :size="48" color="#d1d5db"><Computer /></el-icon>
+          <el-icon :size="48" color="#d1d5db"><Platform /></el-icon>
           <p>暂无服务器数据，请先在"服务器管理"中添加服务器</p>
         </div>
         <div v-else class="server-cards">
@@ -424,7 +424,7 @@ import axios from 'axios'
 import { ElMessage } from 'element-plus'
 import {
   Refresh, Monitor, VideoPlay, VideoPause, View,
-  Cpu, Odometer, Warning, CircleCheck, Computer, ArrowLeft, Bell
+  Cpu, Odometer, Warning, CircleCheck, Platform, ArrowLeft, Bell
 } from '@element-plus/icons-vue'
 
 // ===== 状态 =====
