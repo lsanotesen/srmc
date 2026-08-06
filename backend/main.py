@@ -46,13 +46,44 @@ app.add_middleware(
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = exc.errors()
+    # 提取具体的错误信息
+    if errors:
+        first_error = errors[0]
+        error_type = first_error.get('type', '')
+        error_msg = first_error.get('msg', 'Validation error')
+        location = first_error.get('loc', [])
+        field_name = location[-1] if location else 'unknown'
+        
+        if error_type == 'missing':
+            error_msg = f"字段 '{field_name}' 为必填项"
+        elif error_type == 'string_pattern_mismatch':
+            error_msg = f"字段 '{field_name}' 格式无效"
+        elif error_type == 'string_type' or error_type == 'string_parsing':
+            error_msg = f"字段 '{field_name}' 必须是字符串类型"
+        elif error_type == 'int_parsing':
+            error_msg = f"字段 '{field_name}' 必须是整数"
+        elif error_type == 'list_type' or error_type == 'list_parsing':
+            error_msg = f"字段 '{field_name}' 必须是列表类型"
+        elif error_type == 'value_error':
+            # 常见的 value_error 模式
+            msg = first_error.get('msg', '')
+            if 'email' in msg.lower() or 'valid email' in msg.lower():
+                error_msg = f"字段 '{field_name}' 邮箱格式无效"
+            elif 'must be' in msg.lower() and '@' in msg.lower():
+                error_msg = f"字段 '{field_name}' 必须包含 @ 符号"
+            else:
+                error_msg = f"字段 '{field_name}' 数据无效"
+    else:
+        error_msg = '数据校验失败'
+    
     return JSONResponse(
         status_code=HTTP_422_UNPROCESSABLE_ENTITY,
         content={
             "code": 422,
-            "message": "Validation error",
+            "message": error_msg,
             "data": None,
-            "details": exc.errors()
+            "details": errors
         }
     )
 

@@ -234,8 +234,8 @@ async function saveUser() {
       job_title: userForm.job_title,
       organization_id: userForm.organization_id || null,
       department_id: userForm.department_id || null,
-      email: userForm.email,
-      phone: userForm.phone
+      email: userForm.email ? userForm.email : null,
+      phone: userForm.phone ? userForm.phone : null
     }
 
     if (userForm.id) {
@@ -258,7 +258,9 @@ async function saveUser() {
       ElMessage.error(result.data.message || '保存失败')
     }
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '操作失败')
+    const errData = error.response?.data
+    const errMsg = errData?.message || errData?.detail || error.message || '操作失败'
+    ElMessage.error(errMsg)
   }
 }
 
@@ -292,7 +294,8 @@ async function resetPassword(row) {
       ElMessage.error(result.data.message || '重置失败')
     }
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '重置失败')
+    const errData = error.response?.data
+    ElMessage.error(errData?.message || errData?.detail || '重置失败')
   }
 }
 
@@ -311,7 +314,8 @@ async function deleteUser(row) {
       ElMessage.error(result.data.message || '删除失败')
     }
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '删除失败')
+    const errData = error.response?.data
+    ElMessage.error(errData?.message || errData?.detail || '删除失败')
   }
 }
 
@@ -326,7 +330,8 @@ async function toggleUserStatus(row) {
       ElMessage.error(result.data.message || '操作失败')
     }
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '操作失败')
+    const errData = error.response?.data
+    ElMessage.error(errData?.message || errData?.detail || '操作失败')
   }
 }
 
