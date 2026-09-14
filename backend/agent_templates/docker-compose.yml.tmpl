@@ -1,0 +1,28 @@
+name: srmc-agent
+services:
+  srmc-agent:
+    image: srmc-agent:latest
+    container_name: srmc-agent
+    restart: always
+    pid: host
+    network_mode: host
+    privileged: true
+    security_opt:
+      - label=disable
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${{SRMC_AGENT_DIR:-/etc/srmc-agent}}:/etc/srmc-agent
+      - /var/log/srmc-agent:/var/log/srmc-agent
+      - /etc/passwd:/etc/passwd:ro
+      - /etc/shadow:/etc/shadow:ro
+      - /etc/group:/etc/group:ro
+      - /home:/home:ro
+      - /u01:/u01
+      - /u02:/u02
+      - /opt:/opt:ro
+      - /data:/data:ro
+      - /srv:/srv:ro
+    environment:
+      - TZ=Asia/Shanghai
+      - DOCKER_API_VERSION=1.44
+      - SRMC_AGENT_DIR={DEPLOY_DIR}

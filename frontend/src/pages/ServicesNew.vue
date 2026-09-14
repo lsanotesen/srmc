@@ -31,10 +31,48 @@
             <el-option label="全部分类" value="" />
             <el-option v-for="group in groups" :key="group.id" :label="group.group_name" :value="group.id" />
           </el-select>
+          <el-select v-model="filters.deploy_type" placeholder="部署方式" clearable class="deploy-select">
+            <el-option label="全部方式" value="" />
+            <el-option label="HOST" value="HOST" />
+            <el-option label="DOCKER" value="DOCKER" />
+            <el-option label="DOCKER_COMPOSE" value="DOCKER_COMPOSE" />
+            <el-option label="PROCESS" value="PROCESS" />
+          </el-select>
+          <el-select v-model="filters.status" placeholder="服务状态" clearable class="status-select">
+            <el-option label="全部状态" value="" />
+            <el-option label="运行中" value="RUNNING" />
+            <el-option label="已停止" value="STOPPED" />
+            <el-option label="状态未知" value="UNKNOWN" />
+          </el-select>
+          <el-select v-model="filters.agent_status" placeholder="Agent状态" clearable class="agent-select">
+            <el-option label="全部Agent" value="" />
+            <el-option label="Agent在线" value="online" />
+            <el-option label="Agent离线" value="offline" />
+          </el-select>
           <el-input v-model="filters.keyword" placeholder="搜索功能描述或模块" class="search-input" @keyup.enter="loadServices" />
           <el-input v-model="filters.ip" placeholder="搜索IP地址" class="ip-input" @keyup.enter="loadServices" />
           <el-button type="primary" @click="loadServices">搜索</el-button>
           <el-button @click="resetFilters">重置</el-button>
+        </div>
+
+        <!-- 状态统计快捷筛选栏 -->
+        <div class="status-stats-bar">
+          <span class="stats-label">快速筛选：</span>
+          <span :class="['stats-chip', filters.status === '' && filters.agent_status === '' ? 'active' : '']" @click="applyStatusFilter('', '')">
+            全部 {{ statusStats.total }}
+          </span>
+          <span :class="['stats-chip stats-running', filters.status === 'RUNNING' ? 'active' : '']" @click="applyStatusFilter('RUNNING', '')">
+            运行中 {{ statusStats.running }}
+          </span>
+          <span :class="['stats-chip stats-stopped', filters.status === 'STOPPED' ? 'active' : '']" @click="applyStatusFilter('STOPPED', '')">
+            已停止 {{ statusStats.stopped }}
+          </span>
+          <span :class="['stats-chip stats-agent-offline', filters.agent_status === 'offline' ? 'active' : '']" @click="applyStatusFilter('', 'offline')">
+            Agent异常 {{ statusStats.agentOffline }}
+          </span>
+          <span :class="['stats-chip stats-unknown', filters.status === 'UNKNOWN' ? 'active' : '']" @click="applyStatusFilter('UNKNOWN', '')">
+            状态未知 {{ statusStats.unknown }}
+          </span>
         </div>
 
         <div class="table-wrapper">
@@ -53,9 +91,9 @@
             <el-table-column prop="module" label="对应模块" min-width="120" />
             <el-table-column prop="subsystem_name" label="子系统" min-width="120" />
             <el-table-column prop="group_name" label="程序分类" min-width="120" />
-            <el-table-column prop="deploy_type" label="部署方式" min-width="100">
+            <el-table-column prop="deploy_type" label="部署方式" min-width="140">
               <template #default="scope">
-                <el-tag :type="getDeployType(scope.row.deploy_type).type">
+                <el-tag :type="getDeployType(scope.row.deploy_type).type" style="white-space: nowrap;">
                   {{ getDeployType(scope.row.deploy_type).label }}
                 </el-tag>
               </template>
@@ -80,13 +118,13 @@
                   <span v-if="scope.row.status_source === 'AGENT'" class="status-source agent-source">
                     Agent
                   </span>
-                  <span v-else class="status-source ssh-source">
-                    SSH
+                  <span v-else-if="scope.row.status_source === 'OFFLINE'" class="status-source offline-source">
+                    Agent离线
                   </span>
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="200" align="center">
+            <el-table-column label="操作" width="140" align="center">
               <template #default="scope">
                 <div class="action-buttons">
                   <div class="action-btn view-btn" @click="viewService(scope.row)">
@@ -94,9 +132,6 @@
                   </div>
                   <div v-if="hasPermission('service:edit-config')" class="action-btn edit-btn" @click="editService(scope.row)">
                     <span>编辑</span>
-                  </div>
-                  <div v-if="hasPermission('service:edit-config')" class="action-btn delete-btn" @click="deleteService(scope.row)">
-                    <span>删除</span>
                   </div>
                 </div>
               </template>
@@ -213,8 +248,14 @@
           <el-form-item label="日志路径">
             <el-input v-model="serviceForm.log_path" placeholder="日志文件路径或目录" />
           </el-form-item>
-          <el-form-item label="程序端口">
-            <el-input v-model.number="serviceForm.port" placeholder="请输入端口号" />
+          <el-form-item>
+            <template #label>
+              程序端口
+              <el-tooltip content="知名中间件（如 Elasticsearch、MySQL、Redis、Nginx 等）建议配置端口，监控更准确；自研程序可不填，将通过启动脚本解析进程名进行检测" placement="top">
+                <el-icon class="port-help-icon"><QuestionFilled /></el-icon>
+              </el-tooltip>
+            </template>
+            <el-input v-model.number="serviceForm.port" placeholder="知名中间件建议填写，多个端口用逗号分隔" />
           </el-form-item>
         </template>
 
@@ -311,8 +352,8 @@
             <span v-if="selectedService.status_source === 'AGENT'" class="status-source agent-source">
               Agent
             </span>
-            <span v-else class="status-source ssh-source">
-              SSH
+            <span v-else-if="selectedService.status_source === 'OFFLINE'" class="status-source offline-source">
+              Agent离线
             </span>
           </div>
         </el-descriptions-item>
@@ -622,12 +663,13 @@
   </div>
 </template>
 
-<script setup>import { ref, reactive, onMounted, onUnmounted, nextTick, Teleport, watch } from 'vue';
+<script setup>import { ref, reactive, onMounted, onActivated, onBeforeUnmount, onUnmounted, onDeactivated, nextTick, Teleport, watch } from 'vue';
 import { ElMessage, ElMessageBox, ElMenu, ElMenuItem } from 'element-plus';
-import { Minus, Close, Promotion } from '@element-plus/icons-vue';
-import { useRouter } from 'vue-router';
+import { Minus, Close, Promotion, QuestionFilled } from '@element-plus/icons-vue';
+import { useRouter, useRoute } from 'vue-router';
 import axios from '@/utils/axios';
 import { usePermission } from '@/composables/usePermission';
+import { useProjectStore } from '@/stores/projectStore';
 import ProjectTree from '@/components/ProjectTree.vue';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
@@ -637,6 +679,8 @@ const { hasPermission } = usePermission();
 import 'xterm/css/xterm.css';
 
 const router = useRouter();
+const route = useRoute();
+const projectStore = useProjectStore();
 const services = ref([]);
 const selectedServices = ref([]);
 const serviceTable = ref(null);
@@ -658,8 +702,79 @@ const filters = reactive({
   subsystem_id: '',
   group_id: '',
   keyword: '',
-  ip: ''
+  ip: '',
+  deploy_type: '',
+  status: '',
+  agent_status: ''
 });
+
+// 状态统计（用于顶部快捷筛选栏）
+const statusStats = reactive({
+  total: 0,
+  running: 0,
+  stopped: 0,
+  agentOffline: 0,
+  unknown: 0
+});
+
+const loadStatusStats = async () => {
+  try {
+    // 用当前页面的筛选条件（除 status/agent_status 外）查询状态分布
+    const params = new URLSearchParams();
+    if (filters.project_id) params.append('project_id', filters.project_id);
+    if (filters.subsystem_id) params.append('subsystem_id', filters.subsystem_id);
+    if (filters.group_id) params.append('group_id', filters.group_id);
+    if (filters.deploy_type) params.append('deploy_type', filters.deploy_type);
+
+    const response = await axios.get(`/api/services/count?${params}`);
+    if (response.data.code === 0) {
+      const d = response.data.data;
+      statusStats.total = d.total || 0;
+      statusStats.running = d.running || 0;
+      statusStats.stopped = d.stopped || 0;
+      statusStats.agentOffline = d.agentOffline || 0;
+      statusStats.unknown = d.unknown || 0;
+    }
+  } catch (e) {
+    console.warn('[statusStats] load failed:', e.message);
+  }
+};
+
+const applyStatusFilter = (statusVal, agentVal) => {
+  filters.status = statusVal;
+  filters.agent_status = agentVal;
+  pagination.page = 1;
+  loadServices();
+};
+
+// ---- 路由 query 下钻（从运行总览点击进入）----
+// keep-alive 缓存下 onMounted 只执行一次，后续进入走 onActivated。
+// 每次下钻都是全新筛选意图：重置全部 filters 后按 query 设置，不残留上一次的项目/子系统。
+const lastAppliedQuery = ref('');
+const QUERY_FILTER_KEYS = ['project_id', 'subsystem_id', 'group_id', 'deploy_type', 'status', 'agent_status', 'keyword', 'ip'];
+
+const querySignature = (q) => QUERY_FILTER_KEYS.map(k => `${k}=${q[k] ?? ''}`).join('&');
+
+const applyRouteQuery = () => {
+  const q = route.query;
+  // 先全部清空，再按 query 赋值
+  filters.project_id = q.project_id ? Number(q.project_id) : '';
+  filters.subsystem_id = q.subsystem_id ? Number(q.subsystem_id) : '';
+  filters.group_id = q.group_id ? Number(q.group_id) : '';
+  filters.deploy_type = q.deploy_type || '';
+  filters.status = q.status || '';
+  filters.agent_status = q.agent_status || '';
+  filters.keyword = q.keyword || '';
+  filters.ip = q.ip || '';
+
+  // 级联填充子系统/分类下拉选项（走项目树缓存，零额外请求）
+  subsystems.value = filters.project_id ? projectStore.subsystemsByProject(filters.project_id) : [];
+  groups.value = filters.subsystem_id ? projectStore.groupsBySubsystem(filters.subsystem_id) : [];
+
+  pagination.page = 1;
+  loadServices();
+  loadStatusStats();
+};
 const showAddDialog = ref(false);
 const showDetailDialog = ref(false);
 const showLogDialog = ref(false);
@@ -739,19 +854,13 @@ const serviceForm = reactive({
 });
 let statusInterval = null;
 let isUpdatingStatus = false;  // 防止重入
-let statusAbortController = null;  // 请求取消
 
-// 服务列表加载状态与请求控制（防止快速切换时响应错乱导致界面卡住）
+// 服务列表加载状态与请求控制
 const loading = ref(false);
-let loadServicesAbortController = null;
-let loadServicesRequestId = 0;
 
 // 缓存已加载的数据，避免重复请求
 const subsystemCache = ref({});
 const groupCache = ref({});
-// 正在进行的请求（in-flight 去重，避免同一 key 并发请求）
-const subsystemInflight = {};
-const groupInflight = {};
 // 加载状态
 const loadingSubsystems = ref(false);
 const loadingGroups = ref(false);
@@ -814,67 +923,112 @@ const isRunning = (status) => {
   return s === 'running' || s === 'partial';
 };
 
+// 跟踪最新请求ID（确保只有最新请求能更新数据）
+let latestRequestId = 0;
+// 活跃请求计数器 - 只有全部请求完成后才关 loading（含被取消的）
+let pendingRequestCount = 0;
+// 安全兜底：3 秒后强制关闭 loading，防止任何异常导致永久加载
+let safetyLoadingTimer = null;
+
+// 50ms 防抖合并快速点击，防止 HTTP/1.1 连接池耗尽
+// 请求不 abort，自然完成后用 requestId 判断是否为最新
+let loadServicesTimer = null;
+const scheduleLoadServices = () => {
+  if (loadServicesTimer) clearTimeout(loadServicesTimer);
+  loadServicesTimer = setTimeout(() => {
+    loadServicesTimer = null;
+    loadServices();
+  }, 50);
+};
+
 const loadServices = async () => {
-  // 递增请求ID，用于识别最新请求
-  const currentRequestId = ++loadServicesRequestId;
+  const currentRequestId = ++latestRequestId;
+  pendingRequestCount++;
 
-  // 取消上一次未完成的请求，避免旧响应覆盖新数据导致界面卡住
-  if (loadServicesAbortController) {
-    loadServicesAbortController.abort();
+  // 只在首次加载时显示 loading
+  if (services.value.length === 0) {
+    loading.value = true;
   }
-  loadServicesAbortController = new AbortController();
-  const signal = loadServicesAbortController.signal;
 
-  loading.value = true;
+  // 安全兜底超时
+  if (safetyLoadingTimer) clearTimeout(safetyLoadingTimer);
+  safetyLoadingTimer = setTimeout(() => {
+    if (pendingRequestCount > 0) {
+      console.warn('[loadServices] Safety timeout: force closing loading');
+      pendingRequestCount = 0;
+      loading.value = false;
+    }
+  }, 3000);
 
   try {
     const params = new URLSearchParams();
     params.append('page', pagination.page);
     params.append('size', pagination.size);
-    if (filters.project_id) {
-      params.append('project_id', filters.project_id);
-    }
-    if (filters.subsystem_id) {
-      params.append('subsystem_id', filters.subsystem_id);
-    }
-    if (filters.group_id) {
-      params.append('group_id', filters.group_id);
-    }
-    if (filters.keyword) {
-      params.append('func_desc', filters.keyword);
-    }
-    if (filters.ip) {
-      params.append('ip', filters.ip);
-    }
-    const response = await axios.get(`/api/services?${params}`, { signal });
+    if (filters.project_id) params.append('project_id', filters.project_id);
+    if (filters.subsystem_id) params.append('subsystem_id', filters.subsystem_id);
+    if (filters.group_id) params.append('group_id', filters.group_id);
+    if (filters.deploy_type) params.append('deploy_type', filters.deploy_type);
+    if (filters.status) params.append('status', filters.status);
+    if (filters.agent_status) params.append('agent_status', filters.agent_status);
+    if (filters.keyword) params.append('func_desc', filters.keyword);
+    if (filters.ip) params.append('ip', filters.ip);
 
-    // 已被更新的请求取代，丢弃本次响应
-    if (currentRequestId !== loadServicesRequestId || signal.aborted) {
-      return;
-    }
+    // 不使用 AbortController，让请求自然完成
+    const response = await axios.get(`/api/services?${params}`);
+
+    // 过时请求静默丢弃数据（用 requestId 判断）
+    if (currentRequestId !== latestRequestId) return;
 
     if (response.data.code === 0) {
-      services.value = response.data.data.items;
+      const items = response.data.data.items;
+      services.value = items;
       pagination.total = response.data.data.total;
-      // 非阻塞更新状态，避免超时影响服务列表加载
-      updateStatuses();
+
+      // 刷新状态统计（用当前筛选条件的 count 接口，口径一致）
+      loadStatusStats();
+      
+      // 统计需要刷新状态的服务（状态未知且非 Agent 缓存来源）
+      const needRefreshCount = items.filter(s =>
+        (!s.status || s.status === 'UNKNOWN') &&
+        (!s.status_source || s.status_source !== 'AGENT')
+      ).length;
+
+      if (needRefreshCount > 0) {
+        scheduleStatusUpdate();
+      }
     }
   } catch (error) {
-    // 请求被取消，静默处理
-    if (error.name === 'AbortError' || signal.aborted) {
-      return;
-    }
-    // 已被更新的请求取代，不显示错误
-    if (currentRequestId !== loadServicesRequestId) {
-      return;
-    }
+    // 请求被主动取消 → 静默跳过
+    const isCanceled = error.code === 'ERR_CANCELED'
+      || error.name === 'CanceledError'
+      || error.name === 'AbortError'
+      || (error.message && error.message.includes('canceled'));
+    if (isCanceled) return;
+
+    // 真实错误只有最新请求才弹出
+    if (currentRequestId !== latestRequestId) return;
+    console.error('[loadServices] Error:', error);
     ElMessage.error('加载服务列表失败');
   } finally {
-    // 仅最新请求才关闭 loading
-    if (currentRequestId === loadServicesRequestId) {
+    pendingRequestCount = Math.max(0, pendingRequestCount - 1);
+    if (pendingRequestCount === 0) {
+      if (safetyLoadingTimer) {
+        clearTimeout(safetyLoadingTimer);
+        safetyLoadingTimer = null;
+      }
       loading.value = false;
     }
   }
+};
+
+// 状态更新防抖（500ms），用于 SSH 慢查询
+let statusUpdateTimer = null;
+const scheduleStatusUpdate = () => {
+  if (statusUpdateTimer) clearTimeout(statusUpdateTimer);
+  statusUpdateTimer = setTimeout(() => {
+    statusUpdateTimer = null;
+    updateStatuses();
+  }, 500);
 };
 
 const loadProjects = async () => {
@@ -894,7 +1048,6 @@ const loadProjects = async () => {
 };
 
 const loadSubsystems = async (projectId = '', forForm = false) => {
-  // 使用缓存键，空字符串表示全部子系统
   const cacheKey = projectId || 'all';
 
   // 命中缓存直接返回
@@ -902,50 +1055,34 @@ const loadSubsystems = async (projectId = '', forForm = false) => {
     return subsystemCache.value[cacheKey];
   }
 
-  // 正在进行的请求复用同一个 Promise，避免并发重复请求
-  if (subsystemInflight[cacheKey]) {
-    return subsystemInflight[cacheKey];
-  }
-
-  const promise = (async () => {
-    // 设置加载状态
+  try {
     if (forForm) {
       formLoadingSubsystems.value = true;
     } else {
       loadingSubsystems.value = true;
     }
 
-    try {
-      const params = new URLSearchParams();
-      if (projectId) {
-        params.append('project_id', projectId);
-      }
-      const response = await axios.get(`/api/subsystems?${params}`);
-      if (response.data.code === 0) {
-        const data = response.data.data.items;
-        // 缓存结果
-        subsystemCache.value[cacheKey] = data;
-        return data;
-      }
-      return [];
-    } catch (error) {
-      console.error('加载子系统列表失败', error);
-      return [];
-    } finally {
-      // 清除加载状态
-      if (forForm) {
-        formLoadingSubsystems.value = false;
-      } else {
-        loadingSubsystems.value = false;
-      }
+    const params = new URLSearchParams();
+    if (projectId) {
+      params.append('project_id', projectId);
     }
-  })();
-
-  subsystemInflight[cacheKey] = promise;
-  try {
-    return await promise;
+    const response = await axios.get(`/api/subsystems?${params}`);
+    
+    if (response.data.code === 0) {
+      const data = response.data.data.items;
+      subsystemCache.value[cacheKey] = data;
+      return data;
+    }
+    return [];
+  } catch (error) {
+    console.error('加载子系统列表失败', error);
+    return [];
   } finally {
-    delete subsystemInflight[cacheKey];
+    if (forForm) {
+      formLoadingSubsystems.value = false;
+    } else {
+      loadingSubsystems.value = false;
+    }
   }
 };
 
@@ -959,126 +1096,101 @@ const loadGroups = async (subsystemId = '', forForm = false) => {
     return groupCache.value[subsystemId];
   }
 
-  // 正在进行的请求复用同一个 Promise，避免并发重复请求
-  if (groupInflight[subsystemId]) {
-    return groupInflight[subsystemId];
-  }
-
-  const promise = (async () => {
-    // 设置加载状态
+  try {
     if (forForm) {
       formLoadingGroups.value = true;
     } else {
       loadingGroups.value = true;
     }
 
-    try {
-      const response = await axios.get(`/api/subsystems/${subsystemId}/groups`);
-      if (response.data.code === 0) {
-        const data = response.data.data;
-        // 缓存结果
-        groupCache.value[subsystemId] = data;
-        return data;
-      }
-      return [];
-    } catch (error) {
-      console.error('加载程序分类列表失败', error);
-      return [];
-    } finally {
-      // 清除加载状态
-      if (forForm) {
-        formLoadingGroups.value = false;
-      } else {
-        loadingGroups.value = false;
-      }
+    const response = await axios.get(`/api/subsystems/${subsystemId}/groups`);
+    
+    if (response.data.code === 0) {
+      const data = response.data.data;
+      groupCache.value[subsystemId] = data;
+      return data;
     }
-  })();
-
-  groupInflight[subsystemId] = promise;
-  try {
-    return await promise;
+    return [];
+  } catch (error) {
+    console.error('加载程序分类列表失败', error);
+    return [];
   } finally {
-    delete groupInflight[subsystemId];
+    if (forForm) {
+      formLoadingGroups.value = false;
+    } else {
+      loadingGroups.value = false;
+    }
   }
 };
 
-// 项目树点击序列号，用于取消过时的异步操作
-let treeClickSeq = 0;
+// 防止 handleTreeClick 修改 filters 时触发 el-select 的 @change 事件
+// Vue 的 @change 事件在 nextTick（微任务）时触发，所以标志需等下一个 tick 之后才清除
+let isInternalTreeClick = false;
 
-const handleTreeClick = async (data) => {
-  // 递增序列号，本次点击的后续异步操作均以此 seq 标识
-  const seq = ++treeClickSeq;
+const handleTreeClick = (data) => {
+  // 立即标记内部修改，开始保护窗口
+  isInternalTreeClick = true;
 
   filters.subsystem_id = '';
   filters.group_id = '';
 
   if (data.type === 'project') {
-    // 点击项目，设置项目筛选并加载该项目下所有子系统和全局分类
     filters.project_id = data.id;
-    const subs = await loadSubsystems(data.id);
-    // await 期间用户又点击了其他节点，放弃本次后续操作
-    if (seq !== treeClickSeq) return;
-    subsystems.value = subs;
-    groups.value = await loadGroups();
-    if (seq !== treeClickSeq) return;
+    subsystems.value = projectStore.subsystemsByProject(data.id);
+    groups.value = [];
   } else if (data.type === 'subsystem') {
-    // 点击子系统，设置项目和子系统筛选，加载该子系统的关联分类
     filters.project_id = data.project_id;
-    const subs = await loadSubsystems(data.project_id);
-    if (seq !== treeClickSeq) return;
-    subsystems.value = subs;
+    subsystems.value = projectStore.subsystemsByProject(data.project_id);
     filters.subsystem_id = data.id;
-    groups.value = await loadGroups(data.id);
-    if (seq !== treeClickSeq) return;
+    groups.value = projectStore.groupsBySubsystem(data.id);
   } else if (data.type === 'service_group') {
-    // 点击程序分类，设置项目、子系统和分类筛选
     filters.project_id = data.project_id;
-    const subs = await loadSubsystems(data.project_id);
-    if (seq !== treeClickSeq) return;
-    subsystems.value = subs;
+    subsystems.value = projectStore.subsystemsByProject(data.project_id);
     filters.subsystem_id = data.subsystem_id;
     filters.group_id = data.id;
-    groups.value = await loadGroups(data.subsystem_id);
-    if (seq !== treeClickSeq) return;
+    groups.value = projectStore.groupsBySubsystem(data.subsystem_id);
   }
 
-  // 仅当本次点击仍是最新点击时，才加载服务列表
-  if (seq === treeClickSeq) {
-    pagination.page = 1;
-    loadServices();
-  }
+  // 只加载服务列表（唯一的请求）
+  pagination.page = 1;
+  scheduleLoadServices();
+
+  // 延长标志时间：用 setTimeout 100ms 确保 Vue 异步 @change 事件处理完毕
+  setTimeout(() => {
+    isInternalTreeClick = false;
+  }, 100);
 };
 
-const handleProjectChange = async () => {
-  // 记录当前选择的项目，用于 await 后判断是否已过期
+const handleProjectChange = () => {
+  // 如果是项目树内部触发的修改，跳过（避免重复加载和竞态）
+  if (isInternalTreeClick) return;
+
   const currentProjectId = filters.project_id;
   filters.subsystem_id = '';
   filters.group_id = '';
+
+  // 从 Store 缓存取子系统（零请求）
   if (currentProjectId) {
-    const subs = await loadSubsystems(currentProjectId);
-    // await 期间用户又切换了项目，放弃本次后续操作
-    if (filters.project_id !== currentProjectId) return;
-    subsystems.value = subs;
-    groups.value = [];
+    subsystems.value = projectStore.subsystemsByProject(currentProjectId);
   } else {
     subsystems.value = [];
-    groups.value = [];
   }
-  if (filters.project_id === currentProjectId) {
-    pagination.page = 1;
-    loadServices();
-  }
+  groups.value = [];
+
+  pagination.page = 1;
+  scheduleLoadServices();
 };
 
-const handleSubsystemChange = async () => {
+const handleSubsystemChange = () => {
+  // 如果是项目树内部触发的修改，跳过（避免重复加载和竞态）
+  if (isInternalTreeClick) return;
+
   const currentSubsystemId = filters.subsystem_id;
   filters.group_id = '';
-  const grps = await loadGroups(currentSubsystemId);
-  // await 期间用户又切换了子系统，放弃本次后续操作
-  if (filters.subsystem_id !== currentSubsystemId) return;
-  groups.value = grps;
+  // 从 Store 缓存取分组（零请求）
+  groups.value = projectStore.groupsBySubsystem(currentSubsystemId);
   pagination.page = 1;
-  loadServices();
+  scheduleLoadServices();
 };
 
 const handleFormProjectChange = async () => {
@@ -1097,14 +1209,7 @@ const updateStatuses = async () => {
   // 防止重入：如果上一次请求还没完成，跳过本次
   if (isUpdatingStatus) return;
   isUpdatingStatus = true;
-  
-  // 取消上一次未完成的请求
-  if (statusAbortController) {
-    statusAbortController.abort();
-  }
-  statusAbortController = new AbortController();
-  const signal = statusAbortController.signal;
-  
+
   const serviceIds = services.value.map(s => s.id);
   if (serviceIds.length === 0) {
     isUpdatingStatus = false;
@@ -1113,15 +1218,9 @@ const updateStatuses = async () => {
   
   try {
     const [redisStatusResponse, agentsResponse] = await Promise.all([
-      axios.post('/api/services/status/cache', serviceIds, { signal }),
-      axios.get('/api/agents/', { signal })
+      axios.post('/api/services/status/cache', serviceIds),
+      axios.get('/api/agents/')
     ]);
-    
-    // 如果请求被取消，直接返回
-    if (signal.aborted) {
-      isUpdatingStatus = false;
-      return;
-    }
     
     // 构建 agentMap：按 uuid 和按 ip 双索引，便于快速查找
     const agentByUuid = {};
@@ -1159,66 +1258,27 @@ const updateStatuses = async () => {
           agentInfo = agentByIp[service.ip];
         }
         const agentOnline = agentInfo && agentInfo.status === 'online';
-        
+
         const cached = statusMap[service.id];
         if (agentOnline && cached) {
           // Agent 在线且有缓存 → 使用缓存
           service.status = cached.status || 'UNKNOWN';
           service.status_source = 'AGENT';
         } else if (agentOnline) {
-          // Agent 在线但无缓存 → 等待 Agent 上报，不使用 SSH
-          // 保持当前状态不变，或显示"等待更新"
+          // Agent 在线但无缓存 → 等待 Agent 上报
+          // 已有状态的服务保留显示，避免闪烁；无状态则显示 UNKNOWN
           if (!service.status || service.status === 'UNKNOWN') {
             service.status = 'UNKNOWN';
             service.status_source = 'AGENT';
           }
-        } else if (cached) {
-          // Agent 离线但有缓存 → 使用缓存
-          service.status = cached.status || 'UNKNOWN';
-          service.status_source = cached.source || 'SSH';
         } else {
-          // Agent 离线且无缓存 → 标记为需要 SSH 查询
+          // Agent 离线 → 不再回退 SSH，直接显示 UNKNOWN
           service.status = 'UNKNOWN';
-          service.status_source = 'SSH';
+          service.status_source = 'OFFLINE';
         }
       });
     }
-    
-    // 只有 Agent 离线的服务才用 SSH 查询（慢路径）
-    // 限制 SSH 查询数量，避免卡顿
-    const servicesNeedSsh = services.value.filter(s => 
-      s.status === 'UNKNOWN' && s.status_source === 'SSH'
-    );
-    
-    if (servicesNeedSsh.length > 0 && servicesNeedSsh.length <= 10) {
-      // 只查询少量服务（≤10个），避免卡顿
-      const sshIds = servicesNeedSsh.map(s => s.id);
-      const sshResponse = await axios.post('/api/services/status/batch', sshIds, { signal });
-      if (sshResponse.data.code === 0 && !signal.aborted) {
-        const sshStatusMap = sshResponse.data.data;
-        servicesNeedSsh.forEach(service => {
-          service.status = sshStatusMap[service.id] || 'STOPPED';
-          service.status_source = 'SSH';
-        });
-      }
-    } else if (servicesNeedSsh.length > 10) {
-      // 超过10个服务需要SSH查询，只查询前10个
-      console.warn(`跳过 ${servicesNeedSsh.length - 10} 个服务的SSH状态查询，避免卡顿`);
-      const sshIds = servicesNeedSsh.slice(0, 10).map(s => s.id);
-      const sshResponse = await axios.post('/api/services/status/batch', sshIds, { signal });
-      if (sshResponse.data.code === 0 && !signal.aborted) {
-        const sshStatusMap = sshResponse.data.data;
-        servicesNeedSsh.slice(0, 10).forEach(service => {
-          service.status = sshStatusMap[service.id] || 'STOPPED';
-          service.status_source = 'SSH';
-        });
-      }
-    }
   } catch (error) {
-    // 如果是取消导致的错误，忽略
-    if (error.name === 'AbortError' || signal.aborted) {
-      return;
-    }
     console.error('更新状态失败', error);
   } finally {
     isUpdatingStatus = false;
@@ -1258,10 +1318,14 @@ const resetFilters = () => {
   filters.group_id = '';
   filters.keyword = '';
   filters.ip = '';
+  filters.deploy_type = '';
+  filters.status = '';
+  filters.agent_status = '';
   subsystems.value = [];
   groups.value = [];
   pagination.page = 1;
   loadServices();
+  loadStatusStats();
 };
 
 const viewService = async (service) => {
@@ -1273,10 +1337,10 @@ const viewService = async (service) => {
       // 使用列表中实时的状态（列表会定时刷新），覆盖详情接口返回的 current_status
       if (service.status) {
         selectedService.status = service.status;
-        selectedService.status_source = service.status_source || 'SSH';
+        selectedService.status_source = service.status_source || 'OFFLINE';
       } else if (response.data.data.current_status) {
         selectedService.status = response.data.data.current_status;
-        selectedService.status_source = response.data.data.status_source || 'SSH';
+        selectedService.status_source = response.data.data.status_source || 'OFFLINE';
       } else {
         // 如果列表中没有状态，异步获取
         setTimeout(async () => {
@@ -1285,7 +1349,7 @@ const viewService = async (service) => {
             if (cacheResponse.data.code === 0 && cacheResponse.data.data[service.id]) {
               const cached = cacheResponse.data.data[service.id];
               selectedService.status = cached.status || 'UNKNOWN';
-              selectedService.status_source = cached.source === 'AGENT' ? 'AGENT' : 'SSH';
+              selectedService.status_source = cached.source === 'AGENT' ? 'AGENT' : 'OFFLINE';
             }
           } catch (e) {
             console.error('获取状态失败:', e);
@@ -1445,22 +1509,6 @@ const saveService = async () => {
   } finally {
     // 重置提交状态
     isSubmitting.value = false;
-  }
-};
-
-const deleteService = async (service) => {
-  if (!confirm(`确定要删除服务 "${service.func_desc}" 吗？`))
-    return;
-  try {
-    const response = await axios.delete(`/api/services/${service.id}`);
-    if (response.data.code === 0) {
-      ElMessage.success('删除成功');
-      loadServices();
-    } else {
-      ElMessage.error(response.data.message || '删除失败');
-    }
-  } catch (error) {
-    ElMessage.error(error.response?.data?.message || '删除失败');
   }
 };
 
@@ -1958,8 +2006,23 @@ const initTerminal = () => {
   });
   
   terminal.onResize((size) => {
-    if (fitAddon) {
-      fitAddon.fit();
+    // 注意：这里不调用 fitAddon.fit()，否则会触发死循环：
+    // onResize → fit() → onResize → fit() ...
+    // fit 已在 initTerminal() 和 windowResizeHandler 中处理
+    
+    // 用二进制消息通知后端同步 PTY 尺寸
+    // 协议：[0x01=resize][cols_uint16_le][rows_uint16_le]
+    if (websocket && shellConnected.value) {
+      try {
+        const buf = new ArrayBuffer(5);
+        const view = new DataView(buf);
+        view.setUint8(0, 0x01); // type: resize
+        view.setUint16(1, size.cols, true);  // little-endian
+        view.setUint16(3, size.rows, true);
+        websocket.send(buf);
+      } catch (e) {
+        console.warn('Failed to send resize:', e);
+      }
     }
   });
   
@@ -2110,6 +2173,20 @@ const connectShell = () => {
       }
       if (terminal) {
         terminal.focus();
+        // 立即用二进制消息同步一次终端尺寸到后端
+        const size = terminal.size;
+        if (websocket && size) {
+          try {
+            const buf = new ArrayBuffer(5);
+            const view = new DataView(buf);
+            view.setUint8(0, 0x01);
+            view.setUint16(1, size.cols, true);
+            view.setUint16(3, size.rows, true);
+            websocket.send(buf);
+          } catch (e) {
+            console.warn('Failed to send resize on open:', e);
+          }
+        }
       }
     }, 500);
   };
@@ -2907,21 +2984,63 @@ const getDeployType = (type) => {
   return types[type] || { label: type || '未知', type: 'info' };
 };
 
-onMounted(() => {
-  loadServices();
+onMounted(async () => {
+  // 先加载项目树缓存（applyRouteQuery 级联填充子系统/分类下拉依赖它）
+  await projectStore.fetchTree();
+  // 记录首次 query 签名并套用筛选（支持从运行总览下钻带条件）
+  lastAppliedQuery.value = querySignature(route.query);
+  applyRouteQuery();
   loadProjects();
   loadAgents();
+});
+
+// keep-alive 激活时：启动定时器和键盘监听
+onActivated(() => {
   statusInterval = setInterval(updateStatuses, 5000);
   window.addEventListener('keydown', handleKeyDown);
   window.addEventListener('keyup', handleKeyUp);
+  // 从运行总览下钻进入、或点侧栏"服务管理"回到无 query 时，URL 条件发生变化 → 重新套用筛选（清掉上一次残留）
+  const sig = querySignature(route.query);
+  if (sig !== lastAppliedQuery.value) {
+    lastAppliedQuery.value = sig;
+    applyRouteQuery();
+  } else {
+    loadStatusStats();
+  }
+});
+
+// keep-alive 失活时：停止定时器和键盘监听（防止残留遮罩和事件污染其他页面）
+onDeactivated(() => {
+  if (statusInterval) {
+    clearInterval(statusInterval);
+    statusInterval = null;
+  }
+  window.removeEventListener('keydown', handleKeyDown);
+  window.removeEventListener('keyup', handleKeyUp);
+  // 关闭 append-to-body 对话框（此时 el-dialog 子组件仍存活，可正确清理 v-modal 遮罩）
+  if (showShellDialog.value) {
+    handleShellClose();
+  }
+  overwriteDialogVisible.value = false;
+});
+
+// 兜底：组件卸载前关闭 append-to-body 对话框
+onBeforeUnmount(() => {
+  if (showShellDialog.value) {
+    handleShellClose();
+  }
+  overwriteDialogVisible.value = false;
 });
 
 onUnmounted(() => {
   if (statusInterval) {
     clearInterval(statusInterval);
+    statusInterval = null;
   }
   window.removeEventListener('keydown', handleKeyDown);
   window.removeEventListener('keyup', handleKeyUp);
+  // 兜底：清理可能残留的全屏遮罩，防止点击失效
+  document.querySelectorAll('body > .v-modal, body > .el-overlay, body > .el-message-box__wrapper').forEach(el => el.remove());
 });
 
 const loadAgents = async () => {
@@ -2941,6 +3060,14 @@ const loadAgents = async () => {
   height: calc(100vh - 60px);
   display: flex;
   flex-direction: column;
+}
+
+.port-help-icon {
+  margin-left: 4px;
+  font-size: 14px;
+  color: #909399;
+  cursor: help;
+  vertical-align: middle;
 }
 
 .page-layout {
@@ -2981,8 +3108,10 @@ const loadAgents = async () => {
   align-items: center;
 }
 
-.project-select, .subsystem-select, .group-select {
-  width: 180px;
+.project-select, .subsystem-select, .group-select,
+.deploy-select, .status-select, .agent-select {
+  width: 160px;
+  flex-shrink: 0;
 }
 
 .search-input {
@@ -2992,6 +3121,54 @@ const loadAgents = async () => {
 .ip-input {
   width: 150px;
 }
+
+.status-stats-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 10px 16px;
+  background: #f8fafc;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+}
+.stats-label {
+  font-size: 13px;
+  color: #64748b;
+  font-weight: 500;
+}
+.stats-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border-radius: 16px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  background: #fff;
+  color: #64748b;
+  border: 1px solid #e2e8f0;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+.stats-chip:hover {
+  border-color: #cbd5e1;
+  color: #334155;
+}
+.stats-chip.active {
+  border-color: transparent;
+  color: #fff;
+}
+.stats-chip.stats-running { color: #059669; border-color: #a7f3d0; }
+.stats-chip.stats-running.active { background: #059669; color: #fff; }
+.stats-chip.stats-stopped { color: #dc2626; border-color: #fecaca; }
+.stats-chip.stats-stopped.active { background: #dc2626; color: #fff; }
+.stats-chip.stats-agent-offline { color: #6b7280; border-color: #e5e7eb; }
+.stats-chip.stats-agent-offline.active { background: #6b7280; color: #fff; }
+.stats-chip.stats-unknown { color: #d97706; border-color: #fde68a; }
+.stats-chip.stats-unknown.active { background: #d97706; color: #fff; }
+.stats-chip.active { background: #3b82f6; color: #fff; border-color: transparent; }
 
 .table-wrapper {
   flex: 1;
@@ -3090,6 +3267,11 @@ const loadAgents = async () => {
 .ssh-source {
   background-color: #fff3e0;
   color: #e65100;
+}
+
+.offline-source {
+  background-color: #f5f5f5;
+  color: #9e9e9e;
 }
 
 .action-buttons {

@@ -148,16 +148,47 @@ async def websocket_endpoint(
             read_task = asyncio.create_task(read_output())
             
             # 主循环：接收客户端消息
+            # 用单个 receive() 按消息类型分发，避免并发 receive_text/receive_bytes
+            # 消费同一接收队列导致字符丢失（pending task 越积越多，消息被错误分发）
             try:
                 while True:
-                    data = await asyncio.wait_for(websocket.receive_text(), timeout=350)
+                    message = await websocket.receive()
                     last_activity = asyncio.get_event_loop().time()
-                    logger.debug(f"Received command: {data[:50]}...")
-                    if data.strip().lower() == 'exit':
+
+                    if message.get("type") == "websocket.disconnect":
+                        logger.info("WebSocket disconnected by client")
                         break
-                    shell.send(data)
-            except asyncio.TimeoutError:
-                logger.info("WebSocket timeout")
+
+                    if "text" in message and message["text"] is not None:
+                        # 文本消息：键盘输入，直接转发到 shell
+                        data = message["text"]
+                        logger.debug(f"Received keystroke: {data[:50]}...")
+                        if data.strip().lower() == 'exit':
+                            break
+                        shell.send(data)
+                    elif "bytes" in message and message["bytes"] is not None:
+                        # 二进制消息：控制指令（resize 等）
+                        try:
+                            result = bytearray(message["bytes"])
+                            if len(result) >= 5 and result[0] == 0x01:
+                                # resize: [0x01][cols_le][rows_le]
+                                cols = int.from_bytes(result[1:3], 'little')
+                                rows = int.from_bytes(result[3:5], 'little')
+                                logger.info(f"Resize PTY to {cols}x{rows}")
+                                try:
+                                    loop = asyncio.get_event_loop()
+                                    await loop.run_in_executor(
+                                        None,
+                                        shell.set_pty_size,
+                                        cols, rows,
+                                        cols * 8, rows * 24
+                                    )
+                                except Exception as resize_err:
+                                    logger.warning(f"Failed to resize PTY: {resize_err}")
+                            else:
+                                logger.debug(f"Unknown binary control: {result[:10]}")
+                        except Exception as bin_err:
+                            logger.warning(f"Binary message error: {bin_err}")
             except WebSocketDisconnect:
                 logger.info("WebSocket disconnected by client")
             except Exception as e:

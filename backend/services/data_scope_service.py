@@ -138,7 +138,7 @@ class DataScopeService:
 
     @staticmethod
     def _is_super_admin(user: User) -> bool:
-        return user.role == "ADMIN"
+        return user.role in ("ADMIN", "SUPER_ADMIN")
 
     @staticmethod
     def get_user_project_ids(db: Session, user: User) -> List[int]:

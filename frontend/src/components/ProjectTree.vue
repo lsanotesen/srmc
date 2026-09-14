@@ -48,9 +48,10 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue';
-import axios from '@/utils/axios';
+import { useProjectStore } from '@/stores/projectStore';
 
 const emit = defineEmits(['node-click']);
+const projectStore = useProjectStore();
 
 const treeData = ref([]);
 const treeProps = reactive({
@@ -58,34 +59,34 @@ const treeProps = reactive({
   children: 'children'
 });
 
+// 将 store 中的原始树数据映射为 el-tree 需要的格式
+const buildTreeData = () => {
+  treeData.value = projectStore.tree.map(project => ({
+    id: project.id,
+    label: project.name,
+    type: 'project',
+    children: (project.subsystems || []).map(subsystem => ({
+      id: subsystem.id,
+      label: subsystem.subsystem_name,
+      type: 'subsystem',
+      project_id: project.id,
+      children: (subsystem.service_groups || []).map(group => ({
+        id: group.id,
+        label: group.group_name,
+        type: 'service_group',
+        project_id: project.id,
+        subsystem_id: subsystem.id
+      }))
+    }))
+  }));
+};
+
 const loadTree = async () => {
   try {
-    const response = await axios.get('/api/projects/tree');
-    console.log('项目树接口响应:', response.data);
-    if (response.data.code === 0) {
-      if (!response.data.data || response.data.data.length === 0) {
-        console.warn('项目树数据为空');
-      }
-      treeData.value = response.data.data.map(project => ({
-        id: project.id,
-        label: project.name,
-        type: 'project',
-        children: project.subsystems?.map(subsystem => ({
-          id: subsystem.id,
-          label: subsystem.subsystem_name,
-          type: 'subsystem',
-          project_id: project.id,
-          children: subsystem.service_groups?.map(group => ({
-            id: group.id,
-            label: group.group_name,
-            type: 'service_group',
-            project_id: project.id,
-            subsystem_id: subsystem.id
-          })) || []
-        })) || []
-      }));
-    } else {
-      console.error('项目树接口返回错误:', response.data.message);
+    await projectStore.fetchTree();
+    buildTreeData();
+    if (projectStore.tree.length === 0) {
+      console.warn('项目树数据为空');
     }
   } catch (error) {
     console.error('加载项目树失败', error.response?.data || error.message);
@@ -97,7 +98,8 @@ const handleNodeClick = (data) => {
 };
 
 const refreshTree = () => {
-  loadTree();
+  // 强制刷新缓存
+  projectStore.invalidate().then(() => buildTreeData());
 };
 
 onMounted(() => {

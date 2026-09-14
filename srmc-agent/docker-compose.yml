@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   srmc-agent:
     build:
@@ -11,14 +9,23 @@ services:
     pid: host
     network_mode: host
     privileged: true
+    security_opt:
+      - label=disable
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./config.yaml:/etc/srmc-agent/config.yaml:ro
       - /var/log/srmc-agent:/var/log/srmc-agent
-      - /proc:/proc:ro
+      - /etc/passwd:/etc/passwd:ro
+      - /etc/shadow:/etc/shadow:ro
+      - /etc/group:/etc/group:ro
       - /home:/home:ro
-      - /u01:/u01:ro
-      - /u02:/u02:ro
+      - /u01:/u01
+      - /u02:/u02
+      - /opt:/opt:ro
+      - /data:/data:ro
+      - /srv:/srv:ro
+      # Agent 部署目录（存放 docker-compose.yml，批量更新时 compose down+up 需要访问）
+      - /etc/srmc-agent:/etc/srmc-agent
     environment:
       - SERVER_URL=${SERVER_URL:-wss://srmc.example.com/ws/agent/}
       - AGENT_TOKEN=${AGENT_TOKEN:-your-token}

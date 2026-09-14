@@ -130,14 +130,8 @@ async function handleLogin() {
         localStorage.removeItem('rememberedUser')
       }
       
-      userStore.fetchMenu().then(() => {
-        router.push('/dashboard').catch(() => {
-          router.push('/')
-        })
-      }).catch(() => {
-        router.push('/dashboard').catch(() => {
-          router.push('/')
-        })
+      userStore.fetchMenu().catch(() => {}).finally(() => {
+        router.push('/')
       })
       
     } else {

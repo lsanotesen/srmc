@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, HTTPException, Query, Header, Body
 from fastapi.websockets import WebSocketState
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from starlette.websockets import WebSocket as StarletteWebSocket
 from core.database import get_db
 from models.agent import Agent
@@ -25,11 +26,23 @@ class AgentConnectionManager:
     
     async def connect(self, websocket: WebSocket, agent_uuid: str):
         await websocket.accept()
+        # 同一 Agent 重连：关闭并替换旧连接，避免旧 readLoop 残留在断开时误删新连接
+        old = self.active_connections.get(agent_uuid)
+        if old is not None and old is not websocket:
+            try:
+                await old.close()
+            except Exception:
+                pass
         self.active_connections[agent_uuid] = websocket
-    
-    def disconnect(self, agent_uuid: str):
-        if agent_uuid in self.active_connections:
-            del self.active_connections[agent_uuid]
+
+    def disconnect(self, agent_uuid: str, websocket: WebSocket = None) -> bool:
+        cur = self.active_connections.get(agent_uuid)
+        # 仅当字典里注册的就是传入的这条连接时才移除；
+        # 旧连接延迟断开时不能把重连后的新连接误删（websocket=None 表示强制移除，如删除 Agent）
+        if websocket is None or cur is websocket:
+            self.active_connections.pop(agent_uuid, None)
+            return True
+        return False
     
     async def send_message(self, agent_uuid: str, message: dict):
         if agent_uuid in self.active_connections:
@@ -41,8 +54,16 @@ class AgentConnectionManager:
                 return False
         return False
     
-    def is_online(self, agent_uuid: str) -> bool:
-        return agent_uuid in self.active_connections
+    def is_online(self, agent_uuid: str, last_heartbeat=None) -> bool:
+        # 硬在线：WebSocket 连接存在
+        if agent_uuid in self.active_connections:
+            return True
+        # 软在线：WebSocket 暂时断开（重连中），但最近 30 秒内有心跳
+        if last_heartbeat:
+            from datetime import timedelta
+            if datetime.now() - last_heartbeat < timedelta(seconds=30):
+                return True
+        return False
     
     async def send_command_with_response(self, agent_uuid: str, service_id: str, action: str, service: AppService, timeout: int = 30):
         request_id = str(uuid.uuid4())
@@ -134,8 +155,19 @@ manager = AgentConnectionManager()
 @router.get("/agents/", response_model=ResponseModel)
 async def get_agents(db: Session = Depends(get_db)):
     agents = db.query(Agent).all()
+    # Agent 无 project_id，通过其关联服务的部署方式统计，供前端区分「容器/Docker Compose 部署」与「二进制部署」
+    deploy_rows = db.query(
+        AppService.agent_uuid, AppService.deploy_type, func.count(AppService.id)
+    ).filter(AppService.agent_uuid.isnot(None)).group_by(
+        AppService.agent_uuid, AppService.deploy_type
+    ).all()
+    deploy_map = {}
+    for agent_uuid, deploy_type, cnt in deploy_rows:
+        deploy_map.setdefault(agent_uuid, {})[deploy_type] = int(cnt)
+
     result = []
     for agent in agents:
+        deploy_types = deploy_map.get(agent.uuid, {})
         result.append({
             "id": agent.id,
             "uuid": agent.uuid,
@@ -151,8 +183,15 @@ async def get_agents(db: Session = Depends(get_db)):
             "capabilities": agent.capabilities,
             "tags": agent.tags,
             "status": agent.status,
-            "is_online": manager.is_online(agent.uuid),
+            "is_online": manager.is_online(agent.uuid, agent.last_heartbeat),
             "last_heartbeat": agent.last_heartbeat,
+            "service_count": sum(deploy_types.values()),
+            "deploy_types": deploy_types,
+            "deploy_type": agent.deploy_type,
+            "deploy_dir": agent.deploy_dir,
+            "compose_file": agent.compose_file,
+            "binary_path": agent.binary_path,
+            "service_name": agent.service_name,
             "created_at": agent.created_at,
             "updated_at": agent.updated_at,
         })
@@ -178,8 +217,13 @@ async def get_agent(agent_uuid: str, db: Session = Depends(get_db)):
         "capabilities": agent.capabilities,
         "tags": agent.tags,
         "status": agent.status,
-        "is_online": manager.is_online(agent_uuid),
+        "is_online": manager.is_online(agent_uuid, agent.last_heartbeat),
         "last_heartbeat": agent.last_heartbeat,
+        "deploy_type": agent.deploy_type,
+        "deploy_dir": agent.deploy_dir,
+        "compose_file": agent.compose_file,
+        "binary_path": agent.binary_path,
+        "service_name": agent.service_name,
         "created_at": agent.created_at,
         "updated_at": agent.updated_at,
     }, code=0)
@@ -289,23 +333,33 @@ async def agent_websocket(websocket: WebSocket, agent_uuid: str):
                 print(f"Invalid JSON: {e}")
                 await websocket.send_json({"type": "error", "message": "Invalid JSON"})
     except WebSocketDisconnect:
-        manager.disconnect(agent_uuid)
+        # 仅当这条连接仍是当前注册连接时才清理；旧连接延迟断开（Agent 已重连）时跳过，
+        # 否则会把在线的新连接误判为离线
+        if not manager.disconnect(agent_uuid, websocket):
+            return
         agent = db.query(Agent).filter(Agent.uuid == agent_uuid).first()
         if agent:
             agent.status = 'offline'
             db.commit()
             
-            # 清除该 Agent 关联服务的缓存，强制使用 SSH
+            # Agent 断连后，关联服务不再回退 SSH 检测
+            # 直接将状态置为 UNKNOWN 并标记来源为 OFFLINE，让前端明确感知"Agent 离线"
             try:
                 services = db.query(AppService).filter(AppService.agent_uuid == agent_uuid).all()
                 for service in services:
-                    redis_client.set(f"service_status:{service.id}", "STOPPED", ex=30)
-                    redis_client.set(f"service_status_source:{service.id}", "SSH", ex=30)
-                print(f"Cleared cache for {len(services)} services of disconnected agent {agent_uuid}")
+                    redis_client.set(f"service_status:{service.id}", "UNKNOWN", ex=30)
+                    redis_client.set(f"service_status_source:{service.id}", "OFFLINE", ex=30)
+                print(f"Cleared cache for {len(services)} services of disconnected agent {agent_uuid} (OFFLINE)")
             except Exception as e:
                 print(f"Clear cache error: {e}")
                 
         print(f"Agent {agent_uuid} disconnected")
+    except Exception as e:
+        # 消息处理中的非预期异常不应让协程静默退出而留下死连接
+        print(f"Agent {agent_uuid} websocket loop error: {e}")
+        import traceback
+        traceback.print_exc()
+        manager.disconnect(agent_uuid, websocket)
     finally:
         db.close()
 
@@ -324,6 +378,34 @@ async def handle_agent_message(message: dict, agent_uuid: str, db: Session):
         await handle_pull_services(message, agent_uuid, db)
     elif msg_type == 'log_line':
         await handle_log_line(message, agent_uuid, db)
+    elif msg_type == 'update_progress':
+        await handle_update_progress(message, agent_uuid, db)
+
+async def handle_update_progress(message: dict, agent_uuid: str, db: Session):
+    """处理 Agent 上报的批量更新进度，更新明细与任务统计。"""
+    data = message.get('data', {})
+    task_id = data.get('task_id', '')
+    print(f"[UPDATE_PROGRESS] recv agent={agent_uuid} task={task_id} "
+          f"step={data.get('step')} status={data.get('status')} progress={data.get('progress')}")
+    if not task_id:
+        return
+
+    # 使用独立会话，避免与 WebSocket 长连接会话、执行器会话之间状态相互干扰
+    from core.database import SessionLocal
+    import services.agent_update_service as aus
+    s = SessionLocal()
+    try:
+        aus.update_item_progress(
+            s, task_id, agent_uuid,
+            step=data.get('step'),
+            status=data.get('status'),
+            progress=data.get('progress'),
+            error=data.get('error'),
+        )
+    finally:
+        s.close()
+    print(f"Update progress from {agent_uuid} task={task_id} step={data.get('step')} status={data.get('status')}")
+
 
 async def handle_log_line(message: dict, agent_uuid: str, db: Session):
     data = message.get('data', {})
@@ -387,6 +469,25 @@ async def handle_register(message: dict, agent_uuid: str, db: Session):
     agent.tags = registration.get('tags', [])
     agent.status = 'online'
     agent.last_heartbeat = datetime.now()
+
+    # 部署元信息（Agent 上报，批量更新下发时使用）
+    # 新旧字段兼容：deploy_method（新）优先，deploy_type（旧）兜底
+    deploy_method = registration.get('deploy_method', '')
+    deploy_type = deploy_method or registration.get('deploy_type', '')
+    if deploy_type:
+        agent.deploy_type = deploy_type
+    deploy_dir = registration.get('deploy_dir', '')
+    if deploy_dir:
+        agent.deploy_dir = deploy_dir
+    compose_file = registration.get('compose_file', '')
+    if compose_file:
+        agent.compose_file = compose_file
+    binary_path = registration.get('binary_path', '')
+    if binary_path:
+        agent.binary_path = binary_path
+    svc_name = registration.get('service_name', '')
+    if svc_name:
+        agent.service_name = svc_name
     
     db.add(agent)
     db.commit()
@@ -442,14 +543,15 @@ async def handle_heartbeat(message: dict, agent_uuid: str, db: Session):
                 containers = service_status.get('containers', [])
                 redis_key = f"service_status:{service_id}"
                 source_key = f"service_status_source:{service_id}"
-                redis_client.set(redis_key, status, ex=15)
-                redis_client.set(source_key, "AGENT", ex=15)
+                # 缓存 TTL 60s，是心跳间隔 15s 的 4 倍，容忍心跳延迟
+                redis_client.set(redis_key, status, ex=60)
+                redis_client.set(source_key, "AGENT", ex=60)
                 # 存储容器详情，用于 Docker Compose 服务的 Partial 状态展示
                 if containers:
                     redis_client.set(
                         f"service_containers:{service_id}",
                         json.dumps(containers),
-                        ex=15
+                        ex=60
                     )
                     print(f"  Service {service_id} ({name}): status={status}, pid={pid}, containers={len(containers)}, redis_key={redis_key}, source_key={source_key}")
                 else:

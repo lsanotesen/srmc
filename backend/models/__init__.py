@@ -17,3 +17,6 @@ from models.role import Role
 from models.permission import Permission
 from models.role_permission import RolePermission
 from models.user_role import UserRole
+from models.db_backup import DbBackupConfig, DbBackupRecord
+from models.import_batch import ImportBatch, ImportBatchOperation
+from models.agent_update import AgentUpdateTask, AgentUpdateTaskItem

@@ -3,6 +3,7 @@
     <div class="page-header">
       <h1>程序分类管理</h1>
       <div class="actions">
+        <el-button @click="cleanupDuplicates" type="warning">清理重复</el-button>
         <el-button type="primary" @click="showAddDialog = true">新增分类</el-button>
       </div>
     </div>
@@ -166,18 +167,34 @@ const saveServiceGroup = async () => {
 };
 
 const deleteServiceGroup = async (group) => {
-  if (!confirm(`确定要删除分类 "${group.group_name}" 吗？`))
+  if (!confirm(`确定要删除分类 "${group.group_name}" 吗？该分类下的服务会自动解除关联。`))
     return;
   try {
     const response = await axios.delete(`/api/service-groups/${group.id}`);
     if (response.data.code === 0) {
-      ElMessage.success('删除成功');
+      ElMessage.success(response.data.message || '删除成功');
       loadServiceGroups();
     } else {
       ElMessage.error(response.data.message || '删除失败');
     }
   } catch (error) {
     ElMessage.error(error.response?.data?.message || '删除失败');
+  }
+};
+
+const cleanupDuplicates = async () => {
+  if (!confirm('将清理所有重复的分类名称，保留 ID 最小的分类，并将其他重复分类的服务合并到保留的分类中。确定继续？'))
+    return;
+  try {
+    const response = await axios.post('/api/service-groups/cleanup-duplicates');
+    if (response.data.code === 0) {
+      ElMessage.success(response.data.message || '清理完成');
+      loadServiceGroups();
+    } else {
+      ElMessage.error(response.data.message || '清理失败');
+    }
+  } catch (error) {
+    ElMessage.error(error.response?.data?.message || '清理失败');
   }
 };
 

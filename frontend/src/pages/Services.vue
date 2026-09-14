@@ -350,7 +350,7 @@
   </div>
 </template>
 
-<script setup>import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue';
+<script setup>import { ref, reactive, onMounted, onActivated, onBeforeUnmount, onUnmounted, onDeactivated, nextTick } from 'vue';
 import { ElMessage } from 'element-plus';
 import { UploadFilled, Download, Minus, Close, Promotion } from '@element-plus/icons-vue';
 import { useRouter } from 'vue-router';
@@ -985,12 +985,38 @@ const handleShellClose = () => {
 onMounted(() => {
  loadServices();
  loadProjects();
+});
+
+// keep-alive 激活时：启动定时器
+onActivated(() => {
  statusInterval = setInterval(updateStatuses, 10000);
 });
-onUnmounted(() => {
+
+// keep-alive 失活时：停止定时器和关闭对话框（防止残留遮罩）
+onDeactivated(() => {
  if (statusInterval) {
- clearInterval(statusInterval);
+   clearInterval(statusInterval);
+   statusInterval = null;
  }
+ if (showShellDialog.value) {
+   handleShellClose();
+ }
+});
+
+// 兜底：组件卸载前关闭 append-to-body 对话框
+onBeforeUnmount(() => {
+  if (showShellDialog.value) {
+    handleShellClose();
+  }
+});
+
+onUnmounted(() => {
+  if (statusInterval) {
+    clearInterval(statusInterval);
+    statusInterval = null;
+  }
+  // 兜底：清理可能残留的全屏遮罩，防止点击失效
+  document.querySelectorAll('body > .v-modal, body > .el-overlay, body > .el-message-box__wrapper').forEach(el => el.remove());
 });
 </script>
 

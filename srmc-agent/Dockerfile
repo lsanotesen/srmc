@@ -4,8 +4,6 @@ WORKDIR /app
 
 RUN apk add --no-cache git
 
-RUN echo "nameserver 8.8.8.8" >> /etc/resolv.conf
-RUN echo "nameserver 114.114.114.114" >> /etc/resolv.conf
 
 ENV GOPROXY=https://goproxy.cn,direct
 ENV GOSUMDB=off
@@ -22,7 +20,7 @@ RUN CGO_ENABLED=0 go build -tags "purego netgo" -ldflags="-s -w -extldflags=-sta
 
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates docker-cli docker-cli-compose
+RUN apk add --no-cache ca-certificates docker-cli docker-cli-compose bash util-linux shadow tzdata
 
 WORKDIR /app
 

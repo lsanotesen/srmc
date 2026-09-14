@@ -185,8 +185,8 @@ async def get_user_menu(db: Session = Depends(get_db), user = Depends(get_curren
     
     menu = []
     
-    # Dashboard - 所有登录用户可见
-    menu.append({"id": "dashboard", "name": "Dashboard", "icon": "dashboard", "path": "/dashboard", "children": []})
+    # 运行总览 - 所有登录用户可见
+    menu.append({"id": "overview", "name": "运行总览", "icon": "data-analysis", "path": "/overview", "children": []})
     
     # 项目服务管理
     project_children = []
@@ -245,6 +245,10 @@ async def get_user_menu(db: Session = Depends(get_db), user = Depends(get_curren
     # 审计日志
     if has_perm("audit", "view"):
         menu.append({"id": "audit", "name": "审计日志", "icon": "file-search", "path": "/audit", "children": []})
+
+    # 数据备份（管理员/用户管理权限可见）
+    if has_perm("user", "view"):
+        menu.append({"id": "backup", "name": "数据备份", "icon": "box", "path": "/backup", "children": []})
     
     # 系统设置
     if has_perm("user", "view"):

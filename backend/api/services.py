@@ -21,6 +21,9 @@ from openpyxl.comments import Comment
 from typing import List, Optional
 import asyncio
 import io
+import json as _json
+import uuid as _uuid
+from datetime import datetime
 
 router = APIRouter()
 
@@ -57,7 +60,8 @@ async def try_agent_operation(service: AppService, action: str) -> Optional[dict
     db = SessionLocal()
     try:
         agent_uuid = service.agent_uuid
-        print(f"[Agent Op] action={action}, service_id={service.id}, initial_agent_uuid={agent_uuid}")
+        deploy_type = service.deploy_type or service.service_type or 'HOST_APP'
+        print(f"[Agent Op] action={action}, service_id={service.id}, deploy_type={deploy_type}, initial_agent_uuid={agent_uuid}")
         
         if not agent_uuid:
             agent = db.query(Agent).filter(
@@ -69,6 +73,9 @@ async def try_agent_operation(service: AppService, action: str) -> Optional[dict
                 print(f"[Agent Op] Auto-selected agent {agent_uuid} for service {service.id} ({service.ip})")
             else:
                 print(f"[Agent Op] No agent found for service {service.id} ({service.ip})")
+                # 对于 Docker/Docker Compose 类型服务，没有 Agent 就无法操作
+                if deploy_type in ('DOCKER', 'DOCKER_COMPOSE'):
+                    return {"success": False, "message": f"没有在线的 Agent，无法控制 {deploy_type} 类型服务", "output": ""}
                 return None
         else:
             online = manager.is_online(agent_uuid)
@@ -83,6 +90,9 @@ async def try_agent_operation(service: AppService, action: str) -> Optional[dict
                     print(f"[Agent Op] Original agent offline, auto-selected agent {agent_uuid} for service {service.id}")
                 else:
                     print(f"[Agent Op] No online agent found for service {service.id} ({service.ip})")
+                    # 对于 Docker/Docker Compose 类型服务，没有 Agent 就无法操作
+                    if deploy_type in ('DOCKER', 'DOCKER_COMPOSE'):
+                        return {"success": False, "message": f"没有在线的 Agent，无法控制 {deploy_type} 类型服务", "output": ""}
                     return None
         
         agent = db.query(Agent).filter(Agent.uuid == agent_uuid).first()
@@ -96,19 +106,28 @@ async def try_agent_operation(service: AppService, action: str) -> Optional[dict
             print(f"[Agent Op] Service IP mismatch, skipping agent operation")
             return None
         
-        print(f"[Agent Op] Sending command to agent {agent_uuid}...")
+        print(f"[Agent Op] Sending command to agent {agent_uuid}, action={action}, deploy_type={deploy_type}...")
+        
+        # 根据部署类型设置超时时间
+        # Docker Compose 操作可能需要更长时间（拉取镜像等）
+        timeout = 60 if deploy_type in ('DOCKER', 'DOCKER_COMPOSE') else 30
+        
         result = await manager.send_command_with_response(
             agent_uuid,
             str(service.id),
             action,
             service,
-            timeout=30
+            timeout=timeout
         )
         print(f"[Agent Op] Command result: {result}")
         return result
+    except asyncio.TimeoutError as e:
+        print(f"[Agent Op] Command timeout: {e}")
+        deploy_type = service.deploy_type or service.service_type or 'HOST_APP'
+        return {"success": False, "message": f"命令执行超时({60 if deploy_type in ('DOCKER', 'DOCKER_COMPOSE') else 30}秒)", "output": ""}
     except Exception as e:
         print(f"[Agent Op] Agent operation failed: {e}")
-        return None
+        return {"success": False, "message": f"Agent 操作失败: {str(e)}", "output": ""}
     finally:
         db.close()
 
@@ -148,6 +167,8 @@ async def get_services(
     subsystem_id: int = Query(None, ge=1),
     group_id: int = Query(None, ge=1),
     deploy_type: str = Query(None),
+    status: str = Query(None),
+    agent_status: str = Query(None),
     func_desc: str = Query(None),
     module: str = Query(None),
     ip: str = Query(None),
@@ -157,71 +178,273 @@ async def get_services(
 ):
     from models.subsystem import Subsystem
     from models.service_group import ServiceGroup
-    
-    query = db.query(AppService, Project, Subsystem, ServiceGroup).\
-        outerjoin(Project, AppService.project_id == Project.id).\
-        outerjoin(Subsystem, AppService.subsystem_id == Subsystem.id).\
-        outerjoin(ServiceGroup, AppService.group_id == ServiceGroup.id)
-    
+    from sqlalchemy import func
+    from utils.cache import get_cached, set_cached
+    from services.data_scope_service import DataScopeService
+    import hashlib
+
+    # 构建 DB 层过滤条件（status/agent_status 不在 DB 中，后置 Redis 过滤）
+    filters = []
     if project_id:
-        query = query.filter(AppService.project_id == project_id)
+        filters.append(AppService.project_id == project_id)
     if subsystem_id:
-        query = query.filter(AppService.subsystem_id == subsystem_id)
+        filters.append(AppService.subsystem_id == subsystem_id)
     if group_id:
-        query = query.filter(AppService.group_id == group_id)
+        filters.append(AppService.group_id == group_id)
     if deploy_type:
-        query = query.filter(AppService.deploy_type == deploy_type)
+        filters.append(AppService.deploy_type == deploy_type)
     if func_desc:
-        query = query.filter(AppService.func_desc.like(f"%{func_desc}%"))
+        filters.append(AppService.func_desc.like(f"%{func_desc}%"))
     if module:
-        query = query.filter(AppService.module.like(f"%{module}%"))
+        filters.append(AppService.module.like(f"%{module}%"))
     if ip:
-        query = query.filter(AppService.ip.like(f"%{ip}%"))
+        filters.append(AppService.ip.like(f"%{ip}%"))
     if owner:
-        query = query.filter(AppService.owner.like(f"%{owner}%"))
-    
-    total = query.count()
-    results = query.offset((page - 1) * size).limit(size).all()
-    
-    result = []
-    for service, project, subsystem, service_group in results:
-        result.append({
-            'id': service.id,
-            'project_id': service.project_id,
-            'project_name': project.name if project else None,
-            'subsystem_id': service.subsystem_id,
-            'subsystem_name': subsystem.subsystem_name if subsystem else None,
-            'group_id': service.group_id,
-            'group_name': service_group.group_name if service_group else None,
-            'func_desc': service.func_desc,
-            'module': service.module,
-            'ip': service.ip,
-            'ssh_port': service.ssh_port,
-            'username': service.username,
-            'program_path': service.program_path,
-            'start_script': service.start_script,
-            'stop_script': service.stop_script,
-            'log_path': service.log_path,
-            'port': service.port,
-            'owner': service.owner,
-            'remark': service.remark,
-            # 新增字段
-            'service_type': service.service_type,
-            'deploy_type': service.deploy_type,
-            'container_name': service.container_name,
-            'image_name': service.image_name,
-            'image_tag': service.image_tag,
-            'container_id': service.container_id,
-            'port_mapping': service.port_mapping,
-            'volume_mapping': service.volume_mapping,
-            'network_mode': service.network_mode,
-            'log_type': service.log_type,
-            'agent_uuid': service.agent_uuid,
-            'created_at': service.created_at,
-            'updated_at': service.updated_at
-        })
-    
-    return ResponseModel(data={"items": result, "total": total, "page": page, "size": size})
+        filters.append(AppService.owner.like(f"%{owner}%"))
+
+    # DataScope 权限过滤：非 ADMIN 只能看有权限的项目
+    if not DataScopeService._is_super_admin(user):
+        visible_pids = DataScopeService.get_user_project_ids(db, user)
+        filters.append(AppService.project_id.in_(visible_pids))
+
+    has_runtime_filter = bool(status or agent_status)
+
+    if has_runtime_filter:
+        # ---- 有运行时状态筛选，跳过 Redis 列表缓存 ----
+        # 状态不在 DB 中，必须先查全量 + Redis 过滤再分页
+        base_query = db.query(AppService).filter(*filters)
+        all_services = base_query.all()
+        if not all_services:
+            return ResponseModel(data={"items": [], "total": 0, "page": page, "size": size})
+
+        # Redis 批量取状态
+        try:
+            from utils.redis_client import redis_client
+            service_ids = [s.id for s in all_services]
+            status_keys = [f"service_status:{sid}" for sid in service_ids]
+            source_keys = [f"service_status_source:{sid}" for sid in service_ids]
+            status_values = redis_client.mget(status_keys)
+            source_values = redis_client.mget(source_keys)
+
+            # 预查 Agent 在线状态（与 count 接口口径一致：有 agent_uuid 且 Agent 在线才算在线）
+            from models.agent import Agent
+            from datetime import datetime, timedelta
+            agent_uuids = list({s.agent_uuid for s in all_services if s.agent_uuid})
+            online_uuids = set()
+            try:
+                from api.agent import manager
+            except Exception:
+                manager = None
+            if agent_uuids:
+                for a in db.query(Agent).filter(Agent.uuid.in_(agent_uuids)).all():
+                    is_online = False
+                    if manager is not None:
+                        try:
+                            is_online = manager.is_online(a.uuid)
+                        except Exception:
+                            is_online = False
+                    if not is_online and a.last_heartbeat:
+                        # 软在线：30s 内有心跳
+                        try:
+                            is_online = datetime.now() - a.last_heartbeat < timedelta(seconds=30)
+                        except Exception:
+                            is_online = False
+                    if is_online:
+                        online_uuids.add(a.uuid)
+
+            enriched = []
+            for i, svc in enumerate(all_services):
+                raw_s = status_values[i]
+                st = (raw_s.decode() if raw_s and isinstance(raw_s, bytes) else (raw_s or "UNKNOWN")).upper()
+                raw_src = source_values[i]
+                src = raw_src.decode() if raw_src and isinstance(raw_src, bytes) else (raw_src or "")
+                # Agent 在线：服务关联了 agent_uuid 且该 Agent 当前在线
+                agent_online = bool(svc.agent_uuid) and (svc.agent_uuid in online_uuids) and src != 'OFFLINE'
+                enriched.append((svc, st, src, agent_online))
+        except Exception as e:
+            print(f"Redis status lookup error (non-critical): {e}")
+            enriched = [(s, "UNKNOWN", "", False) for s in all_services]
+
+        # 内存过滤 status / agent_status
+        if status:
+            target = status.upper()
+            if target == 'UNKNOWN':
+                # “状态未知”桶：所有非正常运行、非完全停止的服务（含 UNKNOWN / PARTIAL 部分运行等异常态）
+                enriched = [x for x in enriched if x[1] not in ('RUNNING', 'STOPPED')]
+            else:
+                enriched = [x for x in enriched if x[1] == target]
+        if agent_status:
+            want_online = agent_status.lower() == 'online'
+            if want_online:
+                # 在线：agent_online 为 True
+                enriched = [x for x in enriched if x[3]]
+            else:
+                # 离线(Agent异常)：已关联 agent_uuid 但 Agent 离线；不含从未关联 Agent 的服务
+                enriched = [x for x in enriched if x[0].agent_uuid and not x[3]]
+
+        total = len(enriched)
+        start = (page - 1) * size
+        page_slice = enriched[start:start + size]
+        page_ids = [x[0].id for x in page_slice]
+
+        if not page_ids:
+            return ResponseModel(data={"items": [], "total": total, "page": page, "size": size})
+
+        # 对分页后的 ID 做 JOIN 查询返回完整字段
+        results = db.query(AppService, Project, Subsystem, ServiceGroup).\
+            outerjoin(Project, AppService.project_id == Project.id).\
+            outerjoin(Subsystem, AppService.subsystem_id == Subsystem.id).\
+            outerjoin(ServiceGroup, AppService.group_id == ServiceGroup.id).\
+            filter(AppService.id.in_(page_ids)).all()
+
+        id_to_row = {s.id: (s, p, sub, grp) for s, p, sub, grp in results}
+        status_by_id = {svc.id: (st, src, agent_online) for svc, st, src, agent_online in enriched}
+
+        result = []
+        for svc_id in page_ids:
+            if svc_id not in id_to_row:
+                continue
+            svc, project, subsystem, srv_group = id_to_row[svc_id]
+            st, src, agent_online = status_by_id.get(svc_id, ("UNKNOWN", "", False))
+            result.append({
+                'id': svc.id,
+                'project_id': svc.project_id,
+                'project_name': project.name if project else None,
+                'subsystem_id': svc.subsystem_id,
+                'subsystem_name': subsystem.subsystem_name if subsystem else None,
+                'group_id': svc.group_id,
+                'group_name': srv_group.group_name if srv_group else None,
+                'func_desc': svc.func_desc,
+                'module': svc.module,
+                'ip': svc.ip,
+                'ssh_port': svc.ssh_port,
+                'username': svc.username,
+                'program_path': svc.program_path,
+                'start_script': svc.start_script,
+                'stop_script': svc.stop_script,
+                'log_path': svc.log_path,
+                'port': svc.port,
+                'owner': svc.owner,
+                'remark': svc.remark,
+                'service_type': svc.service_type,
+                'deploy_type': svc.deploy_type,
+                'container_name': svc.container_name,
+                'image_name': svc.image_name,
+                'image_tag': svc.image_tag,
+                'container_id': svc.container_id,
+                'port_mapping': svc.port_mapping,
+                'volume_mapping': svc.volume_mapping,
+                'network_mode': svc.network_mode,
+                'log_type': svc.log_type,
+                'agent_uuid': svc.agent_uuid,
+                'created_at': svc.created_at,
+                'updated_at': svc.updated_at,
+                'status': st,
+                'status_source': src,
+                'agent_status': 'online' if agent_online else 'offline',
+            })
+
+        return ResponseModel(data={"items": result, "total": total, "page": page, "size": size})
+
+    # ---- 无运行时状态筛选，走原有缓存路径 ----
+    filter_str = f"{project_id or 0}:{subsystem_id or 0}:{group_id or 0}:{deploy_type or ''}:{func_desc or ''}:{module or ''}:{ip or ''}:{owner or ''}:{page}:{size}"
+    cache_key = f"services_list:{hashlib.md5(filter_str.encode()).hexdigest()}"
+
+    cached = get_cached(cache_key)
+    if cached is not None:
+        result = cached.get('items', [])
+        total = cached.get('total', 0)
+    else:
+        count_query = db.query(func.count(AppService.id))
+        if filters:
+            count_query = count_query.filter(*filters)
+        total = count_query.scalar()
+
+        query = db.query(AppService, Project, Subsystem, ServiceGroup).\
+            outerjoin(Project, AppService.project_id == Project.id).\
+            outerjoin(Subsystem, AppService.subsystem_id == Subsystem.id).\
+            outerjoin(ServiceGroup, AppService.group_id == ServiceGroup.id)
+
+        if filters:
+            query = query.filter(*filters)
+
+        results = query.offset((page - 1) * size).limit(size).all()
+
+        result = []
+        for service, project, subsystem, service_group in results:
+            result.append({
+                'id': service.id,
+                'project_id': service.project_id,
+                'project_name': project.name if project else None,
+                'subsystem_id': service.subsystem_id,
+                'subsystem_name': subsystem.subsystem_name if subsystem else None,
+                'group_id': service.group_id,
+                'group_name': service_group.group_name if service_group else None,
+                'func_desc': service.func_desc,
+                'module': service.module,
+                'ip': service.ip,
+                'ssh_port': service.ssh_port,
+                'username': service.username,
+                'program_path': service.program_path,
+                'start_script': service.start_script,
+                'stop_script': service.stop_script,
+                'log_path': service.log_path,
+                'port': service.port,
+                'owner': service.owner,
+                'remark': service.remark,
+                'service_type': service.service_type,
+                'deploy_type': service.deploy_type,
+                'container_name': service.container_name,
+                'image_name': service.image_name,
+                'image_tag': service.image_tag,
+                'container_id': service.container_id,
+                'port_mapping': service.port_mapping,
+                'volume_mapping': service.volume_mapping,
+                'network_mode': service.network_mode,
+                'log_type': service.log_type,
+                'agent_uuid': service.agent_uuid,
+                'created_at': service.created_at,
+                'updated_at': service.updated_at,
+                'status': 'UNKNOWN',
+                'status_source': '',
+                'agent_status': 'offline'
+            })
+
+    # 实时从 Redis 获取服务状态
+    try:
+        from utils.redis_client import redis_client
+        if redis_client:
+            service_ids = [s['id'] for s in result]
+            if service_ids:
+                status_keys = [f"service_status:{sid}" for sid in service_ids]
+                source_keys = [f"service_status_source:{sid}" for sid in service_ids]
+                status_values = redis_client.mget(status_keys)
+                source_values = redis_client.mget(source_keys)
+
+                for i, service in enumerate(result):
+                    cached_status = status_values[i]
+                    cached_source = source_values[i]
+                    if cached_status:
+                        service['status'] = cached_status.decode() if isinstance(cached_status, bytes) else cached_status
+                        service['status_source'] = cached_source.decode() if cached_source and isinstance(cached_source, bytes) else (cached_source or 'AGENT')
+                        service['agent_status'] = 'online'
+                    else:
+                        service['status'] = 'UNKNOWN'
+                        service['status_source'] = ''
+                        service['agent_status'] = 'offline'
+    except Exception as e:
+        print(f"Redis status lookup error (non-critical): {e}")
+
+    # 构建缓存数据（不含实时状态字段）
+    cache_items = []
+    for item in result:
+        cache_item = {k: v for k, v in item.items() if k not in ('status', 'status_source', 'agent_status')}
+        cache_items.append(cache_item)
+
+    set_cached(cache_key, {"items": cache_items, "total": total, "page": page, "size": size}, ttl=30)
+
+    response_data = {"items": result, "total": total, "page": page, "size": size}
+    return ResponseModel(data=response_data)
 
 @router.get("/services/count", response_model=ResponseModel)
 async def count_services(
@@ -232,8 +455,15 @@ async def count_services(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
+    from services.data_scope_service import DataScopeService
+
     query = db.query(AppService)
-    
+
+    # DataScope 权限过滤
+    if not DataScopeService._is_super_admin(user):
+        visible_pids = DataScopeService.get_user_project_ids(db, user)
+        query = query.filter(AppService.project_id.in_(visible_pids))
+
     if project_id:
         query = query.filter(AppService.project_id == project_id)
     if subsystem_id:
@@ -242,9 +472,74 @@ async def count_services(
         query = query.filter(AppService.group_id == group_id)
     if deploy_type:
         query = query.filter(AppService.deploy_type == deploy_type)
-    
-    total = query.count()
-    return ResponseModel(data=total)
+
+    services = query.all()
+    total = len(services)
+
+    # Redis 批量取状态做分布统计
+    running = stopped = unknown = agent_offline = 0
+    if services:
+        try:
+            from utils.redis_client import redis_client
+            service_ids = [s.id for s in services]
+            status_keys = [f"service_status:{sid}" for sid in service_ids]
+            source_keys = [f"service_status_source:{sid}" for sid in service_ids]
+            status_vals = redis_client.mget(status_keys)
+            source_vals = redis_client.mget(source_keys)
+
+            # 预查 Agent 在线状态（与列表筛选口径一致）
+            from models.agent import Agent
+            from datetime import datetime as _dt, timedelta as _td
+            agent_uuids = list({s.agent_uuid for s in services if s.agent_uuid})
+            online_uuids = set()
+            try:
+                from api.agent import manager as _mgr
+            except Exception:
+                _mgr = None
+            if agent_uuids:
+                for a in db.query(Agent).filter(Agent.uuid.in_(agent_uuids)).all():
+                    is_online = False
+                    if _mgr is not None:
+                        try:
+                            is_online = _mgr.is_online(a.uuid, a.last_heartbeat)
+                        except Exception:
+                            is_online = False
+                    if not is_online and a.last_heartbeat:
+                        try:
+                            is_online = _dt.now() - a.last_heartbeat < _td(seconds=30)
+                        except Exception:
+                            is_online = False
+                    if is_online:
+                        online_uuids.add(a.uuid)
+
+            for i, svc in enumerate(services):
+                raw_s = status_vals[i]
+                st = raw_s.decode().upper() if raw_s and isinstance(raw_s, bytes) else (raw_s or "UNKNOWN").upper()
+                raw_src = source_vals[i]
+                src = raw_src.decode() if raw_src and isinstance(raw_src, bytes) else (raw_src or "")
+
+                if st == "RUNNING":
+                    running += 1
+                elif st == "STOPPED":
+                    stopped += 1
+                else:
+                    unknown += 1
+
+                # Agent 异常：服务关联了 agent_uuid，但该 Agent 当前离线（含 source=OFFLINE）
+                if svc.agent_uuid:
+                    agent_online = (svc.agent_uuid in online_uuids) and src != 'OFFLINE'
+                    if not agent_online:
+                        agent_offline += 1
+        except Exception as e:
+            print(f"[services/count] Redis status aggregation failed: {e}")
+
+    return ResponseModel(data={
+        "total": total,
+        "running": running,
+        "stopped": stopped,
+        "agentOffline": agent_offline,
+        "unknown": unknown,
+    })
 
 @router.get("/services/template")
 async def download_service_template(
@@ -602,16 +897,21 @@ async def create_service(
     
     db.add(new_service)
     db.commit()
-    
+
+    # 清除服务列表缓存
+    from utils.cache import invalidate_services_list
+    invalidate_services_list()
+
     from models.agent import Agent
     online_agent = db.query(Agent).filter(
         Agent.ip == new_service.ip,
         Agent.status == 'online'
     ).first()
-    
+
     if online_agent:
         new_service.agent_uuid = online_agent.uuid
         db.commit()
+        invalidate_services_list()
         print(f"Auto-associated service {new_service.id} to agent {online_agent.uuid}")
         
         from api.agent import manager
@@ -745,9 +1045,16 @@ async def update_service(
         service.agent_uuid = service_update.agent_uuid
     if service_update.log_type is not None:
         service.log_type = service_update.log_type
-    
+
     db.commit()
-    
+
+    # 清除服务列表缓存
+    from utils.cache import invalidate_services_list
+    invalidate_services_list()
+
+    # 通知关联的在线 Agent 刷新服务列表（覆盖更新、路径变更等场景）
+    await notify_agents_pull_services(db, service.agent_uuid)
+
     project = db.query(Project).filter(Project.id == service.project_id).first()
     subsystem = db.query(Subsystem).filter(Subsystem.id == service.subsystem_id).first() if service.subsystem_id else None
     service_group = db.query(ServiceGroup).filter(ServiceGroup.id == service.group_id).first() if service.group_id else None
@@ -802,12 +1109,20 @@ async def delete_service(
         raise HTTPException(status_code=404, detail="服务不存在")
     
     func_desc = service.func_desc
+    agent_uuid = service.agent_uuid
     db.delete(service)
     db.commit()
-    
-    log_audit(db, user.id, user.username, "SERVICE_DELETE", 
+
+    # 清除服务列表缓存
+    from utils.cache import invalidate_services_list
+    invalidate_services_list()
+
+    # 通知关联的在线 Agent 刷新服务列表
+    await notify_agents_pull_services(db, agent_uuid)
+
+    log_audit(db, user.id, user.username, "SERVICE_DELETE",
               result="success", output=f"删除服务: {func_desc}")
-    
+
     return ResponseModel(data={"id": service_id})
 
 @router.post("/services/batch/delete", response_model=ResponseModel)
@@ -819,13 +1134,24 @@ async def batch_delete_services(
     if not service_ids:
         raise HTTPException(status_code=400, detail="请选择要删除的服务")
     
+    # 先收集要删除的服务关联的 agent_uuid（删除后就查不到了）
+    target_services = db.query(AppService).filter(AppService.id.in_(service_ids)).all()
+    affected_agent_uuids = set(s.agent_uuid for s in target_services if s.agent_uuid)
+
     # 使用批量删除，提高性能
     deleted_count = db.query(AppService).filter(AppService.id.in_(service_ids)).delete(synchronize_session=False)
     
     if deleted_count > 0:
         db.commit()
-        log_audit(db, user.id, user.username, "SERVICE_DELETE", 
+        # 清除服务列表缓存
+        from utils.cache import invalidate_services_list
+        invalidate_services_list()
+        log_audit(db, user.id, user.username, "SERVICE_DELETE",
                   result="success", output=f"批量删除服务 {deleted_count} 个")
+
+        # 通知所有受影响的在线 Agent 刷新服务列表
+        for agent_uuid in affected_agent_uuids:
+            await notify_agents_pull_services(db, agent_uuid)
     
     return ResponseModel(data={"deleted": deleted_count})
 
@@ -1485,6 +1811,8 @@ async def import_services(
     user = Depends(require_permission("service_manage"))
 ):
     from models.service_group import ServiceGroup
+    from models.subsystem import Subsystem
+    from models.subsystem_group_relation import SubsystemGroupRelation
     
     if not file.filename.endswith('.xlsx'):
         raise HTTPException(status_code=400, detail="仅支持xlsx格式文件")
@@ -1620,57 +1948,164 @@ async def import_services(
     all_groups = db.query(ServiceGroup).all()
     group_name_to_id = {group.group_name: group.id for group in all_groups}
     
+    # 导入用于生成唯一 code 的库
+    import hashlib
+    
+    # 如果没有选择子系统，获取或创建默认子系统
+    default_subsystem_created = False
+    if not subsystem_id:
+        # 先确定使用哪个项目
+        project = None
+        if project_id:
+            project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            project = db.query(Project).first()
+
+        if project:
+            # 查找项目的默认子系统（名称为"默认子系统"）
+            default_subsystem = db.query(Subsystem).filter(
+                Subsystem.project_id == project.id,
+                Subsystem.subsystem_name == '默认子系统'
+            ).first()
+            if not default_subsystem:
+                # 创建默认子系统，subsystem_code 现在是项目内唯一，不再需要按项目区分
+                default_subsystem = Subsystem(
+                    project_id=project.id,
+                    subsystem_name='默认子系统',
+                    subsystem_code='DEFAULT_SUBSYSTEM',
+                    description='导入Excel自动创建的默认子系统'
+                )
+                db.add(default_subsystem)
+                db.flush()
+                db.commit()
+                default_subsystem_created = True
+                print(f"Created default subsystem: {default_subsystem.id}")
+            # 使用默认子系统
+            subsystem_id = default_subsystem.id
+
     # 打印调试信息
     print(f"Available groups: {list(group_name_to_id.keys())}")
     print(f"Sheet names: {wb.sheetnames}")
-    
+    print(f"Using subsystem_id: {subsystem_id}")
+
     added = 0
     updated = 0
+    repaired = 0
+    skipped = 0
     failed = 0
     failed_items = []
-    
+
+    # ---------------- 导入批次记录（支持撤销） ----------------
+    from models.import_batch import ImportBatch, ImportBatchOperation
+
+    # 确定批次归属项目（与后续建服务使用的项目解析规则一致）
+    batch_project = None
+    if project_id:
+        batch_project = db.query(Project).filter(Project.id == project_id).first()
+    if not batch_project:
+        batch_project = db.query(Project).first()
+
+    # 导入前自动快照（兜底保险），失败不阻塞导入
+    pre_snapshot_id = None
+    try:
+        from services.backup_service import run_backup as _run_backup
+        snap_rec = _run_backup(backup_type='pre_import', created_by=user.username)
+        if snap_rec.status == 'success':
+            pre_snapshot_id = snap_rec.id
+    except Exception as _snap_err:
+        print(f"[import] pre-import snapshot skipped: {_snap_err}")
+
+    batch = ImportBatch(
+        batch_no=str(_uuid.uuid4()),
+        filename=file.filename,
+        project_id=batch_project.id if batch_project else (project_id or 0),
+        project_name=batch_project.name if batch_project else None,
+        subsystem_id=subsystem_id,
+        group_id=group_id,
+        pre_backup_record_id=pre_snapshot_id,
+        default_subsystem_created=1 if default_subsystem_created else 0,
+        created_by=user.username,
+        created_at=datetime.now(),
+    )
+    db.add(batch)
+    db.commit()
+
+    created_ids = []            # 本次新增的服务ID列表
+    repaired_ops = []           # 本次补全归属的旧值快照
+    auto_created_group_ids = []  # 本次导入新建的分类ID
+
     # 遍历所有 sheet
-    for sheet_name in wb.sheetnames:
+    for sheet_idx, sheet_name in enumerate(wb.sheetnames):
         ws = wb[sheet_name]
         
-        # 根据 sheet 名称匹配分类（支持多种匹配方式）
+        # 根据 sheet 名称匹配分类（仅精确匹配+忽略大小写匹配）
         matched_group_id = None
         sheet_name_clean = sheet_name.strip()
+        sheet_name_lower = sheet_name_clean.lower()
         
         # 1. 精确匹配
         if sheet_name_clean in group_name_to_id:
             matched_group_id = group_name_to_id[sheet_name_clean]
         else:
             # 2. 忽略大小写匹配
-            sheet_name_lower = sheet_name_clean.lower()
             for group_name, group_id in group_name_to_id.items():
                 if group_name.lower() == sheet_name_lower:
-                    matched_group_id = group_id
-                    break
-        
-        # 3. 模糊匹配：检查分类名称是否包含sheet名称（如"预处理程序"包含"预处理"）
-        if not matched_group_id:
-            for group_name, group_id in group_name_to_id.items():
-                if sheet_name_clean in group_name or sheet_name_lower in group_name.lower():
-                    matched_group_id = group_id
-                    break
-        
-        # 4. 模糊匹配：检查sheet名称是否包含分类名称
-        if not matched_group_id:
-            for group_name, group_id in group_name_to_id.items():
-                group_name_clean = group_name.strip()
-                if group_name_clean in sheet_name_clean or group_name_clean.lower() in sheet_name_lower:
                     matched_group_id = group_id
                     break
         
         if matched_group_id:
             # 使用匹配到的分类
             current_group_id = matched_group_id
-            print(f"Sheet '{sheet_name}' matched to group '{list(group_name_to_id.keys())[list(group_name_to_id.values()).index(matched_group_id)]}' (ID: {matched_group_id})")
+            matched_group_name = list(group_name_to_id.keys())[list(group_name_to_id.values()).index(matched_group_id)]
+            print(f"Sheet '{sheet_name}' matched to group '{matched_group_name}' (ID: {matched_group_id})")
         else:
-            # 没有匹配到分类，使用传入的 group_id（如果有），否则不设置分类
-            current_group_id = group_id
-            print(f"Sheet '{sheet_name}' no group matched, using default group_id: {group_id}")
+            # 没有匹配到分类，先检查数据库中是否已存在同名分类（可能是之前导入创建的）
+            existing_by_name = db.query(ServiceGroup).filter(ServiceGroup.group_name == sheet_name_clean).first()
+            if existing_by_name:
+                # 已存在同名分类，直接使用
+                current_group_id = existing_by_name.id
+                group_name_to_id[sheet_name_clean] = current_group_id
+                print(f"Sheet '{sheet_name}' found existing group '{sheet_name_clean}' (ID: {current_group_id})")
+            else:
+                # 创建新分类
+                code_hash = hashlib.md5(sheet_name.encode('utf-8')).hexdigest()[:8].upper()
+                new_group_code = f"AUTO_{code_hash}"
+                
+                new_group = ServiceGroup(
+                    group_name=sheet_name_clean,
+                    group_code=new_group_code,
+                    display_order=sheet_idx,
+                    description=f"导入Excel自动创建的分类"
+                )
+                db.add(new_group)
+                db.flush()
+                db.commit()
+                
+                current_group_id = new_group.id
+                group_name_to_id[sheet_name_clean] = current_group_id
+                auto_created_group_ids.append(current_group_id)
+                print(f"Sheet '{sheet_name}' auto-created group '{sheet_name_clean}' (ID: {current_group_id}, code: {new_group_code}, order: {sheet_idx})")
+        
+        # 将分类关联到子系统（无论是否新创建的）
+        if subsystem_id and current_group_id:
+            existing_relation = db.query(SubsystemGroupRelation).filter(
+                SubsystemGroupRelation.subsystem_id == subsystem_id,
+                SubsystemGroupRelation.group_id == current_group_id
+            ).first()
+            if not existing_relation:
+                new_relation = SubsystemGroupRelation(
+                    subsystem_id=subsystem_id,
+                    group_id=current_group_id,
+                    display_order=sheet_idx
+                )
+                db.add(new_relation)
+                db.commit()
+                print(f"Linked group '{sheet_name_clean}' (ID: {current_group_id}) to subsystem (ID: {subsystem_id}, order: {sheet_idx})")
+            elif existing_relation.display_order != sheet_idx:
+                # 已存在但顺序不对，更新为当前导入的 sheet 顺序
+                existing_relation.display_order = sheet_idx
+                db.commit()
+                print(f"Updated relation order to {sheet_idx} for group '{sheet_name_clean}' (ID: {current_group_id})")
         
         # 读取当前 sheet 的表头
         headers = []
@@ -1701,6 +2136,32 @@ async def import_services(
                 ip = str(row.get('ip', '')).strip()
                 program_path = str(row.get('program_path', '')).strip()
                 port_raw = str(row.get('port', '')).strip()
+                remark = str(row.get('remark', '')).strip()
+                owner = str(row.get('owner', '')).strip()
+                
+                # 判断是否为备注行（智能识别）
+                # 1. 没有任何关键字段（描述、IP、模块、程序路径）
+                # 2. 或者描述以备注前缀开头（如 PS:、备注：、注：、说明：、注意：等）
+                remark_prefixes = ['PS:', 'PS：', '备注:', '备注：', '注:', '说明:', '注意:', '说明：', '注意：']
+                is_remark_line = False
+                
+                has_key_fields = any([ip, module, program_path])
+                
+                # 如果 func_desc 以备注前缀开头，且没有其他关键字段，则视为备注行
+                if func_desc and not has_key_fields:
+                    desc_lower = func_desc.lower()
+                    for prefix in remark_prefixes:
+                        if desc_lower.startswith(prefix.lower()):
+                            is_remark_line = True
+                            break
+                
+                # 如果没有任何关键字段，或识别为备注行，则跳过
+                if not has_key_fields and not func_desc:
+                    skipped += 1
+                    continue
+                elif is_remark_line:
+                    skipped += 1
+                    continue
                 
                 # 自动判断部署方式和服务类型
                 deploy_type, service_type = detect_deploy_and_service_type(row)
@@ -1732,7 +2193,7 @@ async def import_services(
                     # 清理端口字符串，支持逗号、分号、空格作为分隔符
                     port_parts = []
                     # 先将分号和空格替换为逗号，然后按逗号分割
-                    normalized_ports = port_raw.replace('，', ',').replace(';', ',').replace('；', ',')
+                    normalized_ports = port_raw.replace('，', ',').replace(';', ',').replace('；', ',').replace('\\', ',')
                     # 处理空格分隔：先按逗号分割，再对每个部分按空格分割
                     comma_parts = normalized_ports.split(',')
                     for comma_part in comma_parts:
@@ -1767,46 +2228,59 @@ async def import_services(
                         port_value = ','.join(port_parts)
                 
                 # 通过功能描述、对应模块、IP地址、程序路径来匹配现有服务
-                existing = db.query(AppService).filter(
+                # 仅在目标项目内查重：允许同一服务归属不同项目，便于按项目独立管理与导入测试
+                dup_base = (
                     (AppService.func_desc == func_desc) &
                     (AppService.ip == ip) &
                     (AppService.program_path == program_path)
-                ).first()
-                
+                )
+                if project_id:
+                    dup_base = dup_base & (AppService.project_id == project_id)
+                existing = db.query(AppService).filter(dup_base).first()
+
                 # 如果模块也提供了，也匹配模块
                 if module and not existing:
-                    existing = db.query(AppService).filter(
+                    dup_module = (
                         (AppService.func_desc == func_desc) &
                         (AppService.module == module) &
                         (AppService.ip == ip) &
                         (AppService.program_path == program_path)
-                    ).first()
-                
-                password = str(row.get('password', '')).strip()
+                    )
+                    if project_id:
+                        dup_module = dup_module & (AppService.project_id == project_id)
+                    existing = db.query(AppService).filter(dup_module).first()
                 
                 if existing:
-                    if 'module' in row:
-                        existing.module = str(row.get('module', '')).strip() or None
-                    if 'username' in row:
-                        existing.username = str(row.get('username', '')).strip()
-                    if password:
-                        existing.password = encrypt(password)
-                    if 'start_script' in row:
-                        existing.start_script = str(row.get('start_script', '')).strip() or None
-                    if 'stop_script' in row:
-                        existing.stop_script = str(row.get('stop_script', '')).strip() or None
-                    if 'log_path' in row:
-                        existing.log_path = str(row.get('log_path', '')).strip() or None
-                    if port_value:
-                        existing.port = port_value
-                    if 'owner' in row:
-                        existing.owner = str(row.get('owner', '')).strip() or None
-                    if 'remark' in row:
-                        existing.remark = str(row.get('remark', '')).strip() or None
-                    
-                    db.commit()
-                    updated += 1
+                    # 重复数据跳过，但补全缺失的子系统/分类归属（不算覆盖更新）
+                    old_project_id = existing.project_id
+                    old_subsystem_id = existing.subsystem_id
+                    old_group_id = existing.group_id
+                    changed = False
+                    if subsystem_id and not existing.subsystem_id:
+                        existing.subsystem_id = subsystem_id
+                        changed = True
+                    if current_group_id and not existing.group_id:
+                        existing.group_id = current_group_id
+                        changed = True
+                    if not existing.project_id and project_id:
+                        existing.project_id = project_id
+                        changed = True
+                    if changed:
+                        db.commit()
+                        repaired += 1
+                        repaired_ops.append({
+                            'service_id': existing.id,
+                            'old_project_id': old_project_id,
+                            'old_subsystem_id': old_subsystem_id,
+                            'old_group_id': old_group_id,
+                        })
+                    else:
+                        skipped += 1
+                    continue
                 else:
+                    # 计算 password
+                    password = str(row.get('password', '')).strip()
+                    
                     # 使用传入的项目ID，或者默认第一个项目
                     project = None
                     if project_id:
@@ -1854,6 +2328,7 @@ async def import_services(
                     db.add(new_service)
                     db.commit()
                     added += 1
+                    created_ids.append(new_service.id)
             except Exception as e:
                 failed += 1
                 failed_items.append({
@@ -1862,19 +2337,212 @@ async def import_services(
                     "reason": f"导入失败: {str(e)}",
                     "row_data": row
                 })
-    
+
+
+    # 导入完成后清除服务列表缓存 + 项目树缓存（关联/分组/子系统结构已变更）
+    from utils.cache import invalidate_services_list, invalidate_projects_tree
+    invalidate_services_list()
+    invalidate_projects_tree()
+
+    # ---------------- 落盘批次明细 ----------------
+    try:
+        op_rows = [ImportBatchOperation(
+            batch_id=batch.id, op_type='created', service_id=sid
+        ) for sid in created_ids]
+        for op in repaired_ops:
+            op_rows.append(ImportBatchOperation(
+                batch_id=batch.id, op_type='repaired',
+                service_id=op['service_id'],
+                old_project_id=op['old_project_id'],
+                old_subsystem_id=op['old_subsystem_id'],
+                old_group_id=op['old_group_id'],
+            ))
+        if op_rows:
+            db.add_all(op_rows)
+        batch.added_count = added
+        batch.repaired_count = repaired
+        batch.skipped_count = skipped
+        batch.failed_count = failed
+        if auto_created_group_ids:
+            batch.auto_created_group_ids = _json.dumps(auto_created_group_ids)
+        db.commit()
+        print(f"[import] batch {batch.batch_no}: added={added} repaired={repaired} ops={len(op_rows)}")
+    except Exception as _batch_err:
+        db.rollback()
+        print(f"[import] save batch detail failed: {_batch_err}")
+
+    # 导入完成后，把新增/补全归属的服务关联到同 IP 的在线 Agent，并通知 Agent 刷新采集清单。
+    # 否则新服务 agent_uuid 为空（前端“Agent状态”显示“未关联”），且 Agent 内存清单未更新不会立即采集。
+    try:
+        affected_ids = list(created_ids) + [op.get('service_id') for op in repaired_ops if op.get('service_id')]
+        await associate_services_to_online_agents(db, affected_ids)
+    except Exception as _assoc_err:
+        print(f"[import] associate services to agents failed: {_assoc_err}")
+
     log_audit(db, user.id, user.username, "SERVICE_IMPORT",
-              result="success", 
-              output=f"导入完成: 新增{added}条, 更新{updated}条, 失败{failed}条")
-    
+              result="success",
+              output=f"导入完成: 新增{added}条, 跳过{skipped}条, 补全归属{repaired}条, 失败{failed}条")
+
     return ResponseModel(data={
         "success": True,
-        "message": f"导入完成: 新增{added}条, 更新{updated}条, 失败{failed}条",
+        "message": f"导入完成: 新增{added}条, 跳过{skipped}条, 补全归属{repaired}条, 失败{failed}条",
         "added": added,
-        "updated": updated,
+        "skipped": skipped,
+        "repaired": repaired,
         "failed": failed,
+        "batch_no": batch.batch_no,
+        "pre_backup_record_id": pre_snapshot_id,
         "failed_items": failed_items
     })
+
+@router.get("/services/import/batches", response_model=ResponseModel)
+async def list_import_batches(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    user = Depends(require_permission("service_manage"))
+):
+    """服务端导入历史（支持撤销状态展示）"""
+    from models.import_batch import ImportBatch
+    from sqlalchemy import func
+    total = db.query(func.count(ImportBatch.id)).scalar()
+    rows = (db.query(ImportBatch)
+            .order_by(ImportBatch.created_at.desc())
+            .offset((page - 1) * size).limit(size).all())
+    items = [{
+        'batch_no': b.batch_no,
+        'filename': b.filename,
+        'project_id': b.project_id,
+        'project_name': b.project_name,
+        'added_count': b.added_count,
+        'repaired_count': b.repaired_count,
+        'skipped_count': b.skipped_count,
+        'failed_count': b.failed_count,
+        'status': b.status,
+        'pre_backup_record_id': b.pre_backup_record_id,
+        'created_by': b.created_by,
+        'created_at': b.created_at.strftime('%Y-%m-%d %H:%M:%S') if b.created_at else None,
+        'reverted_at': b.reverted_at.strftime('%Y-%m-%d %H:%M:%S') if b.reverted_at else None,
+    } for b in rows]
+    return ResponseModel(data={'items': items, 'total': total, 'page': page, 'size': size})
+
+
+@router.post("/services/import/batches/{batch_no}/revert", response_model=ResponseModel)
+async def revert_import_batch(
+    batch_no: str,
+    db: Session = Depends(get_db),
+    user = Depends(require_permission("service_manage"))
+):
+    """撤销一次导入：删除本批新增服务、还原归属补全、清理自动创建的空分类/子系统"""
+    from models.import_batch import ImportBatch, ImportBatchOperation
+    from models.subsystem_group_relation import SubsystemGroupRelation
+
+    batch = db.query(ImportBatch).filter(ImportBatch.batch_no == batch_no).first()
+    if not batch:
+        raise HTTPException(status_code=404, detail="导入批次不存在")
+    if batch.status == 'reverted':
+        raise HTTPException(status_code=400, detail="该批次已撤销过，无法重复撤销")
+
+    ops = db.query(ImportBatchOperation).filter(
+        ImportBatchOperation.batch_id == batch.id).all()
+    created_ids = [o.service_id for o in ops if o.op_type == 'created']
+    repaired_ops = [o for o in ops if o.op_type == 'repaired']
+
+    deleted_count = 0
+    restored_count = 0
+
+    # 1. 删除本批新增的服务
+    if created_ids:
+        deleted_count = db.query(AppService).filter(
+            AppService.id.in_(created_ids)).delete(synchronize_session=False)
+
+    # 2. 还原补全归属的旧值
+    for op in repaired_ops:
+        svc = db.query(AppService).filter(AppService.id == op.service_id).first()
+        if not svc:
+            continue
+        if op.old_subsystem_id is not None:
+            svc.subsystem_id = op.old_subsystem_id
+        if op.old_group_id is not None:
+            svc.group_id = op.old_group_id
+        if op.old_project_id is not None:
+            svc.project_id = op.old_project_id
+        db.commit()
+        restored_count += 1
+
+    # 3. 清理本次自动创建且已无服务的分类
+    removed_groups = 0
+    try:
+        group_ids = _json.loads(batch.auto_created_group_ids or '[]')
+    except Exception:
+        group_ids = []
+    for gid in group_ids or []:
+        cnt = db.query(AppService).filter(AppService.group_id == gid).count()
+        if cnt == 0:
+            db.query(SubsystemGroupRelation).filter(
+                SubsystemGroupRelation.group_id == gid).delete(synchronize_session=False)
+            db.query(ServiceGroup).filter(ServiceGroup.id == gid).delete(synchronize_session=False)
+            removed_groups += 1
+
+    # 4. 清理本次自动创建且已无服务的默认子系统
+    removed_default_subsystem = False
+    if batch.default_subsystem_created and batch.subsystem_id:
+        ss = db.query(Subsystem).filter(Subsystem.id == batch.subsystem_id).first()
+        if ss:
+            ss_services = db.query(AppService).filter(
+                AppService.subsystem_id == ss.id).count()
+            if ss_services == 0:
+                db.query(SubsystemGroupRelation).filter(
+                    SubsystemGroupRelation.subsystem_id == ss.id).delete(synchronize_session=False)
+                db.delete(ss)
+                removed_default_subsystem = True
+
+    # 5. 清理本次导入在目标子系统下遗留的"子系统-分组"关联
+    # 导入时会对每个 sheet 把分组关联到目标子系统，若该 sheet 所有服务被判
+    # 重复跳过，仍会留下脏关联（尤其复用同名分组时跨项目借用分类）。
+    # 这里删除"目标子系统下、已无任何服务引用"的关联行（仅删关联，不动全局分组）。
+    removed_relations = 0
+    if batch.subsystem_id:
+        rels = db.query(SubsystemGroupRelation).filter(
+            SubsystemGroupRelation.subsystem_id == batch.subsystem_id
+        ).all()
+        for rel in rels:
+            used = db.query(AppService).filter(
+                AppService.subsystem_id == batch.subsystem_id,
+                AppService.group_id == rel.group_id
+            ).count()
+            if used == 0:
+                db.delete(rel)
+                removed_relations += 1
+
+    batch.status = 'reverted'
+    batch.reverted_at = datetime.now()
+    batch.reverted_by = user.username
+    db.commit()
+
+    # 清缓存
+    try:
+        from utils.cache import invalidate_projects_tree, invalidate_services_list
+        invalidate_projects_tree()
+        invalidate_services_list()
+    except Exception:
+        pass
+
+    log_audit(db, user.id, user.username, "IMPORT_REVERT",
+              result="success",
+              output=f"撤销导入批次 {batch_no}: 删除{deleted_count}条, 还原归属{restored_count}条, "
+                     f"清理分类{removed_groups}个, 清理关联{removed_relations}条, 清理默认子系统{'1' if removed_default_subsystem else '0'}个")
+
+    return ResponseModel(data={
+        'batch_no': batch_no,
+        'deleted_count': deleted_count,
+        'restored_count': restored_count,
+        'removed_groups': removed_groups,
+        'removed_default_subsystem': removed_default_subsystem,
+        'removed_relations': removed_relations,
+        'pre_backup_record_id': batch.pre_backup_record_id,
+    }, message="已撤销本次导入")
+
 
 @router.post("/services/import/preview", response_model=ResponseModel)
 async def preview_import_file(
@@ -1969,3 +2637,109 @@ async def download_import_template():
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+
+async def associate_services_to_online_agents(db: Session, service_ids: list = None):
+    """
+    把服务关联到同 IP 的在线 Agent，并通知相关 Agent 刷新服务清单。
+
+    用于服务 Excel 导入 / 归属补全后：新建的服务 agent_uuid 为空，前端会显示“未关联”，
+    且需要让对应 Agent 立即把新服务纳入采集。Agent 注册时虽会自动关联同 IP 服务，
+    但导入发生在 Agent 已注册之后，不会触发重新关联，故在此主动补齐。
+
+    Args:
+        db: 数据库会话
+        service_ids: 待处理的服务 ID 列表；为空则处理所有 agent_uuid 为空的服务
+    """
+    from models.app_service import AppService
+    from models.agent import Agent
+    from utils.redis_client import redis_client
+
+    query = db.query(AppService)
+    if service_ids is not None:
+        if not service_ids:
+            return
+        services = query.filter(AppService.id.in_(service_ids)).all()
+    else:
+        services = query.filter(
+            (AppService.agent_uuid == None) | (AppService.agent_uuid == "")
+        ).all()
+
+    # 在线 Agent 按其管理 IP 建立索引
+    online_agents = db.query(Agent).filter(Agent.status == 'online').all()
+    agent_by_ip = {a.ip: a for a in online_agents if a.ip}
+
+    associated = 0
+    for svc in services:
+        if svc.agent_uuid:
+            continue  # 已关联，跳过
+        agent = agent_by_ip.get(svc.ip)
+        if agent:
+            svc.agent_uuid = agent.uuid
+            associated += 1
+            # 清除旧状态缓存，等待 Agent 重新上报
+            redis_client.delete(f"service_status:{svc.id}")
+            redis_client.delete(f"service_status_source:{svc.id}")
+
+    if associated:
+        db.commit()
+        print(f"[associate] auto-associated {associated} imported services to online agents")
+
+    # 通知所有相关在线 Agent 重新拉取服务清单（按 IP 匹配）
+    await notify_agents_pull_services(db)
+
+
+async def notify_agents_pull_services(db: Session, agent_uuid: str = None):
+    """
+    通知关联的在线 Agent 刷新服务列表。
+
+    Args:
+        db: 数据库会话
+        agent_uuid: 指定 Agent UUID；若为 None 则根据 IP 查找所有关联的在线 Agent
+
+    说明：服务更新（路径/部署类型/IP 等变更）或删除后，Agent 内存中的
+         服务列表不会自动刷新，需要发送 pull_services 命令让 Agent 重新拉取。
+         之前只在创建服务时发送，更新和删除场景漏掉了，导致在线编辑不生效。
+    """
+    from datetime import datetime
+
+    # 如果没有指定 agent_uuid，根据当前所有服务的 IP 查找关联的在线 Agent
+    if agent_uuid is None:
+        from models.app_service import AppService
+        from models.agent import Agent
+
+        # 找出当前所有在线的 Agent
+        online_agents = db.query(Agent).filter(Agent.status == 'online').all()
+        if not online_agents:
+            return
+
+        # 收集每个在线 Agent 管理的 IP（Agent.ip 字段就是它管理的目标服务器 IP）
+        agent_ips = {a.uuid: a.ip for a in online_agents}
+        # 找出所有服务的 IP
+        service_ips = set(s.ip for s in db.query(AppService).filter(AppService.ip.isnot(None)).distinct().all())
+
+        # 只通知那些有服务变更（IP 匹配）的 Agent
+        target_uuids = {uuid for uuid, ip in agent_ips.items() if ip in service_ips}
+        if not target_uuids:
+            return
+    else:
+        if not agent_uuid:
+            return
+        target_uuids = {agent_uuid}
+
+    # 发送 pull_services 消息
+    try:
+        from api.agent import manager
+        for uuid in target_uuids:
+            if manager.is_online(uuid):
+                pull_message = {
+                    "type": "pull_services",
+                    "request_id": "",
+                    "timestamp": datetime.now().timestamp(),
+                    "data": {}
+                }
+                await manager.send_message(uuid, pull_message)
+    except Exception as e:
+        # 通知失败不影响主流程
+        import logging
+        logging.getLogger(__name__).warning(f"notify_agents_pull_services failed: {e}")

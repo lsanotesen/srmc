@@ -71,7 +71,11 @@ async def set_subsystem_groups(
             db.add(relation)
     
     db.commit()
-    
+
+    # 清除项目树缓存（子系统-分组关系是树结构的核心组成）
+    from utils.cache import invalidate_projects_tree
+    invalidate_projects_tree()
+
     return ResponseModel(message="设置成功")
 
 
@@ -108,7 +112,11 @@ async def add_subsystem_group(
     )
     db.add(relation)
     db.commit()
-    
+
+    # 清除项目树缓存
+    from utils.cache import invalidate_projects_tree
+    invalidate_projects_tree()
+
     return ResponseModel(message="添加成功")
 
 
@@ -130,5 +138,9 @@ async def remove_subsystem_group(
     
     db.delete(relation)
     db.commit()
-    
+
+    # 清除项目树缓存
+    from utils.cache import invalidate_projects_tree
+    invalidate_projects_tree()
+
     return ResponseModel(message="移除成功")

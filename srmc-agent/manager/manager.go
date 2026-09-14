@@ -2,12 +2,14 @@ package manager
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -44,15 +46,170 @@ func resolveComposePath(composePath string) (string, string, error) {
 	return "", "", fmt.Errorf("compose path not found: %s", composePath)
 }
 
-// getDockerComposeCmd returns the docker compose command to use.
-// Prefers "docker compose" (newer) over "docker-compose" (older).
+// getDockerComposeCmd 返回可用的 docker compose 命令。
+// 注意：此函数仅用于需要 context 的场景（如日志流）。
+// 其他场景请使用 runComposeCmd 以获得更好的兼容性处理。
 func getDockerComposeCmd() string {
-	// Try "docker compose" first (Docker v2)
 	if _, err := exec.LookPath("docker"); err == nil {
 		return "docker"
 	}
-	// Fallback to "docker-compose"
 	return "docker-compose"
+}
+
+// runComposeCmd 执行 docker compose 命令，自动在 docker compose (V2) 和 docker-compose (V1) 之间切换。
+// 同时处理 Docker API 版本不匹配问题（如 client version 1.44 vs daemon 1.43）。
+// 不指定 -p 项目名：让 compose 使用 yml 里的 name 字段（用户已为每个 yml 配置唯一 name）。
+// 策略：先试 V2，V2 失败（任何原因）都尝试 V1，V1 也失败才返回错误。
+func runComposeCmd(composeFile, workDir string, composeArgs ...string) ([]byte, error) {
+	var v2Err, v1Err error
+	var v2Output []byte
+
+	// 尝试 docker compose (V2 插件模式)
+	// 不指定 -p：让 compose 使用 yml 里的 name 字段（用户已配置唯一 name）
+	if _, err := exec.LookPath("docker"); err == nil {
+		fullArgs := append([]string{"docker", "compose", "-f", composeFile}, composeArgs...)
+		v2Output, v2Err = execWithVersionFallback(fullArgs, workDir)
+		if v2Err == nil {
+			return v2Output, nil
+		}
+		log.Printf("[DEBUG] runComposeCmd V2 failed: %v, errStr=%s", v2Err, v2Output)
+	}
+
+	// 尝试 docker-compose (V1 独立命令)
+	// 无论 V2 失败原因是什么，都尝试 V1
+	if _, err := exec.LookPath("docker-compose"); err == nil {
+		fullArgs := append([]string{"docker-compose", "-f", composeFile}, composeArgs...)
+		output, err := execWithVersionFallback(fullArgs, workDir)
+		if err == nil {
+			if v2Err != nil {
+				log.Printf("[DEBUG] runComposeCmd V1 succeeded after V2 failed")
+			}
+			return output, nil
+		}
+		v1Err = err
+		log.Printf("[DEBUG] runComposeCmd V1 failed: %v, errStr=%s", v1Err, output)
+	}
+
+	if v2Err != nil && v1Err != nil {
+		return v2Output, fmt.Errorf("docker compose (V2) failed: %v; docker-compose (V1) failed: %v", v2Err, v1Err)
+	}
+	if v2Err != nil {
+		return v2Output, fmt.Errorf("docker compose (V2) failed: %v; docker-compose (V1) not installed", v2Err)
+	}
+	return nil, fmt.Errorf("docker-compose (V1) failed: %v; docker compose (V2) not installed", v1Err)
+}
+
+// runDockerCmd 执行 docker 命令，当遇到 API 版本不匹配错误时自动降级重试。
+func runDockerCmd(args []string) ([]byte, error) {
+	return execWithVersionFallback(args, "")
+}
+
+// execWithVersionFallback 执行 docker 命令，当遇到 API 版本不匹配错误时自动降级重试。
+// 成功时只返回纯净的 stdout（避免 stderr 的 warning 污染输出）。
+// 失败时返回 stderr+stdout 用于错误诊断。
+func execWithVersionFallback(args []string, workDir string) ([]byte, error) {
+	runOnce := func(env []string) ([]byte, []byte, error) {
+		c := exec.Command(args[0], args[1:]...)
+		c.Dir = workDir
+		if len(env) > 0 {
+			c.Env = env
+		}
+		var stdout, stderr bytes.Buffer
+		c.Stdout = &stdout
+		c.Stderr = &stderr
+		err := c.Run()
+		return stdout.Bytes(), stderr.Bytes(), err
+	}
+
+	stdout, stderr, err := runOnce(nil)
+	if err == nil {
+		return stdout, nil
+	}
+
+	errStr := string(stderr) + string(stdout)
+	if strings.Contains(errStr, "is too new") || strings.Contains(errStr, "client version") {
+		re := regexp.MustCompile(`Maximum supported API version is ([0-9.]+)`)
+		match := re.FindStringSubmatch(errStr)
+		fallbackVersion := "1.43"
+		if len(match) >= 2 {
+			fallbackVersion = match[1]
+		}
+
+		stdout2, stderr2, err2 := runOnce(append(os.Environ(), "DOCKER_API_VERSION="+fallbackVersion))
+		if err2 == nil {
+			// 写回全局环境变量，后续命令直接用协商版本，不再反复先失败再降级
+			if os.Getenv("DOCKER_API_VERSION") != fallbackVersion {
+				os.Setenv("DOCKER_API_VERSION", fallbackVersion)
+				log.Printf("[INFO] Docker API version downgraded to %s successfully", fallbackVersion)
+			}
+			return stdout2, nil
+		}
+		return append(stderr2, stdout2...), err2
+	}
+
+	return append(stderr, stdout...), err
+}
+
+// getShellPath returns the path to the best available shell for executing commands.
+// Prefers bash (supports bash syntax like $(), [[]], etc.) over sh.
+func getShellPath() string {
+	// Try bash first (supports bash syntax)
+	if path, err := exec.LookPath("bash"); err == nil {
+		return path
+	}
+	// Fallback to /bin/bash
+	if _, err := os.Stat("/bin/bash"); err == nil {
+		return "/bin/bash"
+	}
+	// Fallback to /usr/bin/bash
+	if _, err := os.Stat("/usr/bin/bash"); err == nil {
+		return "/usr/bin/bash"
+	}
+	// Fallback to sh
+	if path, err := exec.LookPath("sh"); err == nil {
+		return path
+	}
+	return "/bin/sh"
+}
+
+// isRunningInContainer detects if the agent is running inside a Docker container.
+// When running in a container, we need nsenter to execute commands on the host
+// (because the container doesn't have the host's users, home dirs, etc.)
+func isRunningInContainer() bool {
+	// Check for /.dockerenv (Docker creates this file)
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return true
+	}
+	// Check if /proc/1/cgroup mentions docker
+	if data, err := os.ReadFile("/proc/1/cgroup"); err == nil {
+		content := string(data)
+		if strings.Contains(content, "docker") || strings.Contains(content, "containerd") {
+			return true
+		}
+	}
+	return false
+}
+
+// runHostCommand executes a command, using nsenter when running in a container.
+// This ensures commands like `su - isi` work because they run in the host's
+// mount namespace (where /etc/passwd has the isi user, /u01 is writable, etc.)
+func runHostCommand(shell string, finalCmd string) (string, error) {
+	if isRunningInContainer() {
+		// nsenter -t 1: target PID 1 (init process on host)
+		// -m: mount namespace (host filesystem)
+		// -u: UTS namespace (hostname)
+		// -i: IPC namespace
+		// -n: network namespace
+		// -p: PID namespace
+		log.Printf("[DEBUG] Running in container, using nsenter to execute on host")
+		cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", shell, "-c", finalCmd)
+		output, err := cmd.CombinedOutput()
+		return string(output), err
+	}
+	// Not in container, execute directly
+	cmd := exec.Command(shell, "-c", finalCmd)
+	output, err := cmd.CombinedOutput()
+	return string(output), err
 }
 
 type LogLine struct {
@@ -142,6 +299,10 @@ func startProcess(svc ServiceConfig) CommandResult {
 	log.Printf("[DEBUG] startProcess: scriptName=%s", scriptName)
 	log.Printf("[DEBUG] startProcess: username=%s", svc.Username)
 
+	// 获取可用的 shell
+	shell := getShellPath()
+	log.Printf("[DEBUG] startProcess: using shell=%s", shell)
+
 	// 构建执行命令：先 cd 到脚本目录，再执行脚本
 	var innerCmd string
 	if workDir != "" && scriptName != "" {
@@ -166,18 +327,16 @@ func startProcess(svc ServiceConfig) CommandResult {
 
 	log.Printf("[DEBUG] startProcess: finalCmd=%s", finalCmd)
 
-	// 使用 bash 执行（支持 bash 语法）
-	command := exec.Command("/bin/bash", "-c", finalCmd)
-
-	output, err := command.CombinedOutput()
+	// 执行命令（容器内自动用 nsenter 进入宿主机命名空间）
+	output, err := runHostCommand(shell, finalCmd)
 	log.Printf("[DEBUG] startProcess: err=%v", err)
-	log.Printf("[DEBUG] startProcess: output=%s", string(output))
+	log.Printf("[DEBUG] startProcess: output=%s", output)
 
 	if err != nil {
-		return CommandResult{Success: false, Error: err.Error(), Output: string(output)}
+		return CommandResult{Success: false, Error: err.Error(), Output: output}
 	}
 
-	return CommandResult{Success: true, Output: string(output)}
+	return CommandResult{Success: true, Output: output}
 }
 
 // expandCmdAndWorkDir 展开命令中的路径，并确定工作目录
@@ -319,17 +478,15 @@ func stopProcess(svc ServiceConfig) CommandResult {
 
 	log.Printf("[DEBUG] stopProcess: finalCmd=%s", finalCmd)
 
-	command := exec.Command("/bin/bash", "-c", finalCmd)
-
-	output, err := command.CombinedOutput()
+	output, err := runHostCommand(getShellPath(), finalCmd)
 	log.Printf("[DEBUG] stopProcess: err=%v", err)
-	log.Printf("[DEBUG] stopProcess: output=%s", string(output))
+	log.Printf("[DEBUG] stopProcess: output=%s", output)
 
 	if err != nil {
-		return CommandResult{Success: false, Error: err.Error(), Output: string(output)}
+		return CommandResult{Success: false, Error: err.Error(), Output: output}
 	}
 
-	return CommandResult{Success: true, Output: string(output)}
+	return CommandResult{Success: true, Output: output}
 }
 
 func restartProcess(svc ServiceConfig) CommandResult {
@@ -350,14 +507,13 @@ func restartProcess(svc ServiceConfig) CommandResult {
 			finalCmd = innerCmd
 		}
 		log.Printf("[DEBUG] restartProcess: finalCmd=%s", finalCmd)
-		command := exec.Command("/bin/bash", "-c", finalCmd)
-		output, err := command.CombinedOutput()
+		output, err := runHostCommand(getShellPath(), finalCmd)
 
 		if err != nil {
-			return CommandResult{Success: false, Error: err.Error(), Output: string(output)}
+			return CommandResult{Success: false, Error: err.Error(), Output: output}
 		}
 
-		return CommandResult{Success: true, Output: string(output)}
+		return CommandResult{Success: true, Output: output}
 	}
 
 	stopResult := stopProcess(svc)
@@ -375,9 +531,7 @@ func startDocker(svc ServiceConfig) CommandResult {
 		return CommandResult{Success: false, Error: "No container name configured"}
 	}
 
-	cmd := exec.Command("docker", "start", svc.DockerName)
-	output, err := cmd.CombinedOutput()
-
+	output, err := runDockerCmd([]string{"docker", "start", svc.DockerName})
 	if err != nil {
 		return CommandResult{Success: false, Error: err.Error(), Output: string(output)}
 	}
@@ -390,9 +544,7 @@ func stopDocker(svc ServiceConfig) CommandResult {
 		return CommandResult{Success: false, Error: "No container name configured"}
 	}
 
-	cmd := exec.Command("docker", "stop", "-t", "10", svc.DockerName)
-	output, err := cmd.CombinedOutput()
-
+	output, err := runDockerCmd([]string{"docker", "stop", "-t", "10", svc.DockerName})
 	if err != nil {
 		return CommandResult{Success: false, Error: err.Error(), Output: string(output)}
 	}
@@ -405,9 +557,7 @@ func restartDocker(svc ServiceConfig) CommandResult {
 		return CommandResult{Success: false, Error: "No container name configured"}
 	}
 
-	cmd := exec.Command("docker", "restart", "-t", "10", svc.DockerName)
-	output, err := cmd.CombinedOutput()
-
+	output, err := runDockerCmd([]string{"docker", "restart", "-t", "10", svc.DockerName})
 	if err != nil {
 		return CommandResult{Success: false, Error: err.Error(), Output: string(output)}
 	}
@@ -416,28 +566,34 @@ func restartDocker(svc ServiceConfig) CommandResult {
 }
 
 func startCompose(svc ServiceConfig) CommandResult {
+	log.Printf("[DEBUG] startCompose: ComposePath=%s, DockerName=%s", svc.ComposePath, svc.DockerName)
+	
 	composeFile, workDir, err := resolveComposePath(svc.ComposePath)
 	if err != nil {
-		return CommandResult{Success: false, Error: err.Error()}
+		log.Printf("[ERROR] startCompose: resolveComposePath failed: %v (path=%s)", err, svc.ComposePath)
+		return CommandResult{Success: false, Error: fmt.Sprintf("找不到 docker-compose 文件: %v (路径: %s)", err, svc.ComposePath)}
 	}
 
-	dockerCmd := getDockerComposeCmd()
-	var cmd *exec.Cmd
-	if dockerCmd == "docker" {
-		cmd = exec.Command("docker", "compose", "-f", composeFile, "up", "-d")
-	} else {
-		cmd = exec.Command("docker-compose", "-f", composeFile, "up", "-d")
+	log.Printf("[DEBUG] startCompose: resolved composeFile=%s, workDir=%s", composeFile, workDir)
+
+	// 检查 compose 文件是否可读
+	if _, statErr := os.Stat(composeFile); statErr != nil {
+		log.Printf("[ERROR] startCompose: compose file not accessible: %v", statErr)
+		return CommandResult{Success: false, Error: fmt.Sprintf("compose 文件不可访问: %v", statErr)}
 	}
-	cmd.Dir = workDir
 
-	log.Printf("[DEBUG] startCompose: cmd=%v, workDir=%s", cmd.Args, workDir)
+	log.Printf("[INFO] startCompose: executing compose up -d")
 
-	output, err := cmd.CombinedOutput()
+	output, err := runComposeCmd(composeFile, workDir, "up", "-d")
+	outputStr := string(output)
+	
 	if err != nil {
-		return CommandResult{Success: false, Error: err.Error(), Output: string(output)}
+		log.Printf("[ERROR] startCompose: command failed: %v, output: %s", err, outputStr)
+		return CommandResult{Success: false, Error: fmt.Sprintf("docker compose 执行失败: %v", err), Output: outputStr}
 	}
 
-	return CommandResult{Success: true, Output: string(output)}
+	log.Printf("[INFO] startCompose: command succeeded, output: %s", outputStr)
+	return CommandResult{Success: true, Output: outputStr}
 }
 
 func stopCompose(svc ServiceConfig) CommandResult {
@@ -446,18 +602,7 @@ func stopCompose(svc ServiceConfig) CommandResult {
 		return CommandResult{Success: false, Error: err.Error()}
 	}
 
-	dockerCmd := getDockerComposeCmd()
-	var cmd *exec.Cmd
-	if dockerCmd == "docker" {
-		cmd = exec.Command("docker", "compose", "-f", composeFile, "down")
-	} else {
-		cmd = exec.Command("docker-compose", "-f", composeFile, "down")
-	}
-	cmd.Dir = workDir
-
-	log.Printf("[DEBUG] stopCompose: cmd=%v, workDir=%s", cmd.Args, workDir)
-
-	output, err := cmd.CombinedOutput()
+	output, err := runComposeCmd(composeFile, workDir, "down")
 	if err != nil {
 		return CommandResult{Success: false, Error: err.Error(), Output: string(output)}
 	}
@@ -471,18 +616,7 @@ func restartCompose(svc ServiceConfig) CommandResult {
 		return CommandResult{Success: false, Error: err.Error()}
 	}
 
-	dockerCmd := getDockerComposeCmd()
-	var cmd *exec.Cmd
-	if dockerCmd == "docker" {
-		cmd = exec.Command("docker", "compose", "-f", composeFile, "restart")
-	} else {
-		cmd = exec.Command("docker-compose", "-f", composeFile, "restart")
-	}
-	cmd.Dir = workDir
-
-	log.Printf("[DEBUG] restartCompose: cmd=%v, workDir=%s", cmd.Args, workDir)
-
-	output, err := cmd.CombinedOutput()
+	output, err := runComposeCmd(composeFile, workDir, "restart")
 	if err != nil {
 		return CommandResult{Success: false, Error: err.Error(), Output: string(output)}
 	}

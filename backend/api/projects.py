@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, File, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session, selectinload, joinedload
+from sqlalchemy.orm import Session
 from models.project import Project
 from models.subsystem_group_relation import SubsystemGroupRelation
 from schemas.project import ProjectCreate, ProjectUpdate, ProjectResponse
@@ -95,42 +95,63 @@ async def get_project_tree(
     from models.subsystem import Subsystem
     from models.service_group import ServiceGroup
     from sqlalchemy import select, func
-    
-    # 使用预加载优化查询性能，避免N+1问题
-    projects = db.query(Project).options(
-        selectinload(Project.subsystems).joinedload(Subsystem.group_relations).joinedload(SubsystemGroupRelation.group)
-    ).all()
-    
-    result = []
-    for project in projects:
-        project_data = {
-            "id": project.id,
-            "name": project.name,
-            "subsystems": []
-        }
-        
-        for subsystem in project.subsystems:
-            subsystem_data = {
-                "id": subsystem.id,
-                "subsystem_name": subsystem.subsystem_name,
-                "subsystem_code": subsystem.subsystem_code,
-                "service_groups": []
+    from utils.cache import get_or_set, invalidate_projects_tree, PROJECTS_TREE_CACHE_KEY, PROJECTS_TREE_TTL
+
+    def load_tree_from_db():
+        """从数据库加载完整项目树（按 relation.display_order 排序）"""
+        from models.subsystem import Subsystem
+        from models.service_group import ServiceGroup
+        from models.subsystem_group_relation import SubsystemGroupRelation
+
+        # 1. 查所有项目（按 id 排序，稳定）
+        projects = db.query(Project).order_by(Project.id).all()
+
+        result = []
+        for project in projects:
+            project_data = {
+                "id": project.id,
+                "name": project.name,
+                "subsystems": []
             }
-            
-            # 通过预加载的关联关系获取服务组
-            for relation in subsystem.group_relations:
-                if relation.group:
-                    subsystem_data["service_groups"].append({
-                        "id": relation.group.id,
-                        "group_name": relation.group.group_name,
-                        "group_code": relation.group.group_code
-                    })
-            
-            project_data["subsystems"].append(subsystem_data)
-        
-        result.append(project_data)
-    
-    return ResponseModel(data=result)
+
+            # 2. 查该项目下所有子系统（按 Subsystem.display_order, id 排序）
+            subsystems = db.query(Subsystem).filter(
+                Subsystem.project_id == project.id
+            ).order_by(Subsystem.display_order, Subsystem.id).all()
+
+            for subsystem in subsystems:
+                subsystem_data = {
+                    "id": subsystem.id,
+                    "subsystem_name": subsystem.subsystem_name,
+                    "subsystem_code": subsystem.subsystem_code,
+                    "service_groups": []
+                }
+
+                # 3. 查该子系统下的分组关联（按 relation.display_order 排序）
+                relations = db.query(SubsystemGroupRelation).join(
+                    ServiceGroup, SubsystemGroupRelation.group_id == ServiceGroup.id
+                ).filter(
+                    SubsystemGroupRelation.subsystem_id == subsystem.id
+                ).order_by(
+                    SubsystemGroupRelation.display_order, SubsystemGroupRelation.id
+                ).all()
+
+                for relation in relations:
+                    if relation.group:
+                        subsystem_data["service_groups"].append({
+                            "id": relation.group.id,
+                            "group_name": relation.group.group_name,
+                            "group_code": relation.group.group_code
+                        })
+
+                project_data["subsystems"].append(subsystem_data)
+
+            result.append(project_data)
+        return result
+
+    # Cache-Aside: 先查 Redis，未命中查 DB 并写回（TTL 5 分钟）
+    tree_data = get_or_set(PROJECTS_TREE_CACHE_KEY, PROJECTS_TREE_TTL, load_tree_from_db)
+    return ResponseModel(data=tree_data)
 
 @router.get("/projects/{project_id}", response_model=ResponseModel)
 async def get_project(
@@ -215,6 +236,10 @@ async def create_project(
     db.commit()
     db.refresh(new_project)
 
+    # 清除项目树缓存
+    from utils.cache import invalidate_projects_tree
+    invalidate_projects_tree()
+
     log_audit(db, user.id, user.username, "PROJECT_CREATE",
               result="success", output=f"创建项目: {project_create.name}")
 
@@ -273,6 +298,10 @@ async def update_project(
     db.commit()
     db.refresh(project)
 
+    # 清除项目树缓存
+    from utils.cache import invalidate_projects_tree
+    invalidate_projects_tree()
+
     log_audit(db, user.id, user.username, "PROJECT_UPDATE",
               result="success", output=f"更新项目: {project.name}")
 
@@ -321,6 +350,10 @@ async def delete_project(
     # 7. 最后删除项目（CASCADE 外键会自动处理 Subsystem）
     db.delete(project)
     db.commit()
+
+    # 清除项目树缓存
+    from utils.cache import invalidate_projects_tree
+    invalidate_projects_tree()
 
     log_audit(db, user.id, user.username, "PROJECT_DELETE",
               result="success", output=f"删除项目: {project_name}")

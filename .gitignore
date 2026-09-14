@@ -8,3 +8,18 @@ __pycache__/
 node_modules/
 dist/
 build/
+
+# 运行时数据与备份（不入库）
+backend/data/
+backend/backups/
+
+# Agent 编译产物与打包文件（不入库）
+srmc-agent/output/
+srmc-agent/srmc-agent
+*.tar
+/srmc-agent/agent_deploy/docker-compose
+
+# 临时文件
+/t
+/t2
+/srmc-agent/3

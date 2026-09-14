@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"net"
@@ -81,6 +82,68 @@ type SystemMetrics struct {
 
 var services []ServiceConfig
 var lastMetrics SystemMetrics
+
+// DetectDockerAPIVersion 启动时检测 Docker daemon 支持的 API 版本，
+// 并设置到进程环境变量中。解决 Agent 容器预设的 DOCKER_API_VERSION
+// 与目标 daemon 版本不匹配导致的 "client version X.XX is too new" 错误。
+func DetectDockerAPIVersion() {
+	// 先尝试读取当前预设版本
+	currentVersion := os.Getenv("DOCKER_API_VERSION")
+
+	// 通过 docker version --format '{{.Server.APIVersion}}' 获取 daemon 版本
+	cmd := exec.Command("docker", "version", "--format", "{{.Server.APIVersion}}")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+
+	combined := stderr.String() + stdout.String()
+
+	// 版本不匹配时 docker 会以非 0 退出并给出 daemon 最高支持版本，
+	// 不能直接当成 "docker 不可用"，先尝试从错误里提取协商版本。
+	if err != nil {
+		re := regexp.MustCompile(`Maximum supported API version is ([0-9.]+)`)
+		if match := re.FindStringSubmatch(combined); len(match) >= 2 {
+			daemonMax := strings.TrimSpace(match[1])
+			if daemonMax != "" && currentVersion != daemonMax {
+				log.Printf("[INFO] Docker daemon max API version=%s (container preset=%s), overriding DOCKER_API_VERSION=%s",
+					daemonMax, currentVersion, daemonMax)
+				os.Setenv("DOCKER_API_VERSION", daemonMax)
+			}
+			return
+		}
+		// docker 命令真的不可用，跳过
+		if currentVersion != "" {
+			log.Printf("[WARN] docker command not available, keeping DOCKER_API_VERSION=%s", currentVersion)
+		} else {
+			log.Printf("[INFO] docker command not available, skipping API version detection")
+		}
+		return
+	}
+
+	daemonVersion := strings.TrimSpace(stdout.String())
+	if daemonVersion == "" {
+		// 输出里可能混有错误信息，尝试从 stderr+stdout 里提取
+		re := regexp.MustCompile(`Maximum supported API version is ([0-9.]+)`)
+		match := re.FindStringSubmatch(combined)
+		if len(match) >= 2 {
+			daemonVersion = match[1]
+		}
+	}
+
+	if daemonVersion == "" {
+		log.Printf("[WARN] could not detect Docker daemon API version, keeping DOCKER_API_VERSION=%s", currentVersion)
+		return
+	}
+
+	if currentVersion != daemonVersion {
+		log.Printf("[INFO] Docker API version: container=%s, daemon=%s, overriding DOCKER_API_VERSION=%s",
+			currentVersion, daemonVersion, daemonVersion)
+		os.Setenv("DOCKER_API_VERSION", daemonVersion)
+	} else {
+		log.Printf("[INFO] Docker API version: %s (matches daemon)", daemonVersion)
+	}
+}
 
 func Init() {
 }
@@ -196,8 +259,7 @@ func getHostIPFromDNS() string {
 }
 
 func getHostIPFromDockerGateway() string {
-	cmd := exec.Command("docker", "network", "inspect", "-f", "{{range .IPAM.Config}}{{.Gateway}}{{end}}", "srmc_default")
-	output, err := cmd.CombinedOutput()
+	output, err := runDockerCmd([]string{"docker", "network", "inspect", "-f", "{{range .IPAM.Config}}{{.Gateway}}{{end}}", "srmc_default"})
 	if err == nil && len(output) > 0 {
 		gateway := strings.TrimSpace(string(output))
 		if gateway != "" && gateway != "<no value>" {
@@ -378,8 +440,7 @@ func collectDockerStatus(svc ServiceConfig) ServiceStatus {
 	}
 
 	// 采集容器创建时间作为 RunningSince
-	cmd2 := exec.Command("docker", "inspect", "-f", "{{.Created}}", svc.DockerName)
-	output2, _ := cmd2.CombinedOutput()
+	output2, _ := runDockerCmd([]string{"docker", "inspect", "-f", "{{.Created}}", svc.DockerName})
 	if len(output2) > 0 {
 		createdStr := strings.TrimSpace(string(output2))
 		if t, err := time.Parse(time.RFC3339, createdStr); err == nil {
@@ -399,104 +460,72 @@ func collectComposeStatus(svc ServiceConfig) ServiceStatus {
 		Status:     "Unknown",
 	}
 
+	log.Printf("[DEBUG] collectComposeStatus: service=%s, dockerName=%s, composePath=%s", svc.ServiceID, svc.DockerName, svc.ComposePath)
+
+	// 方式一（优先）：用 DockerName 精确检测。docker inspect 只需要 Docker API，
+	// 不依赖 compose 文件路径，不受 Agent 容器目录挂载限制。
+	// 注意：inspect 失败不直接判 Stopped，而是回退到方式二（compose label 过滤），
+	// 两种方式互为兜底，避免单一检测手段在个别环境异常时误报停止。
+	if svc.DockerName != "" {
+		container, err := inspectContainer(svc.DockerName)
+		if err == nil {
+			status.Containers = []ContainerDetail{container}
+			if container.Running {
+				status.Status = "Running"
+			} else {
+				status.Status = "Stopped"
+			}
+			return status
+		}
+		log.Printf("[DEBUG] collectComposeStatus: inspect %s failed (%v), fallback to compose label filter", svc.DockerName, err)
+		// 回退继续走下面的 compose_path label 过滤
+	}
+
+	// 方式二：通过 compose 文件路径的 config_files label 过滤（compose V2 启动的容器自带该 label）。
+	// docker ps --format 一次拿全字段，不依赖 inspect。
 	if svc.ComposePath == "" {
-		log.Printf("[DEBUG] collectComposeStatus: no compose path configured for service %s", svc.ServiceID)
+		log.Printf("[DEBUG] collectComposeStatus: no docker_name and no compose_path for service %s", svc.ServiceID)
+		if svc.DockerName != "" {
+			// DockerName inspect 失败且无 compose_path 兜底
+			status.Status = "Stopped"
+			status.Containers = []ContainerDetail{{
+				ID: svc.DockerName, Name: svc.DockerName, State: "unknown",
+				Status: "inspect failed", Running: false,
+			}}
+		}
 		return status
 	}
 
 	// 解析 compose 路径（支持目录和文件）
 	composeFile, workDir, err := resolveComposePathForCollector(svc.ComposePath)
 	if err != nil {
-		log.Printf("[DEBUG] collectComposeStatus: resolve error: %v", err)
+		log.Printf("[DEBUG] collectComposeStatus: resolve error: %v (path=%s)", err, svc.ComposePath)
 		status.Status = "Stopped"
 		return status
 	}
 
-	log.Printf("[DEBUG] collectComposeStatus: composeFile=%s, workDir=%s, dockerName=%s", composeFile, workDir, svc.DockerName)
+	log.Printf("[DEBUG] collectComposeStatus: composeFile=%s, workDir=%s", composeFile, workDir)
 
-	// 构建 docker compose 命令
-	dockerCmd := getDockerComposeCmd()
-	var baseArgs []string
-	if dockerCmd == "docker" {
-		baseArgs = []string{"docker", "compose", "-f", composeFile}
-	} else {
-		baseArgs = []string{"docker-compose", "-f", composeFile}
-	}
-
-	// 如果指定了容器名称，只检查该容器
-	if svc.DockerName != "" {
-		container, err := inspectContainer(svc.DockerName)
-		if err != nil {
-			log.Printf("[DEBUG] collectComposeStatus: inspect %s error: %v", svc.DockerName, err)
-			status.Status = "Stopped"
-			status.Containers = []ContainerDetail{{
-				ID:      svc.DockerName,
-				Name:    svc.DockerName,
-				State:   "unknown",
-				Status:  "inspect failed: " + err.Error(),
-				Running: false,
-			}}
-			return status
-		}
-		status.Containers = []ContainerDetail{container}
-		if container.Running {
-			status.Status = "Running"
-		} else {
-			status.Status = "Stopped"
-		}
-		log.Printf("[DEBUG] collectComposeStatus: container %s state=%s, status=%s",
-			container.Name, container.State, container.Status)
-		return status
-	}
-
-	// 获取所有容器 ID
-	args := append(baseArgs, "ps", "-aq") // -a 包含已停止的容器
-	cmd := exec.Command(args[0], args[1:]...)
-	cmd.Dir = workDir
-	output, err := cmd.CombinedOutput()
+	// 直接用 docker ps --filter --format 一次拿全所有容器信息
+	// 不调用 docker compose ps，避免 yml 解析（exit 15）和项目名匹配问题
+	// 用 compose 文件绝对路径做过滤，全局唯一，不会重名误匹配
+	containers, err := listContainersByComposeFile(composeFile)
 	if err != nil {
-		log.Printf("[DEBUG] collectComposeStatus: ps error: %v, output: %s", err, string(output))
+		log.Printf("[DEBUG] collectComposeStatus: list containers error: %v", err)
 		status.Status = "Stopped"
 		return status
 	}
 
-	containerIDs := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(containerIDs) == 1 && containerIDs[0] == "" {
-		log.Printf("[DEBUG] collectComposeStatus: no containers found")
-		status.Status = "Stopped"
-		return status
-	}
-
-	log.Printf("[DEBUG] collectComposeStatus: found %d containers", len(containerIDs))
-
-	// 检查每个容器状态
-	containers := make([]ContainerDetail, 0, len(containerIDs))
-	runningCount := 0
-	for _, cid := range containerIDs {
-		cid = strings.TrimSpace(cid)
-		if cid == "" {
-			continue
-		}
-		container, err := inspectContainer(cid)
-		if err != nil {
-			log.Printf("[DEBUG] collectComposeStatus: inspect %s error: %v", cid, err)
-			containers = append(containers, ContainerDetail{
-				ID:      truncateID(cid),
-				Name:    cid,
-				State:   "unknown",
-				Status:  "inspect failed",
-				Running: false,
-			})
-			continue
-		}
-		containers = append(containers, container)
-		if container.Running {
-			runningCount++
-		}
-	}
+	log.Printf("[DEBUG] collectComposeStatus: found %d containers", len(containers))
 
 	status.Containers = containers
 	totalCount := len(containers)
+	runningCount := 0
+	for _, c := range containers {
+		if c.Running {
+			runningCount++
+		}
+	}
 
 	log.Printf("[DEBUG] collectComposeStatus: running=%d/%d", runningCount, totalCount)
 
@@ -513,34 +542,129 @@ func collectComposeStatus(svc ServiceConfig) ServiceStatus {
 	return status
 }
 
+// listContainersByComposeFile 用 docker ps --filter --format 一次拿全所有容器信息。
+// 通过 compose 文件的绝对路径做 label 过滤（com.docker.compose.project.config_files），
+// 全局唯一，不受目录同名影响。不调用 docker compose ps，绕过 yml 解析和项目名匹配问题。
+// 输出格式用管道符分隔字段，避免容器名/状态里包含空格导致解析错误。
+func listContainersByComposeFile(composeFile string) ([]ContainerDetail, error) {
+	// docker ps --format 模板：
+	//   ID|Name|State|Image|Ports|RunningSince
+	// - .ID: 短 ID（12 位）
+	// - .Names: 容器名（多个用逗号分隔，但 compose 容器一般只有一个名）
+	// - .State: 容器状态（running/exited/paused/restarting/dead）
+	// - .Image: 镜像名
+	// - .Ports: 端口映射（与 docker ps 显示一致，如 0.0.0.0:9013->8080/tcp）
+	// - .RunningFor: 人类可读的运行时间（如 "Up 2 hours"），用于 Status 字段
+	// 注意：.Ports 在容器未运行时可能为空，需要单独处理
+	format := "{{.ID}}|{{.Names}}|{{.State}}|{{.Image}}|{{.Ports}}|{{.RunningFor}}"
+	filter := fmt.Sprintf("label=com.docker.compose.project.config_files=%s", composeFile)
+
+	output, err := runDockerCmd([]string{"docker", "ps", "-a", "--filter", filter, "--format", format})
+	if err != nil {
+		return nil, fmt.Errorf("docker ps failed: %v, output: %s", err, string(output))
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	containers := make([]ContainerDetail, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// 跳过 docker CLI 混入 stdout 的 warning/log 行
+		// 例如: time="..." level=warning msg="The \"docker_user_uid\" variable is not set..."
+		if isDockerCLILogLine(line) {
+			log.Printf("[DEBUG] listContainersByComposeFile: skip docker CLI log line: %s", truncateStr(line, 120))
+			continue
+		}
+		parts := strings.SplitN(line, "|", 6)
+		if len(parts) < 6 {
+			log.Printf("[DEBUG] listContainersByComposeFile: unexpected line: %s", truncateStr(line, 120))
+			continue
+		}
+
+		id := strings.TrimSpace(parts[0])
+		name := strings.TrimSpace(parts[1])
+		state := strings.TrimSpace(parts[2])
+		image := parts[3]
+		ports := parts[4]
+		runningFor := parts[5]
+
+		// 严格校验容器 ID 必须是十六进制，防止 warning/错误文本被当成容器
+		if !isHexContainerID(id) {
+			log.Printf("[DEBUG] listContainersByComposeFile: skip non-container id=%q line=%s", id, truncateStr(line, 120))
+			continue
+		}
+
+		// 人类可读状态：运行中显示运行时间，已停止显示状态
+		humanStatus := state
+		if state == "running" {
+			if runningFor != "" {
+				humanStatus = "Up " + runningFor
+			}
+		} else {
+			// 已停止的容器，状态可能为 exited/paused/dead
+			humanStatus = state
+		}
+
+		// 只有 state == "running" 才算真正运行中
+		// restarting 状态不算运行中（容器正在尝试重启，但未正常工作）
+		running := state == "running"
+
+		containers = append(containers, ContainerDetail{
+			ID:      id,
+			Name:    name,
+			State:   state,
+			Status:  humanStatus,
+			Image:   image,
+			Ports:   ports,
+			Running: running,
+		})
+	}
+
+	return containers, nil
+}
+
+// runDockerCmd 执行 docker 命令，当遇到 API 版本不匹配错误时自动降级重试。
+// 成功时只返回纯净的 stdout。
+func runDockerCmd(args []string) ([]byte, error) {
+	return execWithVersionFallback(args, "")
+}
+
 // inspectContainer 通过 docker inspect 获取容器详细信息
 func inspectContainer(containerIDOrName string) (ContainerDetail, error) {
 	// 使用 Go template 一次性获取所有需要的字段，避免多次调用 docker inspect
 	// 端口映射格式: 遍历 NetworkSettings.Ports (map[port][]PortBinding)
-	// 容器端口是 map 的 key（如 "3306/tcp"），HostPort 是 PortBinding 的字段
-	format := `{{.Id}}|{{.Name}}|{{.State.Status}}|{{.State.Running}}|{{.Config.Image}}|{{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{$port}}->{{.HostPort}},{{end}}{{end}}|{{.State.Status}}`
-	cmd := exec.Command("docker", "inspect", "-f", format, containerIDOrName)
-	out, err := cmd.CombinedOutput()
+	// 容器端口是 map 的 key（如 "8080/tcp"），HostPort 是物理机端口（如 "9013"）
+	// 显示格式与 docker ps 一致：物理机端口->容器端口，如 9013->8080/tcp
+	format := `{{.Id}}|{{.Name}}|{{.State.Status}}|{{.State.Running}}|{{.Config.Image}}|{{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{.HostPort}}->{{$port}},{{end}}{{end}}|{{.State.Status}}`
+	out, err := runDockerCmd([]string{"docker", "inspect", "-f", format, containerIDOrName})
 	if err != nil {
 		return ContainerDetail{}, err
 	}
 
-	parts := strings.Split(strings.TrimSpace(string(out)), "|")
+	// 剥离混入 stdout 的 docker CLI warning/log 行，只保留模板输出行
+	cleanOut := stripDockerCLILogLines(string(out))
+	parts := strings.Split(strings.TrimSpace(cleanOut), "|")
 	if len(parts) < 6 {
-		return ContainerDetail{}, fmt.Errorf("unexpected inspect output: %s", string(out))
+		return ContainerDetail{}, fmt.Errorf("unexpected inspect output: %s", truncateStr(cleanOut, 160))
 	}
 
-	fullID := parts[0]
-	name := strings.TrimPrefix(parts[1], "/") // 容器名前缀有 /
-	state := parts[2]
-	image := parts[4]
-	ports := parts[5]
+	fullID := strings.TrimSpace(parts[0])
+	// 严格校验容器 ID，防止 warning 文本污染导致字段错位
+	if !isHexContainerID(fullID) {
+		return ContainerDetail{}, fmt.Errorf("invalid container id in inspect output: %q", truncateStr(cleanOut, 160))
+	}
+	name := strings.TrimPrefix(strings.TrimSpace(parts[1]), "/") // 容器名前缀有 /
+	state := strings.TrimSpace(parts[2])
+	image := strings.TrimSpace(parts[4])
+	ports := strings.TrimSpace(parts[5])
 
 	// 人类可读状态
 	humanStatus := state
-	cmd2 := exec.Command("docker", "inspect", "-f", `{{.State.Status}} ({{.State.ExitCode}}) {{.State.Error}}`, containerIDOrName)
-	if out2, err := cmd2.CombinedOutput(); err == nil {
-		s := strings.TrimSpace(string(out2))
+	out2, err2 := runDockerCmd([]string{"docker", "inspect", "-f", `{{.State.Status}} ({{.State.ExitCode}}) {{.State.Error}}`, containerIDOrName})
+	if err2 == nil {
+		s := strings.TrimSpace(stripDockerCLILogLines(string(out2)))
 		if s != "" {
 			humanStatus = s
 		}
@@ -567,6 +691,46 @@ func truncateID(id string) string {
 		return id[:12]
 	}
 	return id
+}
+
+// isHexContainerID 判断字符串是否为合法的 Docker 容器 ID（十六进制，12~64 位）
+func isHexContainerID(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) < 12 || len(s) > 64 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// isDockerCLILogLine 判断一行是否为 docker CLI 的日志输出（warning/error/info）。
+// 这类输出本应在 stderr，但可能混入 stdout，例如：
+//
+//	time="2026-09-07T00:31:22Z" level=warning msg="The \"docker_user_uid\" variable is not set..."
+func isDockerCLILogLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, `time="`) {
+		return false
+	}
+	return strings.Contains(trimmed, "level=warning") ||
+		strings.Contains(trimmed, "level=error") ||
+		strings.Contains(trimmed, "level=info")
+}
+
+// stripDockerCLILogLines 移除多行输出中的 docker CLI 日志行，返回纯净内容
+func stripDockerCLILogLines(s string) string {
+	var kept []string
+	for _, l := range strings.Split(s, "\n") {
+		if isDockerCLILogLine(l) {
+			continue
+		}
+		kept = append(kept, l)
+	}
+	return strings.Join(kept, "\n")
 }
 
 // resolveComposePathForCollector 解析 compose 路径
@@ -600,16 +764,104 @@ func resolveComposePathForCollector(composePath string) (string, string, error) 
 	return "", "", fmt.Errorf("compose path not found: %s", composePath)
 }
 
-// getDockerComposeCmd 返回可用的 docker compose 命令
-func getDockerComposeCmd() string {
+// runComposeCmd 执行 docker compose 命令，自动在 docker compose (V2) 和 docker-compose (V1) 之间切换。
+// 同时处理 Docker API 版本不匹配问题（如 client version 1.44 vs daemon 1.43）。
+// 不指定 -p 项目名：让 compose 使用 yml 里的 name 字段（用户已为每个 yml 配置唯一 name）。
+// 策略：先试 V2，V2 失败（任何原因）都尝试 V1，V1 也失败才返回错误。
+// 这样能兼容各种环境：只有 V2、只有 V1、两者都有、yaml 解析差异等。
+func runComposeCmd(composeFile, workDir string, composeArgs ...string) ([]byte, error) {
+	var v2Err, v1Err error
+	var v2Output []byte
+
+	// 尝试 docker compose (V2 插件模式)
 	if _, err := exec.LookPath("docker"); err == nil {
-		// 检查 docker compose 是否可用
-		cmd := exec.Command("docker", "compose", "version")
-		if err := cmd.Run(); err == nil {
-			return "docker"
+		fullArgs := append([]string{"docker", "compose", "-f", composeFile}, composeArgs...)
+		v2Output, v2Err = execWithVersionFallback(fullArgs, workDir)
+		if v2Err == nil {
+			return v2Output, nil
 		}
+		// V2 失败，记录错误，继续尝试 V1
+		log.Printf("[DEBUG] runComposeCmd V2 failed: %v, errStr=%s", v2Err, truncateStr(string(v2Output), 200))
 	}
-	return "docker-compose"
+
+	// 尝试 docker-compose (V1 独立命令)
+	// 无论 V2 失败原因是什么（插件不存在、yaml 解析错误、API 版本问题等），都尝试 V1
+	if _, err := exec.LookPath("docker-compose"); err == nil {
+		fullArgs := append([]string{"docker-compose", "-f", composeFile}, composeArgs...)
+		output, err := execWithVersionFallback(fullArgs, workDir)
+		if err == nil {
+			if v2Err != nil {
+				log.Printf("[DEBUG] runComposeCmd V1 succeeded after V2 failed")
+			}
+			return output, nil
+		}
+		v1Err = err
+		log.Printf("[DEBUG] runComposeCmd V1 failed: %v, errStr=%s", v1Err, truncateStr(string(output), 200))
+	}
+
+	// 两个都失败，返回更详细的错误
+	if v2Err != nil && v1Err != nil {
+		return v2Output, fmt.Errorf("docker compose (V2) failed: %v; docker-compose (V1) failed: %v", v2Err, v1Err)
+	}
+	if v2Err != nil {
+		return v2Output, fmt.Errorf("docker compose (V2) failed: %v; docker-compose (V1) not installed", v2Err)
+	}
+	return nil, fmt.Errorf("docker-compose (V1) failed: %v; docker compose (V2) not installed", v1Err)
+}
+
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+// execWithVersionFallback 执行 docker 命令，当遇到 API 版本不匹配错误时自动降级重试。
+// 成功时只返回纯净的 stdout（避免 stderr 的 warning 污染输出，例如
+// "docker_user_uid variable is not set" 会被误当成容器 ID）。
+// 失败时返回 stderr+stdout 用于错误诊断。
+func execWithVersionFallback(args []string, workDir string) ([]byte, error) {
+	runOnce := func(env []string) ([]byte, []byte, error) {
+		c := exec.Command(args[0], args[1:]...)
+		c.Dir = workDir
+		if len(env) > 0 {
+			c.Env = env
+		}
+		var stdout, stderr bytes.Buffer
+		c.Stdout = &stdout
+		c.Stderr = &stderr
+		err := c.Run()
+		return stdout.Bytes(), stderr.Bytes(), err
+	}
+
+	stdout, stderr, err := runOnce(nil)
+	if err == nil {
+		return stdout, nil
+	}
+
+	// 合并 stderr+stdout 用于错误文本检测（warning 可能出现在 stderr）
+	errStr := string(stderr) + string(stdout)
+	if strings.Contains(errStr, "is too new") || strings.Contains(errStr, "client version") {
+		re := regexp.MustCompile(`Maximum supported API version is ([0-9.]+)`)
+		match := re.FindStringSubmatch(errStr)
+		fallbackVersion := "1.43"
+		if len(match) >= 2 {
+			fallbackVersion = match[1]
+		}
+
+		stdout2, stderr2, err2 := runOnce(append(os.Environ(), "DOCKER_API_VERSION="+fallbackVersion))
+		if err2 == nil {
+			// 写回全局环境变量，后续命令直接用协商版本，不再反复先失败再降级
+			if os.Getenv("DOCKER_API_VERSION") != fallbackVersion {
+				os.Setenv("DOCKER_API_VERSION", fallbackVersion)
+				log.Printf("[INFO] Docker API version downgraded to %s successfully", fallbackVersion)
+			}
+			return stdout2, nil
+		}
+		return append(stderr2, stdout2...), err2
+	}
+
+	return append(stderr, stdout...), err
 }
 
 func readPIDFile(path string) int {
@@ -700,47 +952,87 @@ func findProcessByStartCmd(startCmd string, username string) int {
 			log.Printf("[DEBUG] Reading script: %s, content length=%d", scriptPath, len(content))
 			log.Printf("[DEBUG] Script content: %s", string(content))
 			
-			// 从脚本内容中提取所有 .jar 文件名（优先使用）
+			// ============ 核心修复：先解析并展开 bash 变量 ============
+			// 例如脚本中有：
+			//   app=casia-delete-es-event-data-month
+			//   nohup java -jar lib/$app.jar ...
+			// 展开后变成：
+			//   nohup java -jar lib/casia-delete-es-event-data-month.jar ...
 			contentStr := string(content)
+			bashVars := parseBashVariables(contentStr)
+			log.Printf("[DEBUG] Parsed bash variables: %v", bashVars)
+			expandedContent := expandBashVariables(contentStr, bashVars)
+			log.Printf("[DEBUG] Expanded script content: %s", expandedContent)
+			
+			// 只从展开后的内容提取 jar 名（避免 $app.jar 中的 app.jar 被误匹配）
+			var jarMatches []string
 			jarRegex := regexp.MustCompile(`[a-zA-Z0-9_\-\.]+?\.jar`)
-			jarMatches := jarRegex.FindAllString(contentStr, -1)
-			log.Printf("[DEBUG] Found %d jar matches in script", len(jarMatches))
+			jarMatches = append(jarMatches, jarRegex.FindAllString(expandedContent, -1)...)
+			log.Printf("[DEBUG] Found %d jar matches (expanded only)", len(jarMatches))
+			seen := make(map[string]bool)
 			for _, jarName := range jarMatches {
-				if len(jarName) > 5 {
+				if len(jarName) > 5 && !seen[jarName] {
+					seen[jarName] = true
 					keywords = append(keywords, jarName)
 					log.Printf("[DEBUG] Found jar in script: %s", jarName)
 				}
 			}
 			
-			// 如果没有找到 jar 文件，从可执行命令行中提取有意义的关键字
+			// 如果没有找到 jar 文件，从脚本中提取原生二进制名
 			if len(jarMatches) == 0 {
-				for _, line := range strings.Split(contentStr, "\n") {
+				for _, line := range strings.Split(expandedContent, "\n") {
 					line = strings.TrimSpace(line)
 					if line == "" || strings.HasPrefix(line, "#") {
 						continue
 					}
-					
+
 					cleanLine := strings.TrimPrefix(line, "./")
 					cleanLine = strings.TrimSpace(cleanLine)
-					
-					if strings.Contains(cleanLine, "java") || 
-					   strings.Contains(cleanLine, "python") ||
-					   strings.Contains(cleanLine, "node") {
-						log.Printf("[DEBUG] Found executable line in script: %s", cleanLine)
-						execPaths := extractExecutablesFromCmd(cleanLine)
-						for _, execPath := range execPaths {
-							baseName := filepath.Base(execPath)
-							// 过滤掉无用的关键字
-							if len(baseName) > 5 && !isUselessKeyword(baseName) {
-								keywords = append(keywords, baseName)
-								log.Printf("[DEBUG] Extracted meaningful executable basename: %s", baseName)
-							}
+
+					// 去掉 nohup 前缀
+					if strings.HasPrefix(cleanLine, "nohup ") {
+						cleanLine = strings.TrimPrefix(cleanLine, "nohup ")
+						cleanLine = strings.TrimSpace(cleanLine)
+					}
+
+					// 跳过非启动命令行
+					if strings.HasPrefix(cleanLine, "cd ") ||
+						strings.Contains(cleanLine, "=") && !strings.Contains(cleanLine, "java") ||
+						strings.HasPrefix(cleanLine, "if ") ||
+						strings.HasPrefix(cleanLine, "fi") ||
+						strings.HasPrefix(cleanLine, "echo ") ||
+						strings.HasPrefix(cleanLine, "exit ") ||
+						strings.HasPrefix(cleanLine, "export ") ||
+						strings.HasPrefix(cleanLine, "pid=") ||
+						strings.HasPrefix(cleanLine, "-") {
+						continue
+					}
+
+					log.Printf("[DEBUG] Found executable line in script: %s", cleanLine)
+
+					// 提取原生二进制名（如 bin/elasticsearch, bin/mysqld, redis-server, nginx）
+					execPaths := extractExecutablesFromCmd(cleanLine)
+					for _, execPath := range execPaths {
+						baseName := filepath.Base(execPath)
+						if !isUselessKeyword(baseName) {
+							keywords = append(keywords, baseName)
+							log.Printf("[DEBUG] Extracted meaningful executable basename: %s", baseName)
 						}
+					}
+
+					// 特殊处理：Tomcat 等通过 startup.sh 启动但实际进程是 java -Dcatalina...
+					// 从脚本路径或内容中识别 catalina/tomcat 关键字
+					if strings.Contains(strings.ToLower(expandedContent), "catalina") {
+						keywords = append(keywords, "catalina")
+						log.Printf("[DEBUG] Detected Tomcat-like service, adding keyword: catalina")
+					}
+					if strings.Contains(strings.ToLower(expandedContent), "solr") {
+						keywords = append(keywords, "solr")
+						log.Printf("[DEBUG] Detected Solr-like service, adding keyword: solr")
 					}
 				}
 			}
 			
-			// 找到第一个有效脚本后就停止搜索其他路径
 			break
 		} else {
 			// 如果不是脚本文件，直接用文件名检测
@@ -786,22 +1078,90 @@ func findProcessByStartCmd(startCmd string, username string) int {
 func isUselessKeyword(keyword string) bool {
 	uselessKeywords := map[string]bool{
 		"start": true, "stop": true, "restart": true,
-		"nohup": true, "java": true, "python": true, "node": true,
-		"bash": true, "sh": true, "cmd": true,
+		"nohup": true, "java": true, "python": true, "python3": true, "node": true,
+		"bash": true, "sh": true, "cmd": true, "bin": true,
 		"server": true, "client": true, "master": true, "slave": true,
-		"$mypath": true, "$path": true,
+		"$mypath": true, "$path": true, "app": true, "lib": true,
+		"conf": true, "config": true, "log": true, "logs": true,
+		"daemon": true, "agent": true, "main": true, "run": true,
 	}
-	
-	if uselessKeywords[strings.ToLower(keyword)] {
+
+	lower := strings.ToLower(keyword)
+	if uselessKeywords[lower] {
 		return true
 	}
-	
-	// 过滤掉太通用的关键字（少于6个字符，且不含特殊后缀）
-	if len(keyword) < 6 && !strings.HasSuffix(keyword, ".jar") && !strings.HasSuffix(keyword, ".py") {
+
+	// 过滤掉太短的关键字（少于3个字符）
+	if len(keyword) < 3 {
 		return true
 	}
-	
+
 	return false
+}
+
+// parseBashVariables 解析 bash 脚本中的变量赋值
+// 支持：export NAME=value / NAME="value" / NAME='value' / NAME=value
+// 不支持：跨引号、命令替换、嵌套等复杂 bash 语法（覆盖 95% 常用场景）
+func parseBashVariables(content string) map[string]string {
+	vars := make(map[string]string)
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		// 跳过注释、空行和管道命令
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// 去掉 "export " 前缀（可选）
+		line = strings.TrimPrefix(line, "export ")
+		// 匹配 NAME=value 格式
+		eqIdx := strings.IndexByte(line, '=')
+		if eqIdx <= 0 {
+			continue
+		}
+		name := strings.TrimSpace(line[:eqIdx])
+		value := strings.TrimSpace(line[eqIdx+1:])
+		// 简单校验 name 是合法标识符
+		if !regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`).MatchString(name) {
+			continue
+		}
+		// 去掉外层引号（双引号或单引号）
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') ||
+				(value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+		// 去掉行尾的分号
+		value = strings.TrimSuffix(value, ";")
+		if name != "" {
+			vars[name] = value
+		}
+	}
+	return vars
+}
+
+// expandBashVariables 用变量表展开字符串中的 $NAME 和 ${NAME}
+// 已定义的变量替换为其值，未定义的变量替换为空字符串（与 bash 默认行为一致）
+func expandBashVariables(content string, vars map[string]string) string {
+	result := content
+	// 先处理 ${NAME} 形式
+	for name, value := range vars {
+		result = strings.ReplaceAll(result, "${"+name+"}", value)
+	}
+	// 再处理 $NAME 形式 - 简单替换即可
+	for name, value := range vars {
+		result = strings.ReplaceAll(result, "$"+name, value)
+	}
+	// 最后处理未定义的 $VAR：替换为空字符串（与 bash 默认行为一致）
+	// 例如 $app.jar → .jar，避免被正则误匹配为 app.jar
+	undefinedVarRegex := regexp.MustCompile(`\$([a-zA-Z_][a-zA-Z0-9_]*)`)
+	result = undefinedVarRegex.ReplaceAllStringFunc(result, func(match string) string {
+		varName := match[1:] // 去掉 $ 前缀
+		if _, defined := vars[varName]; defined {
+			return match // 已定义的变量保留（已在上面替换过）
+		}
+		return "" // 未定义的变量替换为空
+	})
+	return result
 }
 
 func resolvePathCandidates(path string, username string) []string {

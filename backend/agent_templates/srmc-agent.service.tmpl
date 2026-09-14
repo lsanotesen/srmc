@@ -1,0 +1,12 @@
+[Unit]
+Description=SRMC Agent
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={DEPLOY_DIR}/srmc-agent -config {DEPLOY_DIR}/config.yaml
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

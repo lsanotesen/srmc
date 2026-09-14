@@ -28,3 +28,9 @@ class Agent(Base):
     ssh_username = Column(VARCHAR(100), comment='SSH用户名')
     ssh_password = Column(VARCHAR(500), comment='SSH密码（加密存储）')
     service_name = Column(VARCHAR(128), default='srmc-agent', comment='systemd服务名称')
+
+    # Agent 自身部署元信息（注册时由 Agent 上报，批量更新下发时使用）
+    deploy_type = Column(VARCHAR(16), comment='部署方式: docker/binary')
+    deploy_dir = Column(VARCHAR(256), comment='Agent根部署目录')
+    compose_file = Column(VARCHAR(256), comment='docker-compose.yml路径')
+    binary_path = Column(VARCHAR(256), comment='二进制文件路径')

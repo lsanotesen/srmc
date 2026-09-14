@@ -12,6 +12,7 @@ class SubsystemGroupRelation(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     subsystem_id = Column(Integer, ForeignKey('subsystems.id', ondelete='CASCADE'), nullable=False, comment='子系统ID')
     group_id = Column(Integer, ForeignKey('service_groups.id', ondelete='CASCADE'), nullable=False, comment='程序分类ID')
+    display_order = Column(Integer, default=0, comment='子系统内显示顺序')
     created_at = Column(DateTime, default=datetime.now, comment='创建时间')
 
     # 关系

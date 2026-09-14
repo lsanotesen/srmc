@@ -13,6 +13,11 @@ instance.interceptors.request.use(
     if (token && !config.headers.Authorization) {
       config.headers.Authorization = `Bearer ${token}`
     }
+    // FormData 让 axios 自动设置 multipart/form-data（带 boundary），
+    // 不能手动写 application/json，否则 FastAPI 收不到 file 字段返回 422
+    if (config.data instanceof FormData) {
+      delete config.headers['Content-Type']
+    }
     return config
   },
   error => {

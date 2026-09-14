@@ -1,0 +1,33 @@
+services:
+  srmc-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: srmc-agent:latest
+    container_name: srmc-agent
+    restart: always
+    pid: host
+    network_mode: host
+    privileged: true
+    security_opt:
+      - label=disable
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config.yaml:/etc/srmc-agent/config.yaml:ro
+      - /var/log/srmc-agent:/var/log/srmc-agent
+      - /etc/passwd:/etc/passwd:ro
+      - /etc/shadow:/etc/shadow:ro
+      - /etc/group:/etc/group:ro
+      - /home:/home:ro
+      - /u01:/u01
+      - /u02:/u02
+      - /opt:/opt:ro
+      - /data:/data:ro
+      - /srv:/srv:ro
+      # Agent 部署目录（存放 docker-compose.yml，批量更新时 compose down+up 需要访问）
+      - /etc/srmc-agent:/etc/srmc-agent
+    environment:
+      - SERVER_URL=${SERVER_URL:-wss://srmc.example.com/ws/agent/}
+      - AGENT_TOKEN=${AGENT_TOKEN:-your-token}
+      - TZ=Asia/Shanghai
+      - DOCKER_API_VERSION=1.44

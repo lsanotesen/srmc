@@ -1,3 +1,10 @@
+# 统一进程时区为北京时间(UTC+8)。必须在导入任何使用 datetime 的模块之前执行。
+# 依赖镜像内 tzdata（Dockerfile 已安装）；APScheduler/tzlocal 需要 Continent/City 格式。
+import os as _os
+import time as _time
+_os.environ.setdefault("TZ", "Asia/Shanghai")
+_time.tzset()
+
 from fastapi import FastAPI, Depends, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
@@ -30,6 +37,10 @@ from api.agent import router as agent_router
 from api.organization import router as organization_router
 from api.rbac import router as rbac_router
 from api.project_member import router as project_member_router
+from api.backup import router as backup_router
+from api.dashboard import router as dashboard_router
+from api.agent_update import router as agent_update_router
+from api.agent_deploy import router as agent_deploy_router
 from services.monitor_service import update_all_service_statuses
 from core.database import get_db
 from schemas.common import ResponseModel
@@ -134,6 +145,10 @@ app.include_router(agent_router, prefix="/api", tags=["agents"])
 app.include_router(organization_router, prefix="/api", tags=["organization"])
 app.include_router(rbac_router, prefix="/api/rbac", tags=["rbac"])
 app.include_router(project_member_router, prefix="/api", tags=["project_member"])
+app.include_router(backup_router, prefix="/api", tags=["backup"])
+app.include_router(dashboard_router, prefix="/api", tags=["dashboard"])
+app.include_router(agent_update_router, prefix="/api/agent-update", tags=["agent_update"])
+app.include_router(agent_deploy_router, prefix="/api/agent-deploy", tags=["agent_deploy"])
 
 @app.get("/health")
 async def health_check(db: Session = Depends(get_db)):
@@ -151,11 +166,17 @@ async def startup_event():
 
     # 初始化企业级权限数据
     await init_permission_data()
-    
+
     scheduler = AsyncIOScheduler()
     # 定时任务自己管理数据库连接
     scheduler.add_job(update_all_service_statuses, 'interval', seconds=60, max_instances=1)
     scheduler.start()
+
+    # 数据库备份：初始化默认配置并按配置注册定时任务
+    from services import backup_service
+    backup_service.set_scheduler(scheduler)
+    backup_service.ensure_default_config()
+    backup_service.apply_schedule_from_config()
 
 async def init_service_groups():
     """初始化程序分类（如果不存在则创建）"""

@@ -21,7 +21,7 @@ def init_admin():
             db.execute(
                 text("UPDATE users SET role = :role, is_active = :is_active WHERE id = :user_id"),
                 {
-                    'role': 'ADMIN',
+                    'role': 'SUPER_ADMIN',
                     'is_active': True,
                     'user_id': admin_user.id
                 }
@@ -31,7 +31,7 @@ def init_admin():
             admin_user = User(
                 username='admin',
                 password='$2b$12$KmhZBS0Kfv8fnTic8hWSy.VkXHhxE1J3JNP2HEthl7YSF9JB8lvF2',
-                role='ADMIN',
+                role='SUPER_ADMIN',
                 email='admin@example.com',
                 is_active=True
             )

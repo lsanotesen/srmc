@@ -100,11 +100,9 @@
 
       <el-main class="main-content">
         <router-view v-slot="{ Component }">
-          <transition name="fade" mode="out-in">
-            <keep-alive>
-              <component :is="Component" />
-            </keep-alive>
-          </transition>
+          <keep-alive>
+            <component :is="Component" />
+          </keep-alive>
         </router-view>
       </el-main>
     </el-container>
@@ -152,7 +150,7 @@ const menu = computed(() => {
     return userStore.menu
   }
   return [
-    { id: 'dashboard', name: 'Dashboard', icon: 'dashboard', path: '/dashboard', children: [] },
+    { id: 'overview', name: '运行总览', icon: 'data-analysis', path: '/overview', children: [] },
     {
       id: 'project-services',
       name: '项目服务管理',
@@ -179,6 +177,7 @@ const menu = computed(() => {
       ]
     },
     { id: 'audit', name: '审计日志', icon: 'file-search', path: '/audit', children: [] },
+    { id: 'backup', name: '数据备份', icon: 'box', path: '/backup', children: [] },
     { id: 'settings', name: '系统设置', icon: 'settings', path: '/settings', children: [] }
   ]
 })
@@ -213,6 +212,7 @@ const breadcrumb = computed(() => {
 })
 
 const iconNameMap = {
+  'data-analysis': 'DataAnalysis',
   dashboard: 'DataBoard',
   server: 'Folder',
   cpu: 'Cpu',
@@ -512,20 +512,5 @@ function goToUsageGuide() {
   padding: 24px;
   overflow: auto;
   background: #f1f5f9;
-}
-
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.2s ease, transform 0.2s ease;
-}
-
-.fade-enter-from {
-  opacity: 0;
-  transform: translateY(10px);
-}
-
-.fade-leave-to {
-  opacity: 0;
-  transform: translateY(-10px);
 }
 </style>

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BIGINT, Integer, String, Text, DateTime, ForeignKey, Index
+from sqlalchemy import Column, BIGINT, Integer, String, Text, DateTime, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import relationship
 from core.database import Base
 from datetime import datetime
@@ -10,7 +10,7 @@ class Subsystem(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     project_id = Column(BIGINT, ForeignKey('projects.id', ondelete='CASCADE'), nullable=False, comment='项目ID')
     subsystem_name = Column(String(100), nullable=False, comment='子系统名称')
-    subsystem_code = Column(String(50), nullable=False, unique=True, comment='子系统编码')
+    subsystem_code = Column(String(50), nullable=False, comment='子系统编码（项目内唯一）')
     display_order = Column(Integer, default=0, comment='显示顺序')
     description = Column(Text, comment='描述')
     created_at = Column(DateTime, default=datetime.now, comment='创建时间')
@@ -23,6 +23,7 @@ class Subsystem(Base):
 
     __table_args__ = (
         Index('idx_project_id', 'project_id'),
-        Index('idx_subsystem_code', 'subsystem_code'),
+        # subsystem_code 从全局唯一改为项目内唯一，避免每个项目创建默认子系统时冲突
+        UniqueConstraint('project_id', 'subsystem_code', name='uk_project_subsystem_code'),
         {'comment': '子系统表'}
     )

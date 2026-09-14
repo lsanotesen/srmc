@@ -42,7 +42,7 @@ const prompt = ref('$ ');
 let websocket = null;
 
 const goBack = () => {
-  router.push('/dashboard');
+  router.push('/');
 };
 
 const connect = () => {

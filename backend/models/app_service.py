@@ -70,6 +70,14 @@ class AppService(Base):
     service_group = relationship('ServiceGroup', back_populates='services', lazy='select')
     
     __table_args__ = (
+        # 现有索引
         Index('idx_subsystem_id', 'subsystem_id'),
         Index('idx_group_id', 'group_id'),
+        # 新增：project_id 单列索引（最常用过滤条件，原缺失导致全表扫描）
+        Index('idx_app_service_project_id', 'project_id'),
+        # 新增：复合索引，覆盖"项目→子系统→分组"整条过滤链路（最左前缀原则）
+        Index('idx_app_service_tree', 'project_id', 'subsystem_id', 'group_id'),
+        # 新增：搜索字段索引
+        Index('idx_app_service_ip', 'ip'),
+        Index('idx_app_service_owner', 'owner'),
     )

@@ -20,11 +20,16 @@ func main() {
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Println("Starting SRMC Agent v1.0.0")
+
+	collector.DetectDockerAPIVersion()
 
 	config.Init(*configPath)
+	log.Printf("Starting SRMC Agent v%s", config.GlobalConfig.Deploy.Version)
 	collector.Init()
 	manager.Init()
+
+	// 启动时检查 pending.json：如果存在，先执行 compose up，再注册、再接力上报
+	transport.HandlePendingUpdate()
 
 	log.Printf("Connecting to server: %s", config.GlobalConfig.Server.URL)
 	err := transport.Connect()

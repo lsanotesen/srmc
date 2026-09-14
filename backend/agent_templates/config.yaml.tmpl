@@ -1,0 +1,36 @@
+# ========================================
+# SRMC Agent 配置文件（由 SRMC 批量装机自动生成）
+# ========================================
+
+server:
+  url: "{SERVER_URL}"
+  token: "{AGENT_TOKEN}"
+
+agent:
+  uuid: ""
+  name: "{AGENT_NAME}"
+  ip: "{AGENT_IP}"
+
+collector:
+  interval: 2
+  heartbeat_interval: 5
+
+manager:
+  timeout: 30
+
+docker:
+  socket: "unix:///var/run/docker.sock"
+
+systemd:
+  use_dbus: true
+
+deploy:
+  method: "{DEPLOY_TYPE}"
+  deploy_dir: "{DEPLOY_DIR}"
+  updates_dir: ""
+  backup_dir: ""
+  backup_keep: 2
+  binary_path: ""
+  compose_file: ""
+  service_name: "srmc-agent"
+  version: ""

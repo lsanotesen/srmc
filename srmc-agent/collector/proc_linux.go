@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -112,7 +113,7 @@ func findProcessByCmdline(keyword string) int {
 	} else if strings.HasSuffix(keywordLower, ".sh") {
 		searchKeywords = append(searchKeywords, strings.TrimSuffix(keywordLower, ".sh"))
 	}
-	
+
 	// Read /proc directory
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -149,18 +150,9 @@ func findProcessByCmdline(keyword string) int {
 			continue
 		}
 		
-		// Skip grep, bash, sh, and other shell processes
+		// Skip grep, bash, sh, nohup and other wrapper/shell processes
 		cmdlineLower := strings.ToLower(cmdline)
-		if strings.HasPrefix(cmdlineLower, "grep ") || strings.HasPrefix(cmdlineLower, "/grep ") {
-			continue
-		}
-		if strings.HasPrefix(cmdlineLower, "bash ") || strings.HasPrefix(cmdlineLower, "/bash ") {
-			continue
-		}
-		if strings.HasPrefix(cmdlineLower, "sh ") || strings.HasPrefix(cmdlineLower, "/sh ") {
-			continue
-		}
-		if strings.HasPrefix(cmdlineLower, "nohup ") || strings.HasPrefix(cmdlineLower, "/nohup ") {
+		if isShellOrWrapperProcess(cmdlineLower) {
 			continue
 		}
 		
@@ -180,9 +172,57 @@ func findProcessByCmdline(keyword string) int {
 				}
 			}
 		}
+
+		// For native binary keywords (no suffix), also check the comm name from /proc/{pid}/stat
+		// This catches native binaries like mysqld, redis-server, nginx where cmdline may not contain the full name
+		if !strings.HasSuffix(keywordLower, ".jar") && !strings.HasSuffix(keywordLower, ".py") && !strings.HasSuffix(keywordLower, ".sh") {
+			comm := getProcessComm(pid)
+			if comm != "" && strings.Contains(strings.ToLower(comm), keywordLower) {
+				log.Printf("[DEBUG] findProcessByCmdline: found PID=%d via comm, comm=%s, keyword=%s", pid, comm, keywordLower)
+				return pid
+			}
+		}
 	}
 
 	return 0
+}
+
+// isShellOrWrapperProcess checks if a cmdline is a shell or wrapper process that should be skipped
+func isShellOrWrapperProcess(cmdlineLower string) bool {
+	parts := strings.Fields(cmdlineLower)
+	if len(parts) == 0 {
+		return false
+	}
+	firstArg := parts[0]
+	
+	// Get the basename of the first argument
+	baseName := filepath.Base(firstArg)
+	
+	// Skip shell processes
+	shellBases := map[string]bool{
+		"bash": true, "sh": true, "zsh": true, "ksh": true,
+		"csh": true, "tcsh": true, "dash": true,
+	}
+	if shellBases[baseName] {
+		return true
+	}
+	
+	// Skip grep and other filter processes
+	if baseName == "grep" || baseName == "egrep" || baseName == "fgrep" || baseName == "awk" || baseName == "sed" {
+		return true
+	}
+	
+	// Skip nohup wrapper
+	if baseName == "nohup" {
+		return true
+	}
+	
+	// Skip su/sudo wrappers
+	if baseName == "su" || baseName == "sudo" {
+		return true
+	}
+	
+	return false
 }
 
 // verifyKeywordMatch ensures the keyword matches a meaningful part of the command line
@@ -238,6 +278,28 @@ func getProcessStatus(pid int) string {
 		}
 	}
 	return "unknown"
+}
+
+// getProcessComm reads the command name (comm) from /proc/{pid}/stat
+// Returns the process's executable basename (e.g., "mysqld", "elasticsearch", "java")
+func getProcessComm(pid int) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return ""
+	}
+	content := string(data)
+	// Format: pid (comm) state ...
+	// Find the closing parenthesis
+	closeParen := strings.LastIndex(content, ")")
+	if closeParen == -1 {
+		return ""
+	}
+	// Extract comm (everything between the first "(" and last ")")
+	openParen := strings.Index(content, "(")
+	if openParen == -1 || openParen >= closeParen {
+		return ""
+	}
+	return content[openParen+1 : closeParen]
 }
 
 // getCurrentUptime returns current time in milliseconds (for start time calculation)

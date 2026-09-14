@@ -70,16 +70,23 @@ async def create_subsystem(
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     
-    # 检查编码是否重复
-    existing = db.query(Subsystem).filter(Subsystem.subsystem_code == subsystem_data.subsystem_code).first()
+    # 检查编码在项目内是否重复（subsystem_code 从全局唯一改为项目内唯一）
+    existing = db.query(Subsystem).filter(
+        Subsystem.project_id == subsystem_data.project_id,
+        Subsystem.subsystem_code == subsystem_data.subsystem_code
+    ).first()
     if existing:
-        raise HTTPException(status_code=400, detail="子系统编码已存在")
+        raise HTTPException(status_code=400, detail="该项目下子系统编码已存在")
     
     subsystem = Subsystem(**subsystem_data.model_dump())
     db.add(subsystem)
     db.commit()
     db.refresh(subsystem)
-    
+
+    # 清除项目树缓存
+    from utils.cache import invalidate_projects_tree
+    invalidate_projects_tree()
+
     log_audit(db, user.id, user.username, "SUBSYSTEM_CREATE", result="success", output=f"创建子系统: {subsystem.subsystem_name}")
     return ResponseModel(data=SubsystemResponse.model_validate(subsystem))
 
@@ -95,21 +102,26 @@ async def update_subsystem(
     if not subsystem:
         raise HTTPException(status_code=404, detail="子系统不存在")
     
-    # 检查编码是否重复
+    # 检查编码在项目内是否重复
     if subsystem_data.subsystem_code and subsystem_data.subsystem_code != subsystem.subsystem_code:
         existing = db.query(Subsystem).filter(
+            Subsystem.project_id == subsystem.project_id,
             Subsystem.subsystem_code == subsystem_data.subsystem_code,
             Subsystem.id != subsystem_id
         ).first()
         if existing:
-            raise HTTPException(status_code=400, detail="子系统编码已存在")
+            raise HTTPException(status_code=400, detail="该项目下子系统编码已存在")
     
     for key, value in subsystem_data.model_dump(exclude_unset=True).items():
         setattr(subsystem, key, value)
-    
+
     db.commit()
     db.refresh(subsystem)
-    
+
+    # 清除项目树缓存
+    from utils.cache import invalidate_projects_tree
+    invalidate_projects_tree()
+
     log_audit(db, user.id, user.username, "SUBSYSTEM_UPDATE", result="success", output=f"更新子系统: {subsystem.subsystem_name}")
     return ResponseModel(data=SubsystemResponse.model_validate(subsystem))
 
@@ -126,6 +138,10 @@ async def delete_subsystem(
     
     db.delete(subsystem)
     db.commit()
-    
+
+    # 清除项目树缓存
+    from utils.cache import invalidate_projects_tree
+    invalidate_projects_tree()
+
     log_audit(db, user.id, user.username, "SUBSYSTEM_DELETE", result="success", output=f"删除子系统: {subsystem.subsystem_name}")
     return ResponseModel(message="删除成功")
