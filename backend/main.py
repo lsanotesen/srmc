@@ -161,6 +161,15 @@ async def health_check(db: Session = Depends(get_db)):
 
 @app.on_event("startup")
 async def startup_event():
+    # 显式设置 asyncio 默认线程池大小。
+    # 心跳落库、审计日志等阻塞任务都通过 run_in_executor(None, ...) 走这个池，
+    # 默认大小仅 min(32, CPU+4)，100 台 Agent 心跳并发下会排队。
+    from concurrent.futures import ThreadPoolExecutor
+    from core.config import settings as _settings
+    asyncio.get_running_loop().set_default_executor(
+        ThreadPoolExecutor(max_workers=_settings.BLOCKING_POOL_MAX_WORKERS)
+    )
+
     # 初始化程序分类
     await init_service_groups()
 

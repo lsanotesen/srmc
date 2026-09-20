@@ -7,7 +7,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 # 独立线程池用于端口检测，避免阻塞 event loop
-port_check_executor = ThreadPoolExecutor(max_workers=20)
+port_check_executor = ThreadPoolExecutor(max_workers=settings.PORT_CHECK_MAX_WORKERS)
 
 def _check_port_sync(ip: str, port: int) -> bool:
     """同步端口检测（在线程池中执行，不阻塞 event loop）"""

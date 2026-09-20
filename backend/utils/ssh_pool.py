@@ -5,8 +5,10 @@ import stat
 from core.config import settings
 from concurrent.futures import ThreadPoolExecutor
 
-# 创建线程池，避免阻塞事件循环
-executor = ThreadPoolExecutor(max_workers=10)
+# 创建线程池，避免阻塞事件循环。
+# SSH 连接/执行命令/打开 SFTP 均为阻塞 IO，池子过小会导致慢连接占满线程、
+# 后续请求排队（100 台 Agent 规模下尤其明显），因此大小可配置。
+executor = ThreadPoolExecutor(max_workers=settings.SSH_POOL_MAX_WORKERS)
 
 class SSHConnection:
     def __init__(self, host, port, username, password=None, private_key=None):
@@ -66,11 +68,11 @@ class SSHConnection:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(executor, self._connect_sync)
     
-    async def execute_command(self, command):
-        if not self.client or not self.client.get_transport().is_active():
-            if not await self.connect():
-                return None, None, False
-        
+    def _execute_command_sync(self, command):
+        """同步执行命令，将在线程池中执行。
+        注意：paramiko 的 exec_command / stdout.read 都是阻塞 IO，
+        必须放到线程池，否则会阻塞事件循环，导致所有 HTTP 请求卡住。
+        """
         try:
             stdin, stdout, stderr = self.client.exec_command(command, timeout=settings.SSH_COMMAND_TIMEOUT)
             output = stdout.read().decode('utf-8', errors='ignore')
@@ -79,6 +81,14 @@ class SSHConnection:
             return output, error, True
         except Exception as e:
             return None, str(e), False
+
+    async def execute_command(self, command):
+        if not self.client or not self.client.get_transport().is_active():
+            if not await self.connect():
+                return None, None, False
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(executor, self._execute_command_sync, command)
     
     def _invoke_shell_sync(self, term_type='xterm', width=80, height=24):
         """同步创建shell，将在线程池中执行"""
