@@ -12,11 +12,11 @@
         <el-button v-if="hasPermission('agent:manage')" type="danger" @click="batchControl('stop')" :disabled="!selectedAgents.length">
           批量停止 ({{ selectedAgents.length }})
         </el-button>
-        <el-button v-if="hasPermission('agent:manage')" type="primary" plain @click="openUpdateDialog">
-          批量更新
+        <el-button v-if="hasPermission('agent:manage')" plain :loading="probingArch" @click="probeArch">
+          {{ selectedAgents.length ? `探测架构 (${selectedAgents.length})` : '探测架构' }}
         </el-button>
         <el-button v-if="hasPermission('agent:manage')" type="primary" plain @click="openDeployDialog">
-          批量装机
+          批量部署
         </el-button>
         <el-dropdown v-if="hasPermission('agent:manage')" @command="handleTaskMenu">
           <el-button>
@@ -24,8 +24,7 @@
           </el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="update">批量更新任务</el-dropdown-item>
-              <el-dropdown-item command="deploy">批量装机任务</el-dropdown-item>
+              <el-dropdown-item command="deploy">批量部署任务</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -45,13 +44,15 @@
 
     <div class="table-wrapper">
       <el-table 
+        ref="agentTableRef"
         :data="agents" 
         border 
         fit 
+        row-key="uuid"
         :header-cell-style="{ 'white-space': 'nowrap' }"
         @selection-change="handleSelectionChange"
       >
-        <el-table-column type="selection" width="55" />
+        <el-table-column type="selection" width="55" reserve-selection />
         <el-table-column type="index" label="序号" width="60" />
         <el-table-column prop="hostname" label="主机名" show-overflow-tooltip />
         <el-table-column prop="ip" label="IP地址" width="130" show-overflow-tooltip />
@@ -69,7 +70,7 @@
         </el-table-column>
         <el-table-column label="部署方式" width="110">
           <template #default="scope">
-            <el-tag :type="deployModeTag(scope.row.deploy_types, scope.row.deploy_type)" size="small">{{ deployModeLabel(scope.row.deploy_types, scope.row.deploy_type) }}</el-tag>
+            <el-tag :type="deployModeTag(scope.row.deploy_type)" size="small">{{ deployModeLabel(scope.row.deploy_type) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="CPU" width="75">
@@ -102,9 +103,15 @@
             <span>{{ formatMemory(scope.row.memory_total) }}</span>
           </template>
         </el-table-column>
+        <el-table-column label="架构" width="95" show-overflow-tooltip>
+          <template #default="scope">
+            <el-tag v-if="scope.row.arch" type="info" size="small">{{ formatArch(scope.row.arch) }}</el-tag>
+            <span v-else style="color: #e6a23c;">未知</span>
+          </template>
+        </el-table-column>
         <el-table-column label="Agent版本" width="100" show-overflow-tooltip>
           <template #default="scope">
-            <span>v{{ scope.row.agent_version || '--' }}</span>
+            <span>{{ formatVersion(scope.row.agent_version) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="最后心跳" show-overflow-tooltip>
@@ -149,11 +156,11 @@
           <el-descriptions-item label="IP地址">{{ selectedAgent.ip }}</el-descriptions-item>
           <el-descriptions-item label="操作系统">{{ selectedAgent.os }}</el-descriptions-item>
           <el-descriptions-item label="内核版本">{{ selectedAgent.kernel }}</el-descriptions-item>
-          <el-descriptions-item label="架构">{{ selectedAgent.arch }}</el-descriptions-item>
+          <el-descriptions-item label="架构">{{ formatArch(selectedAgent.arch) || '未知' }}</el-descriptions-item>
           <el-descriptions-item label="CPU型号">{{ selectedAgent.cpu_model }}</el-descriptions-item>
           <el-descriptions-item label="CPU核心">{{ selectedAgent.cpu_cores }}</el-descriptions-item>
           <el-descriptions-item label="内存总量">{{ formatMemory(selectedAgent.memory_total) }}</el-descriptions-item>
-          <el-descriptions-item label="Agent版本">{{ selectedAgent.agent_version }}</el-descriptions-item>
+          <el-descriptions-item label="Agent版本">{{ formatVersion(selectedAgent.agent_version) }}</el-descriptions-item>
           <el-descriptions-item label="状态">
             <el-tag :type="selectedAgent.is_online ? 'success' : 'danger'">
               {{ selectedAgent.is_online ? '在线' : '离线' }}
@@ -231,122 +238,8 @@
       </template>
     </el-dialog>
 
-    <!-- ===== 批量更新弹窗 ===== -->
-    <el-dialog title="Agent 批量更新" v-model="showUpdateDialog" width="800px" @closed="resetUpdateForm">
-      <el-form :model="updateForm" label-width="160px">
-        <el-form-item label="更新类型">
-          <el-radio-group v-model="updateForm.update_type">
-            <el-radio label="docker">Docker 镜像</el-radio>
-            <el-radio label="binary">二进制文件</el-radio>
-          </el-radio-group>
-        </el-form-item>
-
-        <el-form-item label="目标 Agent">
-          <div style="width: 100%;">
-            <div style="margin-bottom: 6px;">
-              <el-button size="small" @click="selectFilteredAgents">全选</el-button>
-              <el-button size="small" @click="updateTargetUuids = []">清空</el-button>
-              <span style="font-size: 12px; color: #909399; margin-left: 8px;">
-                匹配 {{ filteredAgents.length }} / 全部 {{ allAgents.length }} 台
-              </span>
-            </div>
-            <el-select v-model="updateTargetUuids" multiple filterable placeholder="选择目标 Agent" style="width: 100%;">
-              <el-option v-for="a in filteredAgents" :key="a.uuid" :label="`${a.hostname} (${a.ip})`" :value="a.uuid">
-                <span>{{ a.hostname }} ({{ a.ip }})</span>
-                <span style="float: right;"><el-tag :type="deployModeTag(a.deploy_types)" size="small">{{ deployModeLabel(a.deploy_types) }}</el-tag></span>
-              </el-option>
-            </el-select>
-            <el-alert v-if="!filteredAgents.length" type="warning" :closable="false" style="margin-top: 6px;">
-              当前没有与「{{ updateForm.update_type === 'docker' ? 'Docker 镜像' : '二进制文件' }}」匹配的 Agent。
-            </el-alert>
-            <div v-if="updateTargetUuids.length" style="font-size: 12px; color: #909399; margin-top: 6px; word-break: break-all;">
-              已选 {{ updateTargetUuids.length }} 台：{{ targetAgentNames }}
-            </div>
-          </div>
-        </el-form-item>
-
-        <el-form-item label="更新文件">
-          <div style="width: 100%;">
-            <input ref="fileInputRef" type="file" style="display: none;" @change="handleFileSelect" />
-            <el-button @click="fileInputRef?.click()" :disabled="uploading">选择文件并上传</el-button>
-            <div v-if="uploadMeta.file_name" style="margin-top: 8px; font-size: 13px;">
-              {{ uploadMeta.file_name }}（{{ formatBytes(uploadMeta.file_size) }}）
-            </div>
-            <div v-if="uploadMeta.file_sha256" style="font-size: 12px; color: #909399; word-break: break-all; margin-top: 4px;">
-              SHA256: {{ uploadMeta.file_sha256 }}
-            </div>
-            <el-progress v-if="uploading || uploadProgress === 100" :percentage="uploadProgress" style="margin-top: 8px;" />
-          </div>
-        </el-form-item>
-
-        <template v-if="updateForm.update_type === 'docker'">
-          <el-form-item label="版本号">
-            <el-input v-model="updateForm.version" placeholder="例如 v1.0.1" />
-          </el-form-item>
-          <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px;">
-            Docker 更新流程：docker load 载入镜像 → compose down + up -d 重启容器。镜像名由 compose 文件中的 image 字段决定，前端无需指定。
-          </el-alert>
-        </template>
-
-        <template v-else>
-          <el-form-item label="版本号">
-            <el-input v-model="updateForm.version" placeholder="例如 v1.0.1" />
-          </el-form-item>
-          <el-form-item label="更新选项">
-            <el-checkbox v-model="updateForm.backup_before_update">更新前备份旧文件</el-checkbox>
-            <el-checkbox v-model="updateForm.auto_stop_old">自动停止旧程序</el-checkbox>
-            <el-checkbox v-model="updateForm.auto_start_after">更新后自动启动</el-checkbox>
-          </el-form-item>
-          <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px;">
-            二进制文件路径和服务名留空时，自动使用 Agent 自报的部署路径和 systemd 服务名（来自 config.yaml 的 deploy 段）。
-          </el-alert>
-        </template>
-
-        <!-- ===== 高级选项：可选上传 compose/config 文件 ===== -->
-        <el-form-item label="高级配置" style="margin-bottom: 4px;">
-          <el-link type="primary" :underline="false" @click="showAdvancedConfig = !showAdvancedConfig">
-            {{ showAdvancedConfig ? '收起 ▲' : '展开 ▼' }} 可选：同步 compose.yml / config.yaml / srmc-agent.service
-          </el-link>
-        </el-form-item>
-        <template v-if="showAdvancedConfig">
-          <div style="background: #f7f9fc; padding: 12px 14px; border-radius: 6px; margin: 0 0 12px 0;">
-            <el-form-item label="docker-compose.yml" style="margin-bottom: 10px;">
-              <div>
-                <input ref="composeFileRef" type="file" accept=".yml,.yaml" style="display:none" @change="onComposeFileChange" />
-                <el-button size="small" @click="composeFileRef?.click()">选择文件</el-button>
-                <span v-if="extraFiles.compose_name" style="margin-left: 8px; font-size: 12px;">{{ extraFiles.compose_name }}</span>
-                <el-icon v-if="extraFiles.compose_name" style="margin-left: 6px; cursor: pointer; color: #909399;" @click="extraFiles.compose_content = ''; extraFiles.compose_name = ''"><close /></el-icon>
-              </div>
-            </el-form-item>
-            <el-form-item label="config.yaml" style="margin-bottom: 10px;">
-              <div>
-                <input ref="configFileRef" type="file" accept=".yml,.yaml" style="display:none" @change="onConfigFileChange" />
-                <el-button size="small" @click="configFileRef?.click()">选择文件</el-button>
-                <span v-if="extraFiles.config_name" style="margin-left: 8px; font-size: 12px;">{{ extraFiles.config_name }}</span>
-                <el-icon v-if="extraFiles.config_name" style="margin-left: 6px; cursor: pointer; color: #909399;" @click="extraFiles.config_content = ''; extraFiles.config_name = ''"><close /></el-icon>
-                <div v-if="extraFiles.config_name" style="font-size: 12px; color: #67c23a; margin-top: 2px;">Agent 会自动保留 server.url / token / agent.uuid / name / ip / deploy_dir 不被覆盖</div>
-              </div>
-            </el-form-item>
-            <el-form-item v-if="updateForm.update_type === 'binary'" label="srmc-agent.service" style="margin-bottom: 0;">
-              <div>
-                <input ref="serviceFileRef" type="file" accept=".service" style="display:none" @change="onServiceFileChange" />
-                <el-button size="small" @click="serviceFileRef?.click()">选择文件</el-button>
-                <span v-if="extraFiles.service_name" style="margin-left: 8px; font-size: 12px;">{{ extraFiles.service_name }}</span>
-                <el-icon v-if="extraFiles.service_name" style="margin-left: 6px; cursor: pointer; color: #909399;" @click="extraFiles.service_content = ''; extraFiles.service_name = ''"><close /></el-icon>
-              </div>
-            </el-form-item>
-          </div>
-        </template>
-      </el-form>
-
-      <template #footer>
-        <el-button @click="showUpdateDialog = false">取消</el-button>
-        <el-button type="primary" :loading="creatingTask" @click="createUpdateTask">创建更新任务</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- ===== 批量装机弹窗（SSH 推送，适用于首次部署/覆盖安装旧版） ===== -->
-    <el-dialog title="Agent 批量装机（SSH 推送）" v-model="showDeployDialog" width="780px" @closed="resetDeployForm">
+    <!-- ===== 批量部署弹窗（SSH 推送，适用于首次安装/覆盖升级） ===== -->
+    <el-dialog title="Agent 批量部署（SSH 推送）" v-model="showDeployDialog" width="780px" @closed="resetDeployForm">
       <el-form label-width="130px">
         <el-form-item label="安装包">
           <el-select v-model="deployForm.package_id" placeholder="选择已上传的安装包" style="width: 420px;" @change="onPackageSelected">
@@ -356,7 +249,12 @@
                 :key="p.package_id"
                 :label="`${p.version} · ${p.name}（${formatBytes(p.file_size)}）`"
                 :value="p.package_id"
-              />
+              >
+                <span class="pkg-option">
+                  <span class="pkg-option-label">{{ p.version }} · {{ p.name }}（{{ formatBytes(p.file_size) }}）</span>
+                  <el-icon class="pkg-option-del" title="删除该安装包" @click.stop="deletePackage(p)"><Delete /></el-icon>
+                </span>
+              </el-option>
             </el-option-group>
             <el-option-group label="二进制安装包">
               <el-option
@@ -364,7 +262,12 @@
                 :key="p.package_id"
                 :label="`${p.version} · ${p.name}（${formatBytes(p.file_size)}）`"
                 :value="p.package_id"
-              />
+              >
+                <span class="pkg-option">
+                  <span class="pkg-option-label">{{ p.version }} · {{ p.name }}（{{ formatBytes(p.file_size) }}）</span>
+                  <el-icon class="pkg-option-del" title="删除该安装包" @click.stop="deletePackage(p)"><Delete /></el-icon>
+                </span>
+              </el-option>
             </el-option-group>
           </el-select>
           <el-button style="margin-left: 10px;" @click="showPkgUpload = !showPkgUpload">
@@ -436,46 +339,147 @@
           </div>
         </template>
 
-        <el-divider content-position="left">目标主机（需要 root SSH 凭据）</el-divider>
-        <el-form-item label="主机 IP 列表">
-          <el-input
-            v-model="deployForm.hosts_text"
-            type="textarea"
-            :rows="5"
-            placeholder="每行一个 IP，例如：&#10;192.168.12.81&#10;192.168.12.82"
-            style="width: 420px;"
-          />
-          <div style="font-size: 12px; color: #909399; line-height: 1.5; margin-top: 4px; width: 420px;">
-            Agent IP 默认使用 SSH 连接的 IP，无需逐台填写；装机时会自动校验该 IP 是否在目标机网卡上，NAT/多网卡异常会在任务详情中告警。
-          </div>
-        </el-form-item>
-        <el-form-item label="SSH 端口">
-          <el-input-number v-model="deployForm.port" :min="1" :max="65535" controls-position="right" style="width: 160px;" />
-        </el-form-item>
-        <el-form-item label="SSH 用户">
-          <el-input v-model="deployForm.username" placeholder="root" style="width: 200px;" />
-        </el-form-item>
-        <el-form-item label="SSH 密码">
-          <el-input v-model="deployForm.password" type="password" show-password style="width: 200px;" placeholder="root 密码" />
+        <el-divider content-position="left">目标主机</el-divider>
+        <el-form-item label="选择方式">
+          <el-radio-group v-model="deployForm.target_mode">
+            <el-radio label="managed">从已纳管 Agent 选择</el-radio>
+            <el-radio label="manual">手工填写主机</el-radio>
+          </el-radio-group>
         </el-form-item>
 
+        <template v-if="deployForm.target_mode === 'managed'">
+          <el-form-item label="目标 Agent">
+            <div style="width: 100%;">
+              <div style="margin-bottom: 6px;">
+                <span style="font-size: 12px; color: #606266; margin-right: 8px;">架构</span>
+                <el-select v-model="deployArchFilter" size="small" style="width: 140px; margin-right: 12px;">
+                  <el-option label="全部" value="__all__" />
+                  <el-option
+                    v-for="opt in deployArchOptions"
+                    :key="opt.value"
+                    :label="`${opt.label} (${opt.count})`"
+                    :value="opt.value"
+                  />
+                </el-select>
+                <el-button size="small" :disabled="!deployCandidateAgents.length" @click="selectAllCandidates">
+                  全选筛选结果 ({{ deployCandidateAgents.length }})
+                </el-button>
+                <el-button size="small" :disabled="!deployTargetUuids.length" @click="deployTargetUuids = []">清空</el-button>
+                <span style="font-size: 12px; color: #909399; margin-left: 8px;">
+                  共 {{ allAgents.length }} 台，当前安装包类型匹配 {{ deployMatchedAgents.length }} 台
+                </span>
+              </div>
+              <el-select
+                v-model="deployTargetUuids"
+                multiple
+                filterable
+                :placeholder="selectedPackage ? '选择目标 Agent' : '请先选择安装包'"
+                :disabled="!selectedPackage"
+                style="width: 560px;"
+              >
+                <el-option v-for="a in deployCandidateAgents" :key="a.uuid" :label="`${a.hostname} (${a.ip})`" :value="a.uuid">
+                  <span>{{ a.hostname }} ({{ a.ip }})</span>
+                  <span style="float: right; margin-left: 8px;">
+                    <el-tag :type="a.arch ? 'info' : 'warning'" size="small" style="margin-right: 4px;">{{ formatArch(a.arch) || '架构未知' }}</el-tag>
+                    <el-tag :type="deployModeTag(a.deploy_type)" size="small" style="margin-right: 4px;">{{ deployModeLabel(a.deploy_type) }}</el-tag>
+                    <el-tag type="success" size="small">{{ formatVersion(a.agent_version) }}</el-tag>
+                  </span>
+                </el-option>
+              </el-select>
+              <el-alert
+                v-if="selectedPackage && !deployMatchedAgents.length"
+                type="warning"
+                :closable="false"
+                show-icon
+                style="margin-top: 6px; width: 560px;"
+              >
+                没有与当前安装包类型（{{ selectedPackage.package_type === 'docker' ? 'Docker 镜像' : '二进制文件' }}）匹配的 Agent。
+              </el-alert>
+              <div v-if="deployTargetUuids.length" style="font-size: 12px; color: #909399; margin-top: 6px; width: 560px;">
+                已选 {{ deployTargetUuids.length }} 台：{{ deployTargetSummary }}
+              </div>
+              <div style="font-size: 12px; color: #909399; line-height: 1.5; margin-top: 4px; width: 560px;">
+                将复用「服务器管理」中该 IP 已保存的 SSH 凭据，无需重复输入密码。若提示无可用凭据，请先在服务器管理中维护，或改用手工填写。
+              </div>
+            </div>
+          </el-form-item>
+        </template>
+
+        <template v-else>
+          <el-form-item label="主机 IP 列表">
+            <el-input
+              v-model="deployForm.hosts_text"
+              type="textarea"
+              :rows="5"
+              placeholder="每行一个 IP，例如：&#10;192.168.12.81&#10;192.168.12.82"
+              style="width: 420px;"
+            />
+            <div style="font-size: 12px; color: #909399; line-height: 1.5; margin-top: 4px; width: 420px;">
+              Agent IP 默认使用 SSH 连接的 IP，无需逐台填写；部署时会自动校验该 IP 是否在目标机网卡上，NAT/多网卡异常会在任务详情中告警。
+            </div>
+          </el-form-item>
+          <el-form-item label="SSH 端口">
+            <el-input-number v-model="deployForm.port" :min="1" :max="65535" controls-position="right" style="width: 160px;" />
+          </el-form-item>
+          <el-form-item label="SSH 用户">
+            <el-input v-model="deployForm.username" placeholder="root" style="width: 200px;" />
+            <div style="font-size: 12px; color: #909399; margin-left: 8px;">
+              非 root 用户需具备 sudo 权限（免密，或用同一密码提权）
+            </div>
+          </el-form-item>
+          <el-form-item label="SSH 密码">
+            <el-input v-model="deployForm.password" type="password" show-password style="width: 200px;" placeholder="root 密码" />
+          </el-form-item>
+        </template>
+
         <el-alert type="warning" :closable="false" show-icon style="margin: 4px 0 0 130px; max-width: 560px;">
-          将对 {{ deployHostCount }} 台主机通过 SSH 推送安装。Docker 方式执行 docker load + compose up；二进制方式安装 systemd 服务。单台失败不影响其他主机。
+          将对 {{ deployHostCount }} 台主机通过 SSH 推送部署。Docker 方式执行 docker load + compose 重建；二进制方式安装 systemd 服务。单台失败不影响其他主机。
         </el-alert>
       </el-form>
 
       <template #footer>
         <el-button @click="showDeployDialog = false">取消</el-button>
         <el-button type="primary" :loading="creatingDeployTask" @click="createDeployTask">
-          创建装机任务（{{ deployHostCount }} 台）
+          创建部署任务（{{ deployHostCount }} 台）
         </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog title="探测架构结果" v-model="probeResultDialog" width="720px">
+      <el-alert
+        :type="probeResult.failed ? 'warning' : 'success'"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 12px;"
+      >
+        共 {{ probeResult.total }} 台，成功 {{ probeResult.success }} 台，失败 {{ probeResult.failed }} 台
+      </el-alert>
+      <el-table :data="probeResult.results" border size="small" max-height="380" style="width: 100%">
+        <el-table-column prop="hostname" label="主机名" min-width="120" show-overflow-tooltip />
+        <el-table-column prop="ip" label="IP" width="140" show-overflow-tooltip />
+        <el-table-column label="结果" width="80" align="center">
+          <template #default="scope">
+            <el-tag :type="scope.row.success ? 'success' : 'danger'" size="small">
+              {{ scope.row.success ? '成功' : '失败' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="arch" label="架构" width="90" align="center">
+          <template #default="scope">{{ formatArch(scope.row.arch) || '-' }}</template>
+        </el-table-column>
+        <el-table-column prop="message" label="失败原因" min-width="240" show-overflow-tooltip>
+          <template #default="scope">{{ scope.row.message || '-' }}</template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="probeResultDialog = false">关闭</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, reactive } from 'vue'
+import { ref, computed, onMounted, reactive } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import axios from '@/utils/axios'
@@ -494,6 +498,7 @@ const showConfigDialog = ref(false)
 const selectedAgent = ref(null)
 const agentServices = ref([])
 const selectedAgents = ref([])
+const agentTableRef = ref(null)
 const configForm = ref({
   agent_uuid: '',
   hostname: '',
@@ -504,76 +509,62 @@ const configForm = ref({
   service_name: 'srmc-agent'
 })
 
-// ===== 批量更新 =====
-const showUpdateDialog = ref(false)
-const uploading = ref(false)
-const uploadProgress = ref(0)
-const creatingTask = ref(false)
-const updateTargetUuids = ref([])
-const uploadMeta = ref({})
-const fileInputRef = ref(null)
-const showAdvancedConfig = ref(false)
-const composeFileRef = ref(null)
-const configFileRef = ref(null)
-const serviceFileRef = ref(null)
-const extraFiles = reactive({
-  compose_name: '',
-  compose_content: '',
-  config_name: '',
-  config_content: '',
-  service_name: '',
-  service_content: ''
-})
-const updateForm = ref({
-  update_type: 'docker',
-  version: '',
-  backup_before_update: true,
-  auto_stop_old: true,
-  auto_start_after: true
-})
-
-// 把 Agent 的 deploy_types 统计收敛成单一部署方式标签
-// 优先用服务统计（多数决定；相同数量时 Docker 优先），无关联服务时 fallback 到 Agent 自报的 deploy_type
-const deployModeLabel = (dt, agentDeployType) => {
-  if (!dt || typeof dt !== 'object' || Object.keys(dt).length === 0) {
-    // fallback 到 Agent 自报的 deploy_type
-    if (agentDeployType === 'docker') return 'Docker'
-    if (agentDeployType === 'binary') return '二进制'
-    return '无关联'
-  }
-  const docker = (dt.DOCKER || 0) + (dt.DOCKER_COMPOSE || 0)
-  const binary = (dt.HOST || 0) + (dt.HOST_APP || 0) + (dt.PROCESS || 0)
-  if (docker === 0 && binary === 0) {
-    if (agentDeployType === 'docker') return 'Docker'
-    if (agentDeployType === 'binary') return '二进制'
-    return '无关联'
-  }
-  return binary > docker ? '二进制' : 'Docker'
+// Agent 自身的部署方式标签（agents.deploy_type：docker / binary）
+// 注意：这里表示 Agent 自己怎么部署的，决定用 Docker 包还是二进制包更新它；
+// 与「服务管理」里业务服务的部署方式（app_services.deploy_type）是两回事，不要混用。
+const deployModeLabel = (agentDeployType) => {
+  if (agentDeployType === 'docker') return 'Docker'
+  if (agentDeployType === 'binary') return '二进制'
+  return '未知'
 }
-const deployModeTag = (dt, agentDeployType) => {
-  const label = deployModeLabel(dt, agentDeployType)
+const deployModeTag = (agentDeployType) => {
+  const label = deployModeLabel(agentDeployType)
   return label === 'Docker' ? 'warning' : label === '二进制' ? 'primary' : 'info'
 }
 
-// 批量更新弹窗按更新类型过滤 Agent 列表
-const filteredAgents = computed(() => {
-  const t = updateForm.value.update_type
-  if (t === 'docker') return allAgents.value.filter(a => deployModeLabel(a.deploy_types, a.deploy_type) === 'Docker')
-  if (t === 'binary') return allAgents.value.filter(a => deployModeLabel(a.deploy_types, a.deploy_type) === '二进制')
-  return []
-})
+// 版本号统一展示：内部规范形态为 1.0.1，展示时统一补 v 前缀，避免出现 vV1.0.1
+const formatVersion = (v) => {
+  const s = (v || '').trim().replace(/^[vV](?=\d)/, '')
+  return s ? `v${s}` : '--'
+}
 
-// 切换更新类型自动清空已选，防止遗留无效选择
-watch(() => updateForm.value.update_type, () => { updateTargetUuids.value = [] })
+// 架构展示：内部存储为 Go 命名（amd64/arm64），展示时转换为 uname -m 命名
+const ARCH_DISPLAY = { amd64: 'x86_64', arm64: 'aarch64' }
+const formatArch = (v) => {
+  const s = (v || '').trim()
+  if (!s) return ''
+  return ARCH_DISPLAY[s.toLowerCase()] || s
+}
 
-const targetAgentNames = computed(() => {
-  const m = {}
-  allAgents.value.forEach(a => { m[a.uuid] = `${a.hostname} (${a.ip})` })
-  return updateTargetUuids.value.map(u => m[u] || u).join('、')
-})
+// 探测架构：有选中则探选中项，未选中则补录所有架构未知的 Agent
+const probingArch = ref(false)
+const probeResultDialog = ref(false)
+const probeResult = ref({ total: 0, success: 0, failed: 0, results: [] })
 
-const selectFilteredAgents = () => {
-  updateTargetUuids.value = filteredAgents.value.map(a => a.uuid)
+const probeArch = async () => {
+  probingArch.value = true
+  try {
+    const body = selectedAgents.value.length
+      ? { agent_uuids: selectedAgents.value.map(a => a.uuid) }
+      : {}
+    const res = await axios.post('/api/agents/probe-arch', body)
+    const d = res.data?.data || {}
+    if (!d.total) {
+      ElMessage.info('没有需要探测的 Agent（架构均已上报）')
+    } else if (d.failed) {
+      // 有失败时弹出明细，展示每台的失败原因
+      probeResult.value = d
+      probeResultDialog.value = true
+    } else {
+      ElMessage.success(`探测完成：成功 ${d.success} 台`)
+    }
+    await loadAgents()
+    clearSelection()
+  } catch (err) {
+    ElMessage.error(err.response?.data?.message || err.response?.data?.detail || '探测架构失败')
+  } finally {
+    probingArch.value = false
+  }
 }
 
 const loadAgents = async () => {
@@ -639,6 +630,12 @@ const resetFilters = () => {
 
 const handleSelectionChange = (selection) => {
   selectedAgents.value = selection
+}
+
+// 清空表格勾选（reserve-selection 会跨刷新保留，操作完成后需主动清除）
+const clearSelection = () => {
+  agentTableRef.value?.clearSelection()
+  selectedAgents.value = []
 }
 
 const getToken = () => localStorage.getItem('token')
@@ -717,6 +714,7 @@ const batchControl = async (action) => {
         }
       }
       loadAgents()
+      clearSelection()
     } else {
       ElMessage.error(data.message || '批量操作失败')
     }
@@ -873,149 +871,17 @@ const formatBytes = (bytes) => {
   return bytes + ' B'
 }
 
-const openUpdateDialog = () => {
-  updateTargetUuids.value = selectedAgents.value.map(a => a.uuid)
-  showUpdateDialog.value = true
-}
-
-const resetUpdateForm = () => {
-  updateForm.value = {
-    update_type: 'docker',
-    version: '',
-    backup_before_update: true,
-    auto_stop_old: true,
-    auto_start_after: true
-  }
-  uploadMeta.value = {}
-  uploading.value = false
-  uploadProgress.value = 0
-  updateTargetUuids.value = []
-  showAdvancedConfig.value = false
-  Object.assign(extraFiles, { compose_name: '', compose_content: '', config_name: '', config_content: '', service_name: '', service_content: '' })
-}
-
-// 可选文件读取（compose.yml / config.yaml / service）
-const readFileAsText = (file) => new Promise((resolve, reject) => {
-  const reader = new FileReader()
-  reader.onload = () => resolve(reader.result)
-  reader.onerror = reject
-  reader.readAsText(file)
-})
-const onComposeFileChange = async (e) => {
-  const f = e.target.files[0]
-  if (!f) return
-  extraFiles.compose_name = f.name
-  extraFiles.compose_content = await readFileAsText(f)
-}
-const onConfigFileChange = async (e) => {
-  const f = e.target.files[0]
-  if (!f) return
-  extraFiles.config_name = f.name
-  extraFiles.config_content = await readFileAsText(f)
-}
-const onServiceFileChange = async (e) => {
-  const f = e.target.files[0]
-  if (!f) return
-  extraFiles.service_name = f.name
-  extraFiles.service_content = await readFileAsText(f)
-}
-
-const handleFileSelect = async (e) => {
-  const file = e.target.files[0]
-  if (!file) return
-  const formData = new FormData()
-  formData.append('file', file)
-  uploading.value = true
-  uploadProgress.value = 0
-  try {
-    const res = await axios.post('/api/agent-update/files', formData, {
-      timeout: 0,
-      onUploadProgress: (evt) => {
-        if (evt.total) uploadProgress.value = Math.round((evt.loaded / evt.total) * 100)
-      }
-    })
-    if (res.data.code === 0) {
-      uploadMeta.value = res.data.data
-      uploadProgress.value = 100
-      ElMessage.success('上传成功')
-    } else {
-      ElMessage.error(res.data.message || '上传失败')
-    }
-  } catch (err) {
-    ElMessage.error(err.response?.data?.message || '上传失败')
-  } finally {
-    uploading.value = false
-    e.target.value = ''
-  }
-}
-
-const createUpdateTask = async () => {
-  if (!uploadMeta.value.file_ref) {
-    ElMessage.error('请先选择并上传文件')
-    return
-  }
-  if (!updateTargetUuids.value.length) {
-    ElMessage.error('请选择目标 Agent')
-    return
-  }
-  // Docker 模式：无需 image_name/image_tag，Agent 走 compose down + up 自动套用新镜像
-  // 二进制模式：binary_target_path/binary_service_name 留空，由后端用 Agent 自报的 deploy 配置兜底
-
-  const typeLabel = updateForm.value.update_type === 'docker' ? 'Docker 镜像' : '二进制文件'
-  const versionLabel = updateForm.value.version || '-'
-  const names = updateTargetUuids.value.map(u => {
-    const a = allAgents.value.find(x => x.uuid === u)
-    return a ? a.hostname : u
-  }).join('、')
-  try {
-    await ElMessageBox.confirm(
-      `更新类型：${typeLabel}；版本：${versionLabel}；文件：${uploadMeta.value.file_name || '-'}；` +
-      `目标：${updateTargetUuids.value.length} 台（${names}）。确认开始执行？`,
-      '发布确认',
-      { confirmButtonText: '确认执行', cancelButtonText: '取消', type: 'warning' }
-    )
-  } catch (e) {
-    return
-  }
-
-  creatingTask.value = true
-  try {
-    const payload = {
-      file_ref: uploadMeta.value.file_ref,
-      file_name: uploadMeta.value.file_name,
-      update_type: updateForm.value.update_type,
-      version: updateForm.value.version,
-      backup_before_update: updateForm.value.backup_before_update,
-      auto_stop_old: updateForm.value.auto_stop_old,
-      auto_start_after: updateForm.value.auto_start_after,
-      agent_uuids: updateTargetUuids.value,
-      compose_file: extraFiles.compose_content || '',
-      config_file: extraFiles.config_content || '',
-      service_file: extraFiles.service_content || ''
-    }
-    const res = await axios.post('/api/agent-update/tasks', payload)
-    if (res.data.code === 0) {
-      ElMessage.success('任务已创建，正在后台逐台执行')
-      showUpdateDialog.value = false
-      router.push('/agent-update-tasks')
-    } else {
-      ElMessage.error(res.data.message || '创建任务失败')
-    }
-  } catch (err) {
-    ElMessage.error(err.response?.data?.message || '创建任务失败')
-  } finally {
-    creatingTask.value = false
-  }
-}
-
-// ===== 批量装机（SSH 推送） =====
+// ===== 批量部署（SSH 推送） =====
 const showDeployDialog = ref(false)
 const showPkgUpload = ref(false)
 const creatingDeployTask = ref(false)
 const packages = ref([])
+const deployTargetUuids = ref([])
+const deployArchFilter = ref('__all__')
 
 const deployForm = ref({
   package_id: '',
+  target_mode: 'managed',
   deploy_dir: '/etc/srmc-agent',
   server_url: defaultServerUrl(),
   hosts_text: '',
@@ -1061,9 +927,59 @@ const pkgUploadProgress = ref(0)
 const dockerPackages = computed(() => packages.value.filter(p => p.package_type === 'docker'))
 const binaryPackages = computed(() => packages.value.filter(p => p.package_type === 'binary'))
 const selectedPackage = computed(() => packages.value.find(p => p.package_id === deployForm.value.package_id))
-const deployHostCount = computed(() =>
-  deployForm.value.hosts_text.split('\n').map(s => s.trim()).filter(Boolean).length
-)
+const deployHostCount = computed(() => {
+  if (deployForm.value.target_mode === 'managed') return deployTargetUuids.value.length
+  return deployForm.value.hosts_text.split('\n').map(s => s.trim()).filter(Boolean).length
+})
+
+// 已选 Agent 的部署方式汇总，如「Docker 3 台、二进制 2 台」
+const deployTargetSummary = computed(() => {
+  const m = {}
+  allAgents.value
+    .filter(a => deployTargetUuids.value.includes(a.uuid))
+    .forEach(a => {
+      const label = deployModeLabel(a.deploy_type)
+      m[label] = (m[label] || 0) + 1
+    })
+  return Object.entries(m).map(([k, v]) => `${k} ${v} 台`).join('、')
+})
+
+// 与当前安装包类型匹配的 Agent（Docker 包只列 Docker Agent，二进制包只列二进制 Agent）
+// 一次部署只能用一种包，因此从源头过滤，避免选错导致部署失败
+const deployMatchedAgents = computed(() => {
+  const pkg = selectedPackage.value
+  if (!pkg) return []
+  const want = pkg.package_type === 'docker' ? 'Docker' : '二进制'
+  return allAgents.value.filter(a => deployModeLabel(a.deploy_type) === want)
+})
+
+// 架构筛选选项（从匹配的 Agent 中动态统计）
+// 架构未知用 __unknown__ 哨兵值：el-option 的 value 为空串时会被 Element Plus 当作"未选择"
+const ARCH_UNKNOWN = '__unknown__'
+const deployArchOptions = computed(() => {
+  const m = {}
+  deployMatchedAgents.value.forEach(a => {
+    const k = a.arch || ARCH_UNKNOWN
+    m[k] = (m[k] || 0) + 1
+  })
+  return Object.entries(m)
+    .map(([value, count]) => ({ value, label: value === ARCH_UNKNOWN ? '架构未知' : formatArch(value), count }))
+    .sort((x, y) => y.count - x.count)
+})
+
+// 最终候选列表：匹配包类型 + 架构筛选
+// 用 __all__ 哨兵值表示"全部"，避免与"架构未知"冲突
+const deployCandidateAgents = computed(() => {
+  const arch = deployArchFilter.value
+  if (arch === '__all__') return deployMatchedAgents.value
+  if (arch === ARCH_UNKNOWN) return deployMatchedAgents.value.filter(a => !a.arch)
+  return deployMatchedAgents.value.filter(a => a.arch === arch)
+})
+
+// 全选当前筛选结果（替换语义，避免误操作累积）
+const selectAllCandidates = () => {
+  deployTargetUuids.value = deployCandidateAgents.value.map(a => a.uuid)
+}
 
 function defaultServerUrl() {
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
@@ -1076,8 +992,8 @@ function defaultServerUrl() {
   return `${proto}://${window.location.hostname}:8000/api/ws/agent/`
 }
 
-const handleTaskMenu = (cmd) => {
-  router.push(cmd === 'update' ? '/agent-update-tasks' : '/agent-deploy-tasks')
+const handleTaskMenu = () => {
+  router.push('/agent-deploy-tasks')
 }
 
 const loadPackages = async () => {
@@ -1098,6 +1014,7 @@ const openDeployDialog = () => {
 const resetDeployForm = () => {
   deployForm.value = {
     package_id: '',
+    target_mode: 'managed',
     deploy_dir: '/etc/srmc-agent',
     server_url: defaultServerUrl(),
     hosts_text: '',
@@ -1105,6 +1022,8 @@ const resetDeployForm = () => {
     username: 'root',
     password: ''
   }
+  deployTargetUuids.value = []
+  deployArchFilter.value = '__all__'
   showPkgUpload.value = false
   resetPkgForm()
   showDeployAdvanced.value = false
@@ -1118,7 +1037,11 @@ const resetPkgForm = () => {
   if (pkgFileInputRef.value) pkgFileInputRef.value.value = ''
 }
 
-const onPackageSelected = () => {}
+// 切换安装包后，之前选中的 Agent 可能不再匹配新包类型，清空选择与架构筛选
+const onPackageSelected = () => {
+  deployTargetUuids.value = []
+  deployArchFilter.value = '__all__'
+}
 
 const onPkgFileSelected = (e) => {
   const f = e.target.files?.[0]
@@ -1150,6 +1073,9 @@ const uploadPackage = async () => {
       ElMessage.success('安装包上传成功')
       await loadPackages()
       deployForm.value.package_id = res.data.data.package_id
+      // 新包类型可能与之前选中的 Agent 不匹配，清空选择与架构筛选
+      deployTargetUuids.value = []
+      deployArchFilter.value = '__all__'
       resetPkgForm()
       showPkgUpload.value = false
     } else {
@@ -1159,6 +1085,28 @@ const uploadPackage = async () => {
     ElMessage.error(err.response?.data?.detail || err.response?.data?.message || '上传失败')
   } finally {
     pkgUploading.value = false
+  }
+}
+
+const deletePackage = async (pkg) => {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除安装包「${pkg.version} · ${pkg.name}」？服务端文件将一并删除，且不可恢复。`,
+      '删除安装包',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch (e) { return }
+  try {
+    const res = await axios.delete(`/api/agent-deploy/packages/${pkg.package_id}`)
+    if (res.data.code === 0) {
+      ElMessage.success('安装包已删除')
+      if (deployForm.value.package_id === pkg.package_id) deployForm.value.package_id = ''
+      await loadPackages()
+    } else {
+      ElMessage.error(res.data.message || '删除失败')
+    }
+  } catch (err) {
+    ElMessage.error(err.response?.data?.detail || err.response?.data?.message || '删除失败')
   }
 }
 
@@ -1176,39 +1124,53 @@ const createDeployTask = async () => {
     ElMessage.warning('新安装包尚未上传完成，请先点击上传')
     return
   }
-  const ips = deployForm.value.hosts_text.split('\n').map(s => s.trim()).filter(Boolean)
-  if (!ips.length) { ElMessage.warning('请填写至少一个目标主机 IP'); return }
-  if (!deployForm.value.username || !deployForm.value.password) { ElMessage.warning('请填写 SSH 用户和密码'); return }
   if (!deployForm.value.server_url.startsWith('ws')) { ElMessage.warning('后端地址需以 ws:// 或 wss:// 开头'); return }
+
+  const managed = deployForm.value.target_mode === 'managed'
+  let ips = []
+  if (managed) {
+    if (!deployTargetUuids.value.length) { ElMessage.warning('请选择至少一个目标 Agent'); return }
+  } else {
+    ips = deployForm.value.hosts_text.split('\n').map(s => s.trim()).filter(Boolean)
+    if (!ips.length) { ElMessage.warning('请填写至少一个目标主机 IP'); return }
+    if (!deployForm.value.username || !deployForm.value.password) { ElMessage.warning('请填写 SSH 用户和密码'); return }
+  }
 
   const pkg = selectedPackage.value
   const typeLabel = pkg?.package_type === 'docker' ? 'Docker 镜像' : '二进制'
+  const targetDesc = managed
+    ? `${deployTargetUuids.value.length} 台已纳管 Agent（复用服务器管理中的 SSH 凭据）`
+    : `${ips.length} 台主机（手工填写凭据）`
   try {
     await ElMessageBox.confirm(
-      `将向 ${ips.length} 台主机以 ${typeLabel}（${pkg?.version}）方式装机，部署目录 ${deployForm.value.deploy_dir}。确认执行？`,
-      '装机确认',
-      { confirmButtonText: '确认装机', cancelButtonText: '返回', type: 'warning' }
+      `将向 ${targetDesc} 以 ${typeLabel}（${pkg?.version}）方式部署，部署目录 ${deployForm.value.deploy_dir}。确认执行？`,
+      '部署确认',
+      { confirmButtonText: '确认部署', cancelButtonText: '返回', type: 'warning' }
     )
   } catch (e) { return }
 
   creatingDeployTask.value = true
   try {
-    const hosts = ips.map(ip => ({
-      ip,
-      port: deployForm.value.port,
-      username: deployForm.value.username,
-      password: deployForm.value.password
-    }))
-    const res = await axios.post('/api/agent-deploy/tasks', {
+    const payload = {
       package_id: deployForm.value.package_id,
       deploy_dir: deployForm.value.deploy_dir,
       server_url: deployForm.value.server_url,
-      hosts,
       compose_file: deployExtra.compose_content || '',
       config_file: deployExtra.config_content || ''
-    })
+    }
+    if (managed) {
+      payload.agent_uuids = deployTargetUuids.value
+    } else {
+      payload.hosts = ips.map(ip => ({
+        ip,
+        port: deployForm.value.port,
+        username: deployForm.value.username,
+        password: deployForm.value.password
+      }))
+    }
+    const res = await axios.post('/api/agent-deploy/tasks', payload)
     if (res.data.code === 0) {
-      ElMessage.success('装机任务已创建，正在后台逐台执行')
+      ElMessage.success('部署任务已创建，正在后台逐台执行')
       showDeployDialog.value = false
       router.push('/agent-deploy-tasks')
     } else {
@@ -1349,5 +1311,29 @@ onMounted(() => {
 .el-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* 安装包下拉选项：右侧删除图标 */
+.pkg-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.pkg-option-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pkg-option-del {
+  color: #c0c4cc;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.pkg-option-del:hover {
+  color: #f56c6c;
 }
 </style>
