@@ -27,6 +27,7 @@ class AuditLog(Base):
             "BACKUP_CREATE", "BACKUP_RESTORE", "IMPORT_REVERT",
             "AGENT_UPDATE", "AGENT_UPDATE_CANCEL",
             "AGENT_PACKAGE_UPLOAD", "AGENT_PACKAGE_DELETE",
+            "AGENT_UPDATE_PACKAGE_UPLOAD", "AGENT_UPDATE_PACKAGE_DELETE",
             "AGENT_DEPLOY", "AGENT_DEPLOY_CANCEL"
         ),
         nullable=False,

@@ -13,6 +13,8 @@ from services.data_scope_service import DataScopeService
 from utils.redis_client import redis_client
 
 UPLOAD_ROOT = os.environ.get("SRMC_UPDATE_DIR", "/tmp/srmc-updates")
+# 更新包持久化目录（与任务临时目录分开，删除任务不影响包）
+PACKAGE_ROOT = os.environ.get("SRMC_UPDATE_PACKAGE_DIR", os.path.join(UPLOAD_ROOT, "packages"))
 DOWNLOAD_TOKEN_TTL = 24 * 3600  # 下载令牌有效期（秒）
 
 
@@ -20,22 +22,23 @@ def ensure_upload_root():
     os.makedirs(UPLOAD_ROOT, exist_ok=True)
 
 
-def staging_path(file_ref: str) -> str:
-    return os.path.join(UPLOAD_ROOT, f"{file_ref}.bin")
+def ensure_package_root():
+    os.makedirs(PACKAGE_ROOT, exist_ok=True)
 
 
-def sha256_file(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def package_dir(package_id: str) -> str:
+    return os.path.join(PACKAGE_ROOT, package_id)
 
 
-async def save_upload_stream(file, file_ref: str) -> dict:
-    """流式保存上传文件并计算 SHA256，避免一次性读入内存（支持 GB 级镜像）。"""
-    ensure_upload_root()
-    target = staging_path(file_ref)
+def package_file_path(package_id: str, file_name: str) -> str:
+    return os.path.join(package_dir(package_id), file_name)
+
+
+async def save_package_stream(file, package_id: str) -> dict:
+    """流式保存更新包到持久目录并计算 SHA256。"""
+    ensure_package_root()
+    os.makedirs(package_dir(package_id), exist_ok=True)
+    target = package_file_path(package_id, file.filename)
     h = hashlib.sha256()
     size = 0
     try:
@@ -54,20 +57,27 @@ async def save_upload_stream(file, file_ref: str) -> dict:
     return {"file_path": target, "file_size": size, "file_sha256": h.hexdigest()}
 
 
-def move_file_to_task(file_ref: str, task_id: str) -> str:
-    """把暂存文件移动到任务目录，返回最终路径（失败则回落到暂存路径）。"""
-    ensure_upload_root()
-    src = staging_path(file_ref)
-    if not os.path.exists(src):
-        return src
-    task_dir = os.path.join(UPLOAD_ROOT, "tasks", task_id)
-    os.makedirs(task_dir, exist_ok=True)
-    dst = os.path.join(task_dir, os.path.basename(src))
-    try:
-        os.rename(src, dst)
-        return dst
-    except OSError:
-        return src
+def delete_package_files(package_id: str):
+    """删除更新包目录及其文件。"""
+    d = package_dir(package_id)
+    if os.path.isdir(d):
+        for name in os.listdir(d):
+            try:
+                os.unlink(os.path.join(d, name))
+            except OSError:
+                pass
+        try:
+            os.rmdir(d)
+        except OSError:
+            pass
+
+
+def sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def issue_download_token(task_id: str, file_path: str, file_name: str) -> str:

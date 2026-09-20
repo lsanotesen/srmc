@@ -24,6 +24,21 @@ def _scope_server_query(query, user):
     return query.filter(false())
 
 
+def _serialize_server(s: Server) -> dict:
+    """转成可序列化的字典；不含 password / private_key，避免凭据密文外泄。"""
+    return {
+        "id": s.id,
+        "hostname": s.hostname,
+        "ip": s.ip,
+        "ssh_port": s.ssh_port,
+        "username": s.username,
+        "os_type": s.os_type,
+        "organization_id": s.organization_id,
+        "created_at": s.created_at,
+        "updated_at": s.updated_at,
+    }
+
+
 @router.get("/servers", response_model=ResponseModel)
 async def get_servers(
     db: Session = Depends(get_db),
@@ -46,14 +61,17 @@ async def get_servers(
 
     total = query.count()
     servers = query.order_by(Server.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
-    return ResponseModel(data={"items": servers, "total": total, "page": page, "page_size": page_size})
+    return ResponseModel(data={
+        "items": [_serialize_server(s) for s in servers],
+        "total": total, "page": page, "page_size": page_size,
+    })
 
 @router.get("/servers/{server_id}", response_model=ResponseModel)
 async def get_server(server_id: int, db: Session = Depends(get_db), user = Depends(require_permission("service_view"))):
     server = _scope_server_query(db.query(Server), user).filter(Server.id == server_id).first()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
-    return ResponseModel(data=server)
+    return ResponseModel(data=_serialize_server(server))
 
 @router.post("/servers", response_model=ResponseModel)
 async def create_server(server_create: ServerCreate, db: Session = Depends(get_db), user = Depends(require_permission("user_manage"))):
@@ -79,7 +97,7 @@ async def create_server(server_create: ServerCreate, db: Session = Depends(get_d
     
     log_audit(db, user.id, user.username, "CREATE", server_id=server.id, ip=server.ip, result="success")
     
-    return ResponseModel(data=server)
+    return ResponseModel(data=_serialize_server(server))
 
 @router.put("/servers/{server_id}", response_model=ResponseModel)
 async def update_server(server_id: int, server_update: ServerUpdate, db: Session = Depends(get_db), user = Depends(require_permission("user_manage"))):
@@ -99,7 +117,7 @@ async def update_server(server_id: int, server_update: ServerUpdate, db: Session
     
     log_audit(db, user.id, user.username, "UPDATE", server_id=server.id, ip=server.ip, result="success")
     
-    return ResponseModel(data=server)
+    return ResponseModel(data=_serialize_server(server))
 
 @router.delete("/servers/{server_id}", response_model=ResponseModel)
 async def delete_server(server_id: int, db: Session = Depends(get_db), user = Depends(require_permission("user_manage"))):

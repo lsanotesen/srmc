@@ -9,6 +9,7 @@ import (
 	"srmc-agent/config"
 	"srmc-agent/collector"
 	"srmc-agent/manager"
+	"sync"
 	"time"
 )
 
@@ -78,6 +79,54 @@ var reconnectCount int
 var maxReconnectAttempts = 30
 var reconnectDelay = time.Second
 
+// 注册确认：后端收到 register 后会回 pull_services，收到即视为注册成功。
+// 若超时未收到则重发 register，避免首次注册消息丢失导致长时间离线。
+var registerAcked bool
+var registerAckMu sync.Mutex
+
+const (
+	registerAckTimeout  = 10 * time.Second
+	registerMaxAttempts = 6
+)
+
+func markRegisterAcked() {
+	registerAckMu.Lock()
+	registerAcked = true
+	registerAckMu.Unlock()
+}
+
+func isRegisterAcked() bool {
+	registerAckMu.Lock()
+	defer registerAckMu.Unlock()
+	return registerAcked
+}
+
+// SendRegistrationWithRetry 发送注册并在超时未收到后端响应时重发。
+func SendRegistrationWithRetry() {
+	registerAckMu.Lock()
+	registerAcked = false
+	registerAckMu.Unlock()
+
+	for i := 1; i <= registerMaxAttempts; i++ {
+		if err := SendRegistration(); err != nil {
+			log.Printf("[REGISTER] send failed (attempt %d/%d): %v", i, registerMaxAttempts, err)
+		} else {
+			log.Printf("[REGISTER] sent (attempt %d/%d)", i, registerMaxAttempts)
+		}
+
+		deadline := time.Now().Add(registerAckTimeout)
+		for time.Now().Before(deadline) {
+			if isRegisterAcked() {
+				log.Printf("[REGISTER] acknowledged by server")
+				return
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		log.Printf("[REGISTER] no ack within %v, retrying", registerAckTimeout)
+	}
+	log.Printf("[REGISTER] gave up after %d attempts, waiting for reconnect", registerMaxAttempts)
+}
+
 func Connect() error {
 	u, _ := url.Parse(config.GlobalConfig.Server.URL)
 	u.Path += config.AgentUUID
@@ -126,6 +175,8 @@ func handleMessage(msg Message) {
 
 	switch msg.Type {
 	case "pull_services":
+		// 后端收到 register 后会下发 pull_services，视为注册确认
+		markRegisterAcked()
 		handlePullServices(msg)
 	case "services":
 		handleServices(msg)
@@ -184,6 +235,7 @@ func handleServices(msg Message) {
 		RestartCmd:  toString(svcMap["restart_cmd"]),
 		LogPath:     toString(svcMap["log_path"]),
 		DockerName:  toString(svcMap["docker_name"]),
+		ImageName:   toString(svcMap["image_name"]),
 		ComposePath: toString(svcMap["compose_path"]),
 	})
 	}
@@ -341,7 +393,7 @@ func handleUpdate(msg Message) {
 }
 
 // SendUpdateProgress 上报批量更新进度。
-func SendUpdateProgress(taskID, step, status string, progress int, errMsg string) {
+func SendUpdateProgress(taskID, step, status string, progress int, errMsg string) error {
 	msg := Message{
 		Type: "update_progress",
 		Data: map[string]interface{}{
@@ -354,7 +406,9 @@ func SendUpdateProgress(taskID, step, status string, progress int, errMsg string
 	}
 	if err := SendMessage(msg); err != nil {
 		log.Printf("[UPDATE] send update_progress failed: %v", err)
+		return err
 	}
+	return nil
 }
 
 // buildDownloadURL 由 server.url 推导后端 HTTP 下载地址（ws->http, wss->https）。
@@ -413,7 +467,7 @@ func SendRegistration() error {
 		IP:            metrics.IP,
 		OS:            metrics.OS,
 		Kernel:        metrics.Kernel,
-		Arch:          "",
+		Arch:          metrics.Arch,
 		CPUModel:      metrics.CPUModel,
 		CPUCores:      metrics.CPUCores,
 		MemoryTotal:   metrics.MemoryTotal,
@@ -460,49 +514,57 @@ func SendHeartbeat(metrics collector.SystemMetrics, services []collector.Service
 
 func reconnect() {
 	reconnectCount++
-	if reconnectCount > maxReconnectAttempts {
-		log.Fatalf("Max reconnect attempts reached")
+	// 不设放弃上限：Agent 必须长期在线，后端重启/网络抖动后要能自愈。
+	// 早期版本在超过 maxReconnectAttempts 时 log.Fatalf 退出进程，
+	// 导致后端重启后 Agent 永久离线，只能人工重启。
+	if reconnectCount%maxReconnectAttempts == 0 {
+		log.Printf("Reconnect attempts reached %d, keep retrying (backoff capped at 30s)", reconnectCount)
 	}
 
-	log.Printf("Reconnecting in %v (attempt %d/%d)", reconnectDelay, reconnectCount, maxReconnectAttempts)
+	log.Printf("Reconnecting in %v (attempt %d)", reconnectDelay, reconnectCount)
 	time.Sleep(reconnectDelay)
 
+	// 退避上限 30s：过长会导致注册失败后要等数分钟才恢复在线
 	reconnectDelay = time.Duration(float64(reconnectDelay) * 1.5)
-	if reconnectDelay > 5*time.Minute {
-		reconnectDelay = 5 * time.Minute
+	if reconnectDelay > 30*time.Second {
+		reconnectDelay = 30 * time.Second
 	}
 
 	if err := Connect(); err != nil {
 		log.Printf("Reconnect failed: %v", err)
-		reconnect()
+		// 清空残留的 broken 连接，避免后续逻辑误判为"已连接"
+		conn = nil
+		// 交给 ReconnectLoop 继续重试，避免递归叠加 reconnectCount
+		go ReconnectLoop()
+		return
 	}
 
 	log.Printf("Reconnected successfully")
-	SendRegistration()
+	go SendRegistrationWithRetry()
 }
 
 func ReconnectLoop() {
 	for {
-		if conn == nil {
-			log.Printf("Attempting to connect...")
-			if err := Connect(); err != nil {
-				log.Printf("Connect failed: %v", err)
-				time.Sleep(reconnectDelay)
-				reconnectDelay = time.Duration(float64(reconnectDelay) * 1.5)
-				if reconnectDelay > 30*time.Second {
-					reconnectDelay = 30 * time.Second
-				}
-			} else {
-				log.Printf("Connected successfully")
-				reconnectDelay = time.Second
-				reconnectCount = 0
-				time.Sleep(2 * time.Second)
-				SendRegistration()
-				return
+		// 注意：不能用 conn == nil 判断是否需要重连。
+		// Connect() 失败时不会清空 conn，残留的旧连接（已 broken）会让
+		// 这里误判为"已连接"而直接 return，导致 Agent 永久离线。
+		// 因此这里无条件重试，直到 Connect() 成功为止。
+		log.Printf("Attempting to connect...")
+		if err := Connect(); err != nil {
+			log.Printf("Connect failed: %v", err)
+			time.Sleep(reconnectDelay)
+			reconnectDelay = time.Duration(float64(reconnectDelay) * 1.5)
+			if reconnectDelay > 30*time.Second {
+				reconnectDelay = 30 * time.Second
 			}
-		} else {
-			return
+			continue
 		}
+		log.Printf("Connected successfully")
+		reconnectDelay = time.Second
+		reconnectCount = 0
+		time.Sleep(2 * time.Second)
+		go SendRegistrationWithRetry()
+		return
 	}
 }
 
@@ -514,7 +576,7 @@ func Close() {
 
 // HandlePendingUpdate 启动时检查 pending.json：
 // 1. 如果存在且 compose 还没 up → 执行 compose up
-// 2. 连接建立后 → 主动上报 update_progress success → 清 pending
+// 2. 连接建立并注册成功后 → 主动上报 update_progress success → 清 pending
 // 避免 compose down 杀掉容器后 up 还没执行（自杀悖论）。
 func HandlePendingUpdate() {
 	// Step 1: 执行 compose up（如果还没 up）
@@ -523,21 +585,28 @@ func HandlePendingUpdate() {
 		return
 	}
 
-	// Step 2: 等连接建立后主动上报 success
+	// Step 2: 等连接建立且注册完成后再上报 success
 	go func() {
-		// 等连接就绪（最多 60s）
-		for i := 0; i < 30; i++ {
-			time.Sleep(2 * time.Second)
-			if conn != nil {
+		// 等注册确认（最多 120s）：仅 conn != nil 不够，此时可能尚未注册成功，
+		// 上报会因连接未就绪而静默失败，导致任务永远卡在 95%
+		for i := 0; i < 240; i++ {
+			if conn != nil && isRegisterAcked() {
 				break
 			}
+			time.Sleep(500 * time.Millisecond)
 		}
 
-		// 上报 success
-		SendUpdateProgress(pending.TaskID, "接力完成", "success", 100, "")
-		log.Printf("[PENDING] reported success for task=%s version=%s", pending.TaskID, pending.Version)
-
-		// 清理 pending.json + tar
-		manager.RemovePendingFile()
+		// 上报 success，失败则重试，成功后才清理 pending
+		for i := 1; i <= 10; i++ {
+			if err := SendUpdateProgress(pending.TaskID, "接力完成", "success", 100, ""); err == nil {
+				log.Printf("[PENDING] reported success for task=%s version=%s", pending.TaskID, pending.Version)
+				manager.RemovePendingFile()
+				return
+			} else {
+				log.Printf("[PENDING] report success failed (attempt %d/10): %v", i, err)
+			}
+			time.Sleep(3 * time.Second)
+		}
+		log.Printf("[PENDING] gave up reporting success for task=%s, pending kept for next restart", pending.TaskID)
 	}()
 }

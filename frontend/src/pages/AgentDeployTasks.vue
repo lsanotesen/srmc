@@ -1,7 +1,7 @@
 <template>
   <div class="deploy-tasks-page">
     <div class="page-header">
-      <h1>批量装机任务</h1>
+      <h1>批量部署任务</h1>
       <div class="actions">
         <el-button
           type="danger"
@@ -82,7 +82,7 @@
       </el-table>
     </div>
 
-    <el-dialog title="装机任务详情" v-model="showDetail" width="1000px">
+    <el-dialog title="部署任务详情" v-model="showDetail" width="1000px">
       <div v-if="currentTask" class="task-meta">
         <el-descriptions :column="3" border size="small">
           <el-descriptions-item label="任务ID">{{ currentTask.task_id }}</el-descriptions-item>
@@ -112,6 +112,38 @@
         <el-table-column prop="error_message" label="错误信息" min-width="200" show-overflow-tooltip />
       </el-table>
     </el-dialog>
+
+    <el-dialog title="重试失败主机" v-model="showRetryDialog" width="880px">
+      <div style="margin-bottom: 10px; color: #909399; font-size: 12px; line-height: 1.6;">
+        仅重试失败/已取消/已跳过的主机，已成功的不受影响。可逐台修改 SSH 用户与密码（各主机可不同，本任务只需填这一次）；
+        密码留空则使用任务创建时保存的密码。非 root 用户会自动尝试 sudo 提权（复用该登录密码）。
+      </div>
+      <el-table :data="retryItems" border size="small">
+        <el-table-column prop="host" label="主机IP" width="130" show-overflow-tooltip />
+        <el-table-column prop="port" label="端口" width="70" />
+        <el-table-column label="SSH 用户" width="160">
+          <template #default="scope">
+            <el-input v-model="scope.row.ssh_username" size="small" placeholder="root" />
+          </template>
+        </el-table-column>
+        <el-table-column label="SSH 密码" min-width="220">
+          <template #default="scope">
+            <el-input
+              v-model="scope.row.new_password"
+              type="password"
+              show-password
+              size="small"
+              placeholder="留空则使用已保存的密码"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column prop="error_message" label="上次错误" min-width="180" show-overflow-tooltip />
+      </el-table>
+      <template #footer>
+        <el-button @click="showRetryDialog = false">取消</el-button>
+        <el-button type="warning" :loading="retrying" @click="submitRetry">确认重试</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -126,6 +158,10 @@ const showDetail = ref(false)
 const currentTask = ref(null)
 const detailItems = ref([])
 const detailLoading = ref(false)
+const showRetryDialog = ref(false)
+const retryRow = ref(null)
+const retryItems = ref([])
+const retrying = ref(false)
 let timer = null
 
 const typeLabel = (t) => (t === 'docker' ? 'Docker' : '二进制')
@@ -168,10 +204,10 @@ const loadTasks = async () => {
     if (res.data.code === 0) {
       tasks.value = res.data.data || []
     } else {
-      ElMessage.error(res.data.message || '加载装机任务列表失败')
+      ElMessage.error(res.data.message || '加载部署任务列表失败')
     }
   } catch (err) {
-    ElMessage.error('加载装机任务列表失败')
+    ElMessage.error('加载部署任务列表失败')
   }
 }
 
@@ -182,7 +218,7 @@ const handleSelectionChange = (rows) => { selectedTasks.value = rows }
 const deleteTask = async (row) => {
   try {
     await ElMessageBox.confirm(
-      `确定删除装机任务 ${row.task_id} 吗？将同时删除其全部主机明细，此操作不可恢复。`,
+      `确定删除部署任务 ${row.task_id} 吗？将同时删除其全部主机明细，此操作不可恢复。`,
       '删除确认',
       { confirmButtonText: '确认删除', cancelButtonText: '返回', type: 'warning' }
     )
@@ -210,7 +246,7 @@ const batchDeleteTasks = async () => {
   if (!ids.length) return
   try {
     await ElMessageBox.confirm(
-      `确定删除选中的 ${ids.length} 个装机任务吗？将同时删除全部主机明细，此操作不可恢复。`,
+      `确定删除选中的 ${ids.length} 个部署任务吗？将同时删除全部主机明细，此操作不可恢复。`,
       '批量删除确认',
       { confirmButtonText: '确认删除', cancelButtonText: '返回', type: 'warning' }
     )
@@ -259,7 +295,7 @@ const openDetail = (row) => {
 const cancelTask = async (row) => {
   try {
     await ElMessageBox.confirm(
-      `确定取消装机任务 ${row.task_id} 吗？未开始的主机将被标记为已取消，进行中的主机无法中断。`,
+      `确定取消部署任务 ${row.task_id} 吗？未开始的主机将被标记为已取消，进行中的主机无法中断。`,
       '取消确认',
       { confirmButtonText: '确定取消', cancelButtonText: '返回', type: 'warning' }
     )
@@ -280,72 +316,52 @@ const cancelTask = async (row) => {
 }
 
 const retryTask = async (row) => {
-  const failedCount = row.failed_count + row.cancelled_count
-  // 先确认重试范围（一个任务共用一套 SSH 凭据，50 台也只需输一次）
+  retryRow.value = row
   try {
-    await ElMessageBox.confirm(
-      `将重试 ${failedCount} 台失败/取消的主机（已成功的保持不变）。确认重试？`,
-      '重试确认',
-      { confirmButtonText: '确认重试', cancelButtonText: '返回', type: 'warning' }
-    )
-  } catch (e) {
-    return
-  }
-
-  // 先尝试不带密码直接重试（新任务密码已持久化，无需输入）
-  try {
-    const res = await axios.post(`/api/agent-deploy/tasks/${row.task_id}/retry`, {})
-    if (res.data.code === 0) {
-      ElMessage.success(res.data.message || '重试任务已提交')
-      loadTasks()
-      if (showDetail.value && currentTask.value?.task_id === row.task_id) {
-        loadDetail(row.task_id)
-      }
+    const res = await axios.get(`/api/agent-deploy/tasks/${row.task_id}`)
+    if (res.data.code !== 0) {
+      ElMessage.error(res.data.message || '加载任务详情失败')
       return
     }
+    const items = (res.data.data?.items || []).filter(i => ['failed', 'skipped', 'cancelled'].includes(i.status))
+    if (!items.length) {
+      ElMessage.warning('没有可重试的主机（全部成功）')
+      return
+    }
+    retryItems.value = items.map(i => ({ ...i, new_password: '' }))
+    showRetryDialog.value = true
   } catch (err) {
-    const detail = err.response?.data?.detail || ''
-    // 仅当后端明确提示密码缺失（旧任务密码曾被清除）时，才弹框补输一次
-    if (!detail.includes('密码')) {
-      ElMessage.error(detail || '重试失败')
-      return
-    }
-    // 落到下面的密码输入流程
+    ElMessage.error(err.response?.data?.detail || '加载任务详情失败')
   }
+}
 
-  // 补输 SSH 密码（一次输入，应用到本任务所有待重试主机）
-  let sshPassword = ''
+// 逐台提交：各主机可填不同用户名/密码；密码留空则沿用已保存的密码
+const submitRetry = async () => {
+  retrying.value = true
   try {
-    const { value } = await ElMessageBox.prompt(
-      '该任务的 SSH 密码此前已被清除，请重新输入 root SSH 密码（本任务所有主机共用，只需输入一次）：',
-      '补输 SSH 密码',
-      {
-        confirmButtonText: '确认重试',
-        cancelButtonText: '返回',
-        inputType: 'password',
-        inputPlaceholder: 'root SSH 密码',
-        inputValidator: (v) => (v && v.trim() ? true : '请输入 SSH 密码'),
-      }
+    const credentials = retryItems.value.map(i => ({
+      id: i.id,
+      ssh_username: (i.ssh_username || '').trim(),
+      ssh_password: i.new_password || '',
+    }))
+    const res = await axios.post(
+      `/api/agent-deploy/tasks/${retryRow.value.task_id}/retry`,
+      { credentials }
     )
-    sshPassword = (value || '').trim()
-  } catch (e) {
-    return
-  }
-  try {
-    const res = await axios.post(`/api/agent-deploy/tasks/${row.task_id}/retry`, {
-      ssh_password: sshPassword,
-    })
     if (res.data.code === 0) {
       ElMessage.success(res.data.message || '重试任务已提交')
+      showRetryDialog.value = false
       loadTasks()
-      if (showDetail.value && currentTask.value?.task_id === row.task_id) {
-        loadDetail(row.task_id)
+      if (showDetail.value && currentTask.value?.task_id === retryRow.value.task_id) {
+        loadDetail(retryRow.value.task_id)
       }
     } else {
       ElMessage.error(res.data.message || '重试失败')
     }
   } catch (err) {
     ElMessage.error(err.response?.data?.detail || '重试失败')
+  } finally {
+    retrying.value = false
   }
 }
 

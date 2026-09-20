@@ -20,7 +20,3 @@ chmod +x output/srmc-agent-linux-amd64
 echo "Done! Binary is at output/srmc-agent-linux-amd64"
 echo "File size:"
 ls -lh output/srmc-agent-linux-amd64
-echo ""
-echo "To deploy to 192.168.12.195:"
-echo "  scp output/srmc-agent-linux-amd64 user@192.168.12.195:/usr/local/bin/srmc-agent"
-echo "  ssh user@192.168.12.195 'systemctl restart srmc-agent'"

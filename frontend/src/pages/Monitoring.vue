@@ -603,7 +603,16 @@ const pagedServices = computed(() => {
 })
 
 // ===== 方法 =====
-const statusLabel = (st) => ({ RUNNING: '运行中', STOPPED: '已停止', ERROR: '异常', UNKNOWN: '未知' }[st] || st || '未知')
+const statusLabel = (st) => ({
+  RUNNING: '运行中',
+  COMPLETED: '已完成',
+  INACTIVE: '未启用/已停止',
+  STOPPED: '已停止',
+  PARTIAL: '部分运行',
+  ERROR: '异常',
+  FAILED: '异常',
+  UNKNOWN: '未知',
+}[st] || st || '未知')
 const fmtCpu = (v) => v != null ? v.toFixed(1) + '%' : '-'
 const fmtMem = (v) => v != null ? (v >= 1024 ? (v/1024).toFixed(1)+'GB' : v.toFixed(0)+'MB') : '-'
 const fmtUptime = (s) => {
@@ -1041,7 +1050,10 @@ onUnmounted(() => {
 
 .st-pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
 .st-pill.running { background: rgba(16,185,129,.08); color: #10b981; }
+.st-pill.completed { background: rgba(16,185,129,.08); color: #10b981; }
+.st-pill.inactive { background: rgba(148,163,184,.12); color: #64748b; }
 .st-pill.stopped { background: rgba(239,68,68,.08); color: #ef4444; }
+.st-pill.partial { background: rgba(245,158,11,.08); color: #f59e0b; }
 .st-pill.unknown { background: rgba(245,158,11,.08); color: #f59e0b; }
 .st-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .st-pill.running .st-dot { animation: st-p 2s infinite; }

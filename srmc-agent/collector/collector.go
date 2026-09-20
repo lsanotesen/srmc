@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +37,7 @@ type ServiceConfig struct {
 	RestartCmd  string `json:"restart_cmd"`
 	LogPath     string `json:"log_path"`
 	DockerName  string `json:"docker_name"`
+	ImageName   string `json:"image_name"`
 	ComposePath string `json:"compose_path"`
 	ProgramPath string `json:"program_path"`
 }
@@ -53,13 +55,14 @@ type ServiceStatus struct {
 
 // ContainerDetail 描述 Docker Compose 服务下单个容器的状态
 type ContainerDetail struct {
-	ID      string `json:"id"`       // 容器 ID（短）
-	Name    string `json:"name"`     // 容器名称
-	State   string `json:"state"`    // 容器状态（running/exited/dead/paused/restarting）
-	Status  string `json:"status"`   // 人类可读状态（如 Up 2 hours、Exited (0) 5 minutes ago）
-	Image   string `json:"image"`    // 镜像名称
-	Ports   string `json:"ports"`    // 端口映射
-	Running bool   `json:"running"`  // 是否运行中
+	ID       string `json:"id"`        // 容器 ID（短）
+	Name     string `json:"name"`      // 容器名称
+	State    string `json:"state"`     // 容器状态（running/exited/dead/paused/restarting）
+	Status   string `json:"status"`    // 人类可读状态（如 Up 2 hours、Exited (0) 5 minutes ago）
+	Image    string `json:"image"`     // 镜像名称
+	Ports    string `json:"ports"`     // 端口映射
+	Running  bool   `json:"running"`   // 是否运行中
+	ExitCode int    `json:"exit_code"` // 退出码（仅 exited 时有意义；-1 表示未知）
 }
 
 type SystemMetrics struct {
@@ -75,6 +78,7 @@ type SystemMetrics struct {
 	IP            string  `json:"ip"`
 	OS            string  `json:"os"`
 	Kernel        string  `json:"kernel"`
+	Arch          string  `json:"arch"`
 	CPUModel      string  `json:"cpu_model"`
 	CPUCores      int     `json:"cpu_cores"`
 	MemoryTotal   uint64  `json:"memory_total"`
@@ -190,6 +194,7 @@ func CollectSystemMetrics() SystemMetrics {
 		IP:            ip,
 		OS:            hostInfo.OS,
 		Kernel:        hostInfo.KernelVersion,
+		Arch:          runtime.GOARCH,
 		MemoryTotal:   memInfo.Total,
 	}
 
@@ -428,6 +433,17 @@ func collectDockerStatus(svc ServiceConfig) ServiceStatus {
 	container, err := inspectContainer(svc.DockerName)
 	if err != nil {
 		status.Status = "Stopped"
+		// 容器不存在（未启动/已 rm）时，用配置里的 DockerName 构造占位行，
+		// 让前端容器列表仍能显示该容器并设置运行类型（如 inactive）。
+		// DockerName 是管理员在服务配置里手工填写的，无需推算，零猜测风险。
+		status.Containers = []ContainerDetail{{
+			Name:     svc.DockerName,
+			State:    "created",
+			Status:   "created",
+			Image:    svc.ImageName,
+			Running:  false,
+			ExitCode: -1,
+		}}
 		return status
 	}
 
@@ -518,6 +534,11 @@ func collectComposeStatus(svc ServiceConfig) ServiceStatus {
 
 	log.Printf("[DEBUG] collectComposeStatus: found %d containers", len(containers))
 
+	// 补充"已定义但未创建容器"的服务：整个 Compose 从未启动（或已 down）时，
+	// docker ps -a 一个容器都查不到，前端容器列表为空，无法设置运行类型。
+	// 用 docker-compose config 解析出定义的服务名，补占位行。
+	containers = appendDefinedComposeServices(composeFile, containers)
+
 	status.Containers = containers
 	totalCount := len(containers)
 	runningCount := 0
@@ -542,20 +563,126 @@ func collectComposeStatus(svc ServiceConfig) ServiceStatus {
 	return status
 }
 
+// appendDefinedComposeServices 解析 compose 文件中定义的服务，把尚无对应容器的服务
+// 以占位行（state=created）补进列表，使前端在服务未启动时也能设置运行类型。
+//
+// 容器名解析规则：
+//   - YAML 显式写了 container_name → 直接使用（准确）
+//   - 未写 → 按 compose 默认规则 <项目名>-<服务名>-1 推算
+//
+// 解析失败时静默返回原列表，不影响既有采集逻辑。
+func appendDefinedComposeServices(composeFile string, existing []ContainerDetail) []ContainerDetail {
+	// 已有容器名集合，用于去重
+	known := make(map[string]bool, len(existing))
+	for _, c := range existing {
+		known[c.Name] = true
+	}
+
+	// docker-compose config 输出解析后的完整配置（含 container_name 与项目名）
+	out, err := runDockerCmd([]string{"docker-compose", "-f", composeFile, "config"})
+	if err != nil {
+		// 兼容 docker compose（v2 插件形式）
+		out, err = runDockerCmd([]string{"docker", "compose", "-f", composeFile, "config"})
+		if err != nil {
+			log.Printf("[DEBUG] appendDefinedComposeServices: config failed: %v", err)
+			return existing
+		}
+	}
+
+	projectName := ""
+	serviceNames := []string{}
+	containerNames := map[string]string{} // service -> container_name（仅显式声明）
+
+	lines := strings.Split(string(out), "\n")
+	inServices := false
+	curService := ""
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+
+		// 顶层 name: <项目名>
+		if indent == 0 && strings.HasPrefix(trimmed, "name:") {
+			projectName = strings.TrimSpace(strings.TrimPrefix(trimmed, "name:"))
+			continue
+		}
+		// 顶层 services:
+		if indent == 0 && trimmed == "services:" {
+			inServices = true
+			continue
+		}
+		// 离开 services 段（其他顶层键）
+		if indent == 0 && inServices {
+			inServices = false
+			continue
+		}
+		if !inServices {
+			continue
+		}
+		// 二级缩进：服务名
+		if indent == 2 && strings.HasSuffix(trimmed, ":") {
+			curService = strings.TrimSuffix(trimmed, ":")
+			serviceNames = append(serviceNames, curService)
+			continue
+		}
+		// 三级缩进：container_name
+		if indent >= 4 && curService != "" && strings.HasPrefix(trimmed, "container_name:") {
+			containerNames[curService] = strings.TrimSpace(strings.TrimPrefix(trimmed, "container_name:"))
+		}
+	}
+
+	if len(serviceNames) == 0 {
+		return existing
+	}
+
+	added := 0
+	for _, svc := range serviceNames {
+		name := containerNames[svc]
+		if name == "" {
+			// 未显式声明 container_name，按 compose 默认规则推算
+			if projectName == "" {
+				projectName = filepath.Base(filepath.Dir(composeFile))
+			}
+			name = fmt.Sprintf("%s-%s-1", projectName, svc)
+		}
+		if known[name] {
+			continue
+		}
+		known[name] = true
+		existing = append(existing, ContainerDetail{
+			Name:     name,
+			State:    "created",
+			Status:   "created",
+			Running:  false,
+			ExitCode: -1,
+		})
+		added++
+	}
+
+	if added > 0 {
+		log.Printf("[DEBUG] appendDefinedComposeServices: added %d defined-but-not-created containers", added)
+	}
+	return existing
+}
+
 // listContainersByComposeFile 用 docker ps --filter --format 一次拿全所有容器信息。
 // 通过 compose 文件的绝对路径做 label 过滤（com.docker.compose.project.config_files），
 // 全局唯一，不受目录同名影响。不调用 docker compose ps，绕过 yml 解析和项目名匹配问题。
 // 输出格式用管道符分隔字段，避免容器名/状态里包含空格导致解析错误。
 func listContainersByComposeFile(composeFile string) ([]ContainerDetail, error) {
 	// docker ps --format 模板：
-	//   ID|Name|State|Image|Ports|RunningSince
+	//   ID|Name|State|Image|Ports|RunningFor|ExitCode
 	// - .ID: 短 ID（12 位）
 	// - .Names: 容器名（多个用逗号分隔，但 compose 容器一般只有一个名）
 	// - .State: 容器状态（running/exited/paused/restarting/dead）
 	// - .Image: 镜像名
 	// - .Ports: 端口映射（与 docker ps 显示一致，如 0.0.0.0:9013->8080/tcp）
 	// - .RunningFor: 人类可读的运行时间（如 "Up 2 hours"），用于 Status 字段
+	// - .Label "com.docker.compose.project.config_files": 用于按 compose 文件过滤
 	// 注意：.Ports 在容器未运行时可能为空，需要单独处理
+	// exit_code 不在 docker ps 中，需对非 running 容器单独 inspect 获取
 	format := "{{.ID}}|{{.Names}}|{{.State}}|{{.Image}}|{{.Ports}}|{{.RunningFor}}"
 	filter := fmt.Sprintf("label=com.docker.compose.project.config_files=%s", composeFile)
 
@@ -611,18 +738,42 @@ func listContainersByComposeFile(composeFile string) ([]ContainerDetail, error) 
 		// restarting 状态不算运行中（容器正在尝试重启，但未正常工作）
 		running := state == "running"
 
+		// 退出码：仅对非 running 容器查询（running 容器无退出码，置 -1）
+		exitCode := -1
+		if !running {
+			exitCode = getContainerExitCode(id)
+		}
+
 		containers = append(containers, ContainerDetail{
-			ID:      id,
-			Name:    name,
-			State:   state,
-			Status:  humanStatus,
-			Image:   image,
-			Ports:   ports,
-			Running: running,
+			ID:       id,
+			Name:     name,
+			State:    state,
+			Status:   humanStatus,
+			Image:    image,
+			Ports:    ports,
+			Running:  running,
+			ExitCode: exitCode,
 		})
 	}
 
 	return containers, nil
+}
+
+// getContainerExitCode 查询容器退出码；查询失败返回 -1（未知）。
+func getContainerExitCode(containerIDOrName string) int {
+	out, err := runDockerCmd([]string{"docker", "inspect", "-f", "{{.State.ExitCode}}", containerIDOrName})
+	if err != nil {
+		return -1
+	}
+	s := strings.TrimSpace(string(out))
+	if s == "" {
+		return -1
+	}
+	code, err := strconv.Atoi(s)
+	if err != nil {
+		return -1
+	}
+	return code
 }
 
 // runDockerCmd 执行 docker 命令，当遇到 API 版本不匹配错误时自动降级重试。
@@ -674,14 +825,21 @@ func inspectContainer(containerIDOrName string) (ContainerDetail, error) {
 	// restarting 状态下 .State.Running 可能为 true（Docker 正在尝试重启），但容器并未正常工作
 	running := state == "running"
 
+	// 退出码：仅对非 running 容器查询（running 容器无退出码，置 -1）
+	exitCode := -1
+	if !running {
+		exitCode = getContainerExitCode(containerIDOrName)
+	}
+
 	return ContainerDetail{
-		ID:      truncateID(fullID),
-		Name:    name,
-		State:   state,
-		Status:  humanStatus,
-		Image:   image,
-		Ports:   ports,
-		Running: running,
+		ID:       truncateID(fullID),
+		Name:     name,
+		State:    state,
+		Status:   humanStatus,
+		Image:    image,
+		Ports:    ports,
+		Running:  running,
+		ExitCode: exitCode,
 	}, nil
 }
 

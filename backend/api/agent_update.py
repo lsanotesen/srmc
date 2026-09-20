@@ -4,18 +4,19 @@ import os
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Body
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Body
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from core.database import get_db, SessionLocal
 from core.config import settings
 from models.agent import Agent
-from models.agent_update import AgentUpdateTask, AgentUpdateTaskItem
+from models.agent_update import AgentUpdateTask, AgentUpdateTaskItem, AgentUpdatePackage
 from schemas.common import ResponseModel
 from api.dependencies import require_permission
 from api.agent import manager
 from services.audit_service import log_audit
+from utils.version import normalize_version
 import services.agent_update_service as aus
 
 router = APIRouter()
@@ -24,24 +25,77 @@ _run_semaphore = asyncio.Semaphore(settings.BATCH_MAX_WORKERS)
 _running_tasks: dict = {}
 
 
-# ==================== 文件上传 ====================
+# ==================== 更新包管理 ====================
 
-@router.post("/files")
-async def upload_update_file(
+@router.post("/packages")
+async def upload_update_package(
     file: UploadFile = File(...),
+    update_type: str = Form(...),
+    version: str = Form(""),
+    name: str = Form(""),
+    description: str = Form(""),
+    db: Session = Depends(get_db),
     user=Depends(require_permission("agent_manage")),
 ):
-    """流式上传更新文件（Docker tar / 二进制），返回暂存引用与 SHA256。"""
+    """上传 Agent 更新包（Docker 镜像 tar / 二进制文件），持久保留可复用。"""
+    if update_type not in ("docker", "binary"):
+        raise HTTPException(status_code=400, detail="update_type 必须为 docker 或 binary")
     if not file.filename:
         raise HTTPException(status_code=400, detail="缺少文件名")
-    file_ref = uuid.uuid4().hex
-    meta = await aus.save_upload_stream(file, file_ref)
-    return ResponseModel(data={
-        "file_ref": file_ref,
-        "file_name": file.filename,
-        "file_size": meta["file_size"],
-        "file_sha256": meta["file_sha256"],
-    }, message="上传成功")
+
+    package_id = uuid.uuid4().hex
+    meta = await aus.save_package_stream(file, package_id)
+
+    pkg = AgentUpdatePackage(
+        package_id=package_id,
+        name=(name or file.filename)[:128],
+        update_type=update_type,
+        version=normalize_version(version) if version.strip() else None,
+        file_name=file.filename,
+        file_path=meta["file_path"],
+        file_size=meta["file_size"],
+        file_sha256=meta["file_sha256"],
+        description=(description or "")[:500],
+        created_by=user.username,
+        created_at=datetime.now(),
+    )
+    db.add(pkg)
+    db.commit()
+
+    log_audit(db, user.id, user.username, "AGENT_UPDATE_PACKAGE_UPLOAD",
+              result="success",
+              output=f"上传Agent更新包 type={update_type} version={version} size={meta['file_size']}")
+    return ResponseModel(data=_serialize_package(pkg), message="更新包上传成功")
+
+
+@router.get("/packages")
+async def list_update_packages(
+    update_type: str = "",
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("agent_manage")),
+):
+    q = db.query(AgentUpdatePackage)
+    if update_type in ("docker", "binary"):
+        q = q.filter(AgentUpdatePackage.update_type == update_type)
+    pkgs = q.order_by(AgentUpdatePackage.created_at.desc()).all()
+    return ResponseModel(data=[_serialize_package(p) for p in pkgs])
+
+
+@router.delete("/packages/{package_id}")
+async def delete_update_package(
+    package_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("agent_manage")),
+):
+    pkg = db.query(AgentUpdatePackage).filter(AgentUpdatePackage.package_id == package_id).first()
+    if not pkg:
+        raise HTTPException(status_code=404, detail="更新包不存在")
+    db.delete(pkg)
+    db.commit()
+    aus.delete_package_files(package_id)
+    log_audit(db, user.id, user.username, "AGENT_UPDATE_PACKAGE_DELETE",
+              result="success", output=f"删除Agent更新包 {package_id} version={pkg.version}")
+    return ResponseModel(message="更新包已删除")
 
 
 # ==================== 任务管理 ====================
@@ -52,21 +106,33 @@ async def create_update_task(
     db: Session = Depends(get_db),
     user=Depends(require_permission("agent_manage")),
 ):
-    """创建批量更新任务并启动后台执行。"""
-    file_ref = payload.get("file_ref")
+    """创建批量更新任务并启动后台执行。复用已上传的更新包（package_id）。"""
+    package_id = payload.get("package_id")
     update_type = payload.get("update_type")
     agent_uuids = payload.get("agent_uuids", [])
 
-    if not file_ref:
-        raise HTTPException(status_code=400, detail="缺少文件引用 file_ref")
+    if not package_id:
+        raise HTTPException(status_code=400, detail="缺少更新包 package_id")
     if update_type not in ("docker", "binary"):
         raise HTTPException(status_code=400, detail="update_type 必须为 docker 或 binary")
     if not agent_uuids:
         raise HTTPException(status_code=400, detail="未选择目标 Agent")
 
-    staging = aus.staging_path(file_ref)
+    pkg = db.query(AgentUpdatePackage).filter(
+        AgentUpdatePackage.package_id == package_id
+    ).first()
+    if not pkg:
+        raise HTTPException(status_code=404, detail="更新包不存在")
+    if pkg.update_type != update_type:
+        raise HTTPException(status_code=400, detail="更新包类型与所选更新类型不一致")
+
+    staging = pkg.file_path
+    file_name = pkg.file_name
+    file_size = pkg.file_size
+    file_sha256 = pkg.file_sha256
+
     if not os.path.exists(staging):
-        raise HTTPException(status_code=404, detail="上传文件已失效，请重新上传")
+        raise HTTPException(status_code=404, detail="更新包文件已丢失，请重新上传")
 
     # 权限：校验目标 Agent 均在当前用户可见范围内
     visible = aus.get_visible_agent_uuids(db, user)
@@ -83,17 +149,18 @@ async def create_update_task(
         raise HTTPException(status_code=400, detail="所选 Agent 不存在")
 
     task_id = uuid.uuid4().hex
-    file_sha256 = aus.sha256_file(staging)
-    file_path = aus.move_file_to_task(file_ref, task_id)
+    # 直接引用更新包内文件，不移动（包需长期保留供后续复用）
+    file_path = staging
 
     task = AgentUpdateTask(
         task_id=task_id,
         update_type=update_type,
-        file_name=payload.get("file_name") or "update.bin",
+        file_name=file_name,
         file_path=file_path,
-        file_size=os.path.getsize(file_path),
+        file_size=file_size,
         file_sha256=file_sha256,
-        version=payload.get("version") or "",
+        # 版本以更新包为准，避免前端传参与包记录不一致
+        version=pkg.version or normalize_version(payload.get("version")),
         image_name=payload.get("image_name") or "",
         image_tag=payload.get("image_tag") or "",
         container_name=payload.get("container_name") or "",
@@ -162,14 +229,17 @@ async def _run_update_task(task_id: str):
                 .all()
             )
 
-            for item in items:
+            for idx, item in enumerate(items):
                 # 每次循环开始结束当前事务，读取最新任务状态（取消检测）与 Agent 在线状态
                 db.rollback()
                 task = db.query(AgentUpdateTask).filter(AgentUpdateTask.task_id == task_id).first()
                 if task and task.status == "cancelled":
-                    aus.update_item_progress(db, task_id, item.agent_uuid,
-                                             step="任务已取消", status="cancelled")
-                    continue
+                    # 任务已取消：把本台及后续所有未开始的明细标记取消，并终止整个循环
+                    for rest in items[idx:]:
+                        if rest.status in ("waiting", "running"):
+                            aus.update_item_progress(db, task_id, rest.agent_uuid,
+                                                     step="任务已取消", status="cancelled")
+                    break
 
                 agent = db.query(Agent).filter(Agent.uuid == item.agent_uuid).first()
                 if not agent or not manager.is_online(agent.uuid, agent.last_heartbeat):
@@ -265,7 +335,7 @@ async def _wait_item_terminal(db: Session, task_id: str, agent_uuid: str, timeou
                 task = db2.query(AgentUpdateTask).filter(AgentUpdateTask.task_id == task_id).first()
                 agent = db2.query(Agent).filter(Agent.uuid == agent_uuid).first()
                 if task and agent and task.version and agent.agent_version:
-                    if task.version == agent.agent_version and agent_manager.is_online(agent_uuid, agent.last_heartbeat):
+                    if normalize_version(task.version) == normalize_version(agent.agent_version) and agent_manager.is_online(agent_uuid, agent.last_heartbeat):
                         aus.update_item_progress(db2, task_id, agent_uuid,
                                                  step="重连+版本匹配", status="success", progress=100,
                                                  error="Agent 重连后版本号与目标版本一致，判更新成功")
@@ -408,6 +478,67 @@ async def retry_update_task(
     return ResponseModel(message=f"已提交 {retry_count} 台 Agent 的重试任务")
 
 
+@router.post("/tasks/batch-delete")
+async def batch_delete_update_tasks(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("agent_manage")),
+):
+    """批量删除更新任务（连同 Agent 明细一起删）。执行中的任务需先取消。"""
+    task_ids = payload.get("task_ids") or []
+    if not isinstance(task_ids, list) or not task_ids:
+        raise HTTPException(status_code=400, detail="未选择要删除的任务")
+
+    tasks = (
+        db.query(AgentUpdateTask)
+        .filter(AgentUpdateTask.task_id.in_(task_ids))
+        .all()
+    )
+    running = [t.task_id for t in tasks if t.status in ("waiting", "running")]
+    if running:
+        raise HTTPException(
+            status_code=400,
+            detail=f"有 {len(running)} 个任务正在执行，请先取消再删除",
+        )
+
+    deleted = 0
+    for t in tasks:
+        db.query(AgentUpdateTaskItem).filter(
+            AgentUpdateTaskItem.task_id == t.task_id
+        ).delete(synchronize_session=False)
+        db.delete(t)
+        deleted += 1
+    db.commit()
+
+    log_audit(db, user.id, user.username, "DELETE",
+              result="success", output=f"删除批量更新任务 {deleted} 个")
+    return ResponseModel(message=f"已删除 {deleted} 个更新任务")
+
+
+@router.delete("/tasks/{task_id}")
+async def delete_update_task(
+    task_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("agent_manage")),
+):
+    """删除单个更新任务（连同 Agent 明细一起删）。执行中的任务需先取消。"""
+    task = db.query(AgentUpdateTask).filter(AgentUpdateTask.task_id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.status in ("waiting", "running"):
+        raise HTTPException(status_code=400, detail="任务正在执行，请先取消再删除")
+
+    db.query(AgentUpdateTaskItem).filter(
+        AgentUpdateTaskItem.task_id == task_id
+    ).delete(synchronize_session=False)
+    db.delete(task)
+    db.commit()
+
+    log_audit(db, user.id, user.username, "DELETE",
+              result="success", output=f"删除批量更新任务 task_id={task_id}")
+    return ResponseModel(message="任务已删除")
+
+
 # ==================== Agent 拉取文件 ====================
 
 @router.get("/files/{token}")
@@ -427,6 +558,21 @@ async def download_update_file(token: str):
 
 
 # ==================== 序列化 ====================
+
+def _serialize_package(p: AgentUpdatePackage) -> dict:
+    return {
+        "package_id": p.package_id,
+        "name": p.name,
+        "update_type": p.update_type,
+        "version": p.version,
+        "file_name": p.file_name,
+        "file_size": p.file_size,
+        "file_sha256": p.file_sha256,
+        "description": p.description,
+        "created_by": p.created_by,
+        "created_at": p.created_at,
+    }
+
 
 def _serialize_task(t: AgentUpdateTask) -> dict:
     return {

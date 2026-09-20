@@ -38,7 +38,7 @@ func main() {
 		go transport.ReconnectLoop()
 	} else {
 		time.Sleep(2 * time.Second)
-		transport.SendRegistration()
+		go transport.SendRegistrationWithRetry()
 	}
 
 	go heartbeatLoop()

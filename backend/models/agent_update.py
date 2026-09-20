@@ -1,7 +1,30 @@
-"""Agent 批量更新任务模型：任务主表 + 每台 Agent 执行明细"""
+"""Agent 批量更新任务模型：更新包 + 任务主表 + 每台 Agent 执行明细"""
 from sqlalchemy import Column, BIGINT, INT, VARCHAR, TEXT, DATETIME, Index
 from sqlalchemy.dialects.mysql import ENUM
 from core.database import Base
+
+
+class AgentUpdatePackage(Base):
+    """Agent 更新包（Docker 镜像 tar / 二进制文件），上传后持久保留可复用"""
+    __tablename__ = 'agent_update_packages'
+
+    id = Column(BIGINT, primary_key=True, autoincrement=True)
+    package_id = Column(VARCHAR(36), unique=True, nullable=False, index=True, comment='包ID(UUID)')
+    name = Column(VARCHAR(128), nullable=False, comment='包名称')
+    update_type = Column(ENUM('docker', 'binary'), nullable=False, comment='更新类型')
+    version = Column(VARCHAR(64), comment='版本号/镜像Tag')
+    file_name = Column(VARCHAR(255), nullable=False, comment='原始文件名')
+    file_path = Column(VARCHAR(500), nullable=False, comment='服务端存储路径')
+    file_size = Column(BIGINT, default=0, comment='文件大小(bytes)')
+    file_sha256 = Column(VARCHAR(64), nullable=False, comment='文件SHA256')
+    description = Column(VARCHAR(500), comment='说明')
+    created_by = Column(VARCHAR(64))
+    created_at = Column(DATETIME)
+
+    __table_args__ = (
+        Index('idx_aup_type_version', 'update_type', 'version'),
+        {'comment': 'Agent更新包'},
+    )
 
 
 class AgentUpdateTask(Base):

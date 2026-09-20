@@ -118,7 +118,7 @@ async def dashboard_overview(
         for a in db.query(Agent).filter(Agent.uuid.in_(agent_uuids)).all():
             agents[a.uuid] = a
 
-    running = stopped = unknown = 0
+    running = stopped = unknown = inactive = 0
     agent_offline_count = 0
 
     for svc in services:
@@ -129,6 +129,9 @@ async def dashboard_overview(
             running += 1
         elif st == "STOPPED":
             stopped += 1
+        elif st in ("INACTIVE", "COMPLETED"):
+            # 未启用/停止 与 一次性任务已完成 都是预期状态，不计入异常/未知
+            inactive += 1
         else:
             unknown += 1
 
@@ -143,6 +146,7 @@ async def dashboard_overview(
         "serviceCount": len(services),
         "runningCount": running,
         "stoppedCount": stopped,
+        "inactiveCount": inactive,
         "agentOfflineCount": agent_offline_count,
         "unknownCount": unknown,
     })
@@ -188,6 +192,7 @@ async def dashboard_projects(
                 "serviceCount": 0,
                 "runningCount": 0,
                 "stoppedCount": 0,
+                "inactiveCount": 0,
                 "agentOfflineCount": 0,
                 "unknownCount": 0,
             }
@@ -199,6 +204,9 @@ async def dashboard_projects(
             ps["runningCount"] += 1
         elif st == "STOPPED":
             ps["stoppedCount"] += 1
+        elif st in ("INACTIVE", "COMPLETED"):
+            # 未启用/停止 与 一次性任务已完成 都是预期状态，不计入异常/未知
+            ps["inactiveCount"] += 1
         else:
             ps["unknownCount"] += 1
 

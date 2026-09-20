@@ -59,6 +59,27 @@ def main():
             ))
             print("Added uq_servers_ip_org (ip, organization_id)")
 
+        # 4. 存量数据回填：历史 servers 记录没有组织归属（organization_id IS NULL），
+        #    按隔离逻辑普通用户将看不到，统一归属到默认组织
+        #    （优先 code='DEFAULT'，否则取最小组织ID兜底）
+        default_org = conn.execute(text(
+            "SELECT id FROM organizations WHERE code = 'DEFAULT' ORDER BY id LIMIT 1"
+        )).fetchone()
+        if not default_org:
+            default_org = conn.execute(text(
+                "SELECT id FROM organizations ORDER BY id LIMIT 1"
+            )).fetchone()
+        if default_org:
+            result = conn.execute(text(
+                "UPDATE servers SET organization_id = :org WHERE organization_id IS NULL"
+            ), {"org": default_org[0]})
+            if result.rowcount:
+                print(f"Backfilled {result.rowcount} legacy servers to organization_id={default_org[0]}")
+            else:
+                print("No legacy servers to backfill")
+        else:
+            print("No organization found, skip backfill")
+
         conn.commit()
 
     print("Migration 0018 completed")

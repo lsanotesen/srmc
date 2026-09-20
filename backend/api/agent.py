@@ -6,11 +6,13 @@ from starlette.websockets import WebSocket as StarletteWebSocket
 from core.database import get_db
 from models.agent import Agent
 from models.app_service import AppService
+from models.service_container_config import ServiceContainerConfig
 from schemas.common import ResponseModel
 from utils.redis_client import redis_client
 from utils.ssh_pool import ssh_pool
 from core.config import settings
-from api.dependencies import get_current_user
+from api.dependencies import get_current_user, require_permission
+import services.container_status_service as container_status_service
 import json
 import asyncio
 from datetime import datetime
@@ -447,8 +449,9 @@ async def handle_register(message: dict, agent_uuid: str, db: Session):
                         db.commit()
                         print(f"Updated {len(services)} services from {old_uuid} to {agent_uuid}")
                     print(f"Reused agent {old_uuid} -> {agent_uuid} for IP {ip} (was {existing_agent.status})")
-                else:
-                    agent = existing_agent
+                # 无论 UUID 是否变化，都要把 agent 指向复用的记录，
+                # 否则后续 agent.hostname 赋值会因 agent 为 None 抛异常导致注册失败
+                agent = existing_agent
             else:
                 # 新 IP，创建新 Agent
                 agent = Agent(uuid=agent_uuid)
@@ -495,9 +498,12 @@ async def handle_register(message: dict, agent_uuid: str, db: Session):
     print(f"Agent registered: {agent_uuid} - {agent.hostname} ({agent.ip})")
     
     if agent.ip:
+        # 自动关联：把该 IP 上尚未关联 Agent 的服务挂到本 Agent 名下。
+        # 注意这里只处理"未关联"的服务，已关联到其他 Agent 的服务不动
+        # （服务可能部署在 Agent 管理的其他机器上，不能按 IP 强行改绑）。
         services_to_associate = db.query(AppService).filter(
             AppService.ip == agent.ip,
-            (AppService.agent_uuid == "") | (AppService.agent_uuid == None) | (AppService.agent_uuid != agent_uuid)
+            (AppService.agent_uuid == "") | (AppService.agent_uuid == None)
         ).all()
         
         if services_to_associate:
@@ -518,7 +524,45 @@ async def handle_register(message: dict, agent_uuid: str, db: Session):
     }
     await manager.send_message(agent_uuid, pull_message)
 
+def _load_run_mode_map(db: Session, services: list) -> dict:
+    """批量加载本次心跳涉及服务的容器运行类型配置。
+
+    返回 {service_id(str): {container_name: run_mode}}。
+    无配置的容器不在 map 中，由领域层按默认值 permanent 处理。
+    """
+    result = {}
+    try:
+        service_ids = []
+        for s in services:
+            sid = s.get('service_id')
+            if sid:
+                try:
+                    service_ids.append(int(sid))
+                except (TypeError, ValueError):
+                    continue
+        if not service_ids:
+            return result
+        rows = (
+            db.query(ServiceContainerConfig)
+            .filter(ServiceContainerConfig.service_id.in_(service_ids))
+            .all()
+        )
+        for r in rows:
+            result.setdefault(str(r.service_id), {})[r.container_name] = r.run_mode
+    except Exception as e:
+        print(f"Load run_mode map error: {e}")
+    return result
+
+
 async def handle_heartbeat(message: dict, agent_uuid: str, db: Session):
+    # 心跳处理包含同步 DB 查询与 Redis 写入，21 台 Agent 每 15s 一次，
+    # 若直接在事件循环里执行会周期性阻塞所有 HTTP 请求（表现为页面偶发卡顿）。
+    # 因此整体丢到线程池执行，事件循环只负责 await。
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _handle_heartbeat_sync, message, agent_uuid, db)
+
+
+def _handle_heartbeat_sync(message: dict, agent_uuid: str, db: Session):
     data = message.get('data', {})
     heartbeat = data.get('heartbeat', {})
     
@@ -534,6 +578,9 @@ async def handle_heartbeat(message: dict, agent_uuid: str, db: Session):
     compose_projects = heartbeat.get('compose_projects', [])
     
     try:
+        # 一次性任务/常驻服务的运行类型配置（容器级），用于业务状态计算
+        run_mode_map = _load_run_mode_map(db, services)
+
         for service_status in services:
             service_id = service_status.get('service_id')
             if service_id:
@@ -543,10 +590,26 @@ async def handle_heartbeat(message: dict, agent_uuid: str, db: Session):
                 containers = service_status.get('containers', [])
                 redis_key = f"service_status:{service_id}"
                 source_key = f"service_status_source:{service_id}"
+
+                # 有容器明细时，由后端领域层按 run_mode + Docker 实际状态重算业务状态，
+                # 覆盖 Agent 端基于"存在 Exited 即 Partial"的粗判，
+                # 避免一次性任务正常退出（exited+0）被误判为部分运行/异常。
+                if containers:
+                    biz_status = container_status_service.compute_service_status(
+                        containers, run_mode_map.get(str(service_id), {})
+                    )
+                    status = biz_status
+                else:
+                    # 无容器服务（物理机 HOST/PROCESS）：按服务级默认运行类型计算，
+                    # inactive 时未运行属预期状态，不告警。
+                    svc_mode_map = run_mode_map.get(str(service_id), {})
+                    svc_mode = container_status_service.resolve_run_mode(svc_mode_map, None)
+                    status = container_status_service.compute_host_service_status(status, svc_mode)
+
                 # 缓存 TTL 60s，是心跳间隔 15s 的 4 倍，容忍心跳延迟
                 redis_client.set(redis_key, status, ex=60)
                 redis_client.set(source_key, "AGENT", ex=60)
-                # 存储容器详情，用于 Docker Compose 服务的 Partial 状态展示
+                # 存储容器详情，用于 Docker Compose 服务的容器列表展示
                 if containers:
                     redis_client.set(
                         f"service_containers:{service_id}",
@@ -591,7 +654,12 @@ async def handle_pull_services(message: dict, agent_uuid: str, db: Session):
         print(f"Agent not found: {agent_uuid}")
         return
     
-    services = db.query(AppService).filter(AppService.ip == agent.ip).all()
+    # 按 agent_uuid 关联取服务，与注册自动关联、Agent 详情等处的口径保持一致。
+    # 不能用 AppService.ip == agent.ip：agent.ip 是 Agent 自身所在机器的 IP，
+    # 而服务可能部署在 Agent 管理的其他机器上（服务 IP 与 Agent IP 不同），
+    # 用 IP 过滤会漏掉这些服务，导致 Agent 内存里始终是旧的服务列表
+    # （改了 program_path 等配置后不生效，日志里还在报旧路径找不到 compose 文件）。
+    services = db.query(AppService).filter(AppService.agent_uuid == agent_uuid).all()
     
     service_list = []
     for service in services:
@@ -620,6 +688,7 @@ async def handle_pull_services(message: dict, agent_uuid: str, db: Session):
             "restart_cmd": "",
             "log_path": service.log_path,
             "docker_name": service.container_name,
+            "image_name": service.image_name,
             "compose_path": service.program_path,
             "program_path": service.program_path,
         })
@@ -666,54 +735,120 @@ async def debug_all_status(user = Depends(get_current_user)):
 
 # ==================== Agent 控制 API ====================
 
-async def control_agent_process(agent: Agent, action: str) -> dict:
+async def control_agent_process(agent: Agent, action: str, db: Session = None, user=None) -> dict:
     """
-    通过 SSH 控制 Agent 进程（start/stop/restart）
-    使用 systemctl 管理 Agent 服务
+    通过 SSH 控制 Agent 进程（start/stop/restart/status）
+
+    按 agent.deploy_type 分流：
+    - binary：systemctl / SysV init 管理 srmc-agent 服务
+    - docker：docker compose 管理 srmc-agent 容器
+
+    凭据优先级：agents 表自带的 ssh 凭据 → servers 表按 IP 匹配。
     """
-    from utils.crypto import decrypt
-    
-    # 检查 Agent 是否配置了 SSH 凭据
-    if not agent.ssh_username or not agent.ssh_password:
-        return {"success": False, "message": f"Agent {agent.hostname} 未配置 SSH 凭据"}
-    
     service_name = agent.service_name or "srmc-agent"
-    port = agent.ssh_port or 22
-    
-    # 构建 systemctl 命令
-    if action == "start":
-        cmd = f"sudo systemctl start {service_name}"
-    elif action == "stop":
-        cmd = f"sudo systemctl stop {service_name}"
-    elif action == "restart":
-        cmd = f"sudo systemctl restart {service_name}"
-    elif action == "status":
-        cmd = f"systemctl is-active {service_name}"
+    deploy_type = (agent.deploy_type or "binary").strip().lower()
+
+    # 解析 SSH 凭据（agents 优先，缺失时回退 servers 表）
+    if db is not None:
+        port, username, password = resolve_agent_ssh_credentials(db, agent, user)
     else:
+        from utils.crypto import decrypt
+        port = agent.ssh_port or 22
+        username = agent.ssh_username
+        try:
+            password = decrypt(agent.ssh_password) if agent.ssh_password else None
+        except Exception:
+            password = None
+
+    if not username or not password:
+        return {"success": False, "message": f"Agent {agent.hostname} 未配置 SSH 凭据（Agent 管理与服务器管理均无该 IP 记录）"}
+
+    if deploy_type == "docker":
+        cmd = _build_docker_control_cmd(agent, action, service_name)
+    else:
+        cmd = _build_binary_control_cmd(action, service_name)
+
+    if not cmd:
         return {"success": False, "message": f"未知操作: {action}"}
-    
+
     try:
-        password = decrypt(agent.ssh_password) if agent.ssh_password else None
-        conn = await ssh_pool.get_connection(agent.ip, port, agent.ssh_username, password)
-        
+        conn = await ssh_pool.get_connection(agent.ip, port, username, password)
+
         if not conn:
             return {"success": False, "message": f"无法连接到 Agent {agent.hostname} ({agent.ip})"}
-        
+
         output, error, success = await conn.execute_command(cmd)
-        
+
         if not success:
             return {"success": False, "message": f"SSH 执行失败: {error}"}
-        
+
         # 分析输出
         output = output.strip()
         if action == "status":
-            is_running = output == "active"
+            is_running = _parse_agent_running(deploy_type, output)
             return {"success": True, "message": f"Agent {agent.hostname} 状态: {'运行中' if is_running else '已停止'}", "output": output}
         else:
             return {"success": True, "message": f"Agent {agent.hostname} {action} 成功", "output": output}
-            
+
     except Exception as e:
         return {"success": False, "message": f"控制 Agent 失败: {str(e)}"}
+
+
+def _build_binary_control_cmd(action: str, service_name: str) -> str:
+    """二进制部署：优先 systemctl，无 systemd 时回退 SysV init（CentOS 6）。"""
+    if action == "status":
+        # 同时兼容 systemd 与 SysV：先试 systemctl，失败则用 service 查询
+        return (
+            f"if command -v systemctl >/dev/null 2>&1; then "
+            f"systemctl is-active {service_name}; "
+            f"else service {service_name} status >/dev/null 2>&1 && echo active || echo inactive; fi"
+        )
+    if action in ("start", "stop", "restart"):
+        return (
+            f"if command -v systemctl >/dev/null 2>&1; then "
+            f"sudo systemctl {action} {service_name}; "
+            f"else sudo service {service_name} {action}; fi"
+        )
+    return ""
+
+
+def _build_docker_control_cmd(agent: Agent, action: str, service_name: str) -> str:
+    """Docker 部署：用 docker compose 管理 Agent 容器。
+
+    compose 文件路径优先取 agent.compose_file，缺省用 /etc/srmc-agent/docker-compose.yml。
+    兼容 docker compose（v2 插件）与 docker-compose（v1 独立命令）。
+    """
+    compose_file = (agent.compose_file or "/etc/srmc-agent/docker-compose.yml").strip()
+    # 统一用 docker compose 前缀，由 shell 自动选择可用命令
+    dc = (
+        f"if docker compose version >/dev/null 2>&1; then DC='docker compose'; "
+        f"else DC='docker-compose'; fi; "
+    )
+    base = f"{dc}cd $(dirname {compose_file}) && $DC -f {compose_file}"
+
+    if action == "start":
+        return f"{base} up -d"
+    if action == "stop":
+        return f"{base} stop"
+    if action == "restart":
+        return f"{base} restart"
+    if action == "status":
+        # 用容器名精确查询，避免 compose 项目名差异
+        return (
+            f"docker ps --filter name=^{service_name}$ --filter status=running "
+            f"--format '{{{{.Names}}}}' | grep -q . && echo active || echo inactive"
+        )
+    return ""
+
+
+def _parse_agent_running(deploy_type: str, output: str) -> bool:
+    """解析 status 命令输出，判断 Agent 是否运行中。"""
+    out = (output or "").strip().lower()
+    if deploy_type == "docker":
+        # docker 分支输出 active/inactive
+        return out == "active"
+    # 二进制分支：systemd 输出 active，SysV 回退输出 active
+    return out == "active"
 
 @router.post("/agents/{agent_uuid}/control")
 async def control_agent(
@@ -733,7 +868,7 @@ async def control_agent(
     if action not in ("start", "stop", "restart", "status"):
         raise HTTPException(status_code=400, detail="无效的操作，支持: start, stop, restart, status")
     
-    result = await control_agent_process(agent, action)
+    result = await control_agent_process(agent, action, db, user)
     
     # 记录审计日志
     if action != "status":
@@ -770,7 +905,7 @@ async def batch_control_agents(
     fail_count = 0
     
     # 并发执行（使用 gather）
-    tasks = [control_agent_process(agent, action) for agent in agents]
+    tasks = [control_agent_process(agent, action, db, user) for agent in agents]
     task_results = await asyncio.gather(*tasks, return_exceptions=True)
     
     for agent, result in zip(agents, task_results):
@@ -810,6 +945,150 @@ async def batch_control_agents(
         "failed": fail_count,
         "results": results
     })
+
+# 机器架构别名归一：uname -m 输出 → Go 侧架构命名（amd64/arm64），与更新包命名对齐
+_ARCH_ALIASES = {
+    "x86_64": "amd64",
+    "amd64": "amd64",
+    "aarch64": "arm64",
+    "arm64": "arm64",
+    "i386": "386",
+    "i486": "386",
+    "i586": "386",
+    "i686": "386",
+    "armv6l": "arm",
+    "armv7l": "arm",
+    "ppc64": "ppc64",
+    "ppc64le": "ppc64le",
+    "s390x": "s390x",
+    "riscv64": "riscv64",
+    "loongarch64": "loong64",
+}
+
+
+def _normalize_arch(raw: str) -> str:
+    return _ARCH_ALIASES.get((raw or "").strip().lower(), "")
+
+
+def resolve_agent_ssh_credentials(db: Session, agent: Agent, user=None):
+    """解析 Agent 所在机器的 SSH 凭据，返回 (port, username, password)。
+
+    凭据优先级：agents 表自带的 ssh 凭据 → servers 表按 IP 匹配。
+    servers 回退时按组织隔离（非超管只能看到本组织的服务器记录）。
+
+    两处凭据是独立存储的（agents.ssh_* 与 servers.username/password），
+    这里统一回退逻辑，避免各功能各写一套导致行为不一致。
+    """
+    from utils.crypto import decrypt
+    from models.server import Server
+
+    port = agent.ssh_port or 22
+    username = agent.ssh_username
+    try:
+        password = decrypt(agent.ssh_password) if agent.ssh_password else None
+    except Exception:
+        password = None
+
+    if not username or not password:
+        sq = db.query(Server).filter(Server.ip == agent.ip)
+        if user is not None:
+            from services.data_scope_service import DataScopeService
+            if not DataScopeService._is_super_admin(user) and user.organization_id is not None:
+                sq = sq.filter(Server.organization_id == user.organization_id)
+        srv = sq.first()
+        if srv:
+            port = srv.ssh_port or 22
+            username = srv.username
+            try:
+                password = decrypt(srv.password) if srv.password else None
+            except Exception:
+                password = None
+
+    return port, username, password
+
+
+async def _probe_agent_arch(db: Session, user, agent: Agent):
+    """SSH 探测目标机架构，返回 (arch, err)。
+
+    凭据优先级：agents 表自带的 ssh 凭据 → servers 表按 IP 匹配（按组织隔离）。
+    """
+    port, username, password = resolve_agent_ssh_credentials(db, agent, user)
+
+    if not username or not password:
+        return "", "缺少可用的 SSH 凭据（Agent 未配置，servers 表也无该 IP 记录）"
+
+    try:
+        conn = await ssh_pool.get_connection(agent.ip, port, username, password)
+        if not conn:
+            return "", f"无法 SSH 连接 {agent.ip}:{port}"
+        output, error, success = await conn.execute_command("uname -m")
+        if not success:
+            return "", f"执行 uname -m 失败: {error}"
+        arch = _normalize_arch(output)
+        if not arch:
+            return "", f"无法识别的架构输出: {output.strip()[:50]}"
+        return arch, ""
+    except Exception as e:
+        return "", f"探测失败: {e}"
+
+
+@router.post("/agents/probe-arch")
+async def probe_agents_arch(
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+    user=Depends(require_permission("agent_manage")),
+):
+    """SSH 探测并回写 Agent 所在机器的架构。
+
+    不传 agent_uuids 时，自动探测所有 arch 为空的 Agent（存量数据补录）。
+    """
+    agent_uuids = (payload or {}).get("agent_uuids") or []
+    query = db.query(Agent)
+    if agent_uuids:
+        query = query.filter(Agent.uuid.in_(agent_uuids))
+    else:
+        query = query.filter((Agent.arch.is_(None)) | (Agent.arch == ""))
+    agents = query.all()
+
+    if not agents:
+        return ResponseModel(data={"total": 0, "success": 0, "failed": 0, "results": []})
+
+    probed = await asyncio.gather(
+        *[_probe_agent_arch(db, user, a) for a in agents], return_exceptions=True
+    )
+
+    results = []
+    success_count = 0
+    for agent, result in zip(agents, probed):
+        if isinstance(result, Exception):
+            arch, err = "", f"异常: {result}"
+        else:
+            arch, err = result
+        if arch:
+            agent.arch = arch
+            success_count += 1
+        results.append({
+            "agent_uuid": agent.uuid,
+            "hostname": agent.hostname,
+            "ip": agent.ip,
+            "arch": arch,
+            "success": bool(arch),
+            "message": err,
+        })
+    db.commit()
+
+    from services.audit_service import log_audit
+    log_audit(db, user.id, user.username, "AGENT_CONTROL",
+              result="success" if success_count == len(agents) else "partial",
+              output=f"探测 Agent 架构 总数={len(agents)} 成功={success_count}")
+
+    return ResponseModel(data={
+        "total": len(agents),
+        "success": success_count,
+        "failed": len(agents) - success_count,
+        "results": results,
+    })
+
 
 @router.put("/agents/{agent_uuid}/config")
 async def update_agent_config(

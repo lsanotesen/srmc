@@ -171,6 +171,9 @@ func executeDockerUpdate(localPath string, p UpdateParams, report UpdateProgress
 		}
 	}
 
+	// 3.5 写入 deploy.version：容器重启后新 Agent 读到该版本，注册时上报给后端
+	setConfigVersionOnHost(p.Version)
+
 	// 4. 写 pending.json（宿主机上）
 	report("写入 pending.json", "running", 50, "")
 	pending := PendingFile{
@@ -220,30 +223,66 @@ func executeDockerUpdate(localPath string, p UpdateParams, report UpdateProgress
 	}
 }
 
-// triggerHostCompose 通过 nsenter 在宿主机后台 nohup 执行 compose down && up -d。
-// 用 nohup + & 让它脱离 Agent 容器的进程组，compose down 杀掉容器后 up 还能继续。
+// triggerHostCompose 通过 nsenter 在宿主机后台执行 compose up -d --force-recreate。
+//
+// 关键点：
+// 1. 用 `up -d --force-recreate` 一步完成重建，不再先 down 再 up。
+//    先 down 会留下"旧容器已删、新容器未建"的中间态；若此时进程被杀（nsenter 退出、
+//    容器被回收等），就会残留 Created 状态的孤儿容器，导致服务起不来、任务卡 95%。
+//    --force-recreate 由 compose 自己保证"先建新再删旧"，是原子操作。
+// 2. 必须用 setsid 让后台进程脱离 nsenter 的会话，否则 nsenter 退出会连带杀掉它。
+// 3. 去掉 -p（PID namespace）：不需要，且会加剧进程被连带回收的问题。
+// 4. 输出写入 updates/compose-restart.log，便于容器起不来时排查。
 func triggerHostCompose(composeFile string) error {
 	workDir := filepath.Dir(composeFile)
 	shell := getShellPath()
+	logPath := filepath.Join(config.GlobalConfig.Deploy.UpdatesDir, "compose-restart.log")
 	cmdText := fmt.Sprintf(
-		"cd %s && (docker compose -f %s down 2>/dev/null || docker-compose -f %s down 2>/dev/null); "+
-			"docker rm -f srmc-agent 2>/dev/null; "+
-			"(docker compose -f %s up -d 2>/dev/null || docker-compose -f %s up -d 2>/dev/null); "+
+		"cd %s && (docker compose -f %s up -d --force-recreate || docker-compose -f %s up -d --force-recreate); "+
 			"sleep 1; rm -f %s",
 		shellQuote(workDir), shellQuote(composeFile), shellQuote(composeFile),
-		shellQuote(composeFile), shellQuote(composeFile),
 		shellQuote(pendingFilePath()),
 	)
 
 	if isRunningInContainer() {
-		// nsenter 宿主机 + nohup + & 脱离容器
-		cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--",
-			shell, "-c", "nohup "+cmdText+" >/dev/null 2>&1 &")
-		return cmd.Start()
+		// nsenter 宿主机 + setsid 脱离会话，确保 compose 重建本容器后命令仍能执行完
+		cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "--",
+			"setsid", shell, "-c", cmdText)
+		cmd.Stdin = nil
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			return err
+		}
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		if err := cmd.Start(); err != nil {
+			logFile.Close()
+			return err
+		}
+		// 父进程不等待：让 setsid 出来的进程独立运行
+		go func() {
+			_ = cmd.Wait()
+			logFile.Close()
+		}()
+		return nil
 	}
-	// 宿主机直接 nohup 后台执行
-	cmd := exec.Command(shell, "-c", "nohup "+cmdText+" >/dev/null 2>&1 &")
-	return cmd.Start()
+	// 宿主机直接 setsid 后台执行
+	cmd := exec.Command("setsid", shell, "-c", cmdText)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		return err
+	}
+	go func() {
+		_ = cmd.Wait()
+		logFile.Close()
+	}()
+	return nil
 }
 
 // writePendingHost 写 pending.json 到宿主机。
@@ -296,18 +335,23 @@ func removePendingHost() {
 
 // CheckPendingUpdate 启动时调用：检查 pending.json，如果存在且 compose 还没 up 则补执行 compose up。
 // 返回 pending 指针供 main.go 后续接力上报使用。
+//
+// 注意：补执行 compose up 必须异步（走 triggerHostCompose 的 setsid 后台方式）。
+// 若在此同步执行，Agent 自身就在被重建的容器里，命令会阻塞甚至杀掉自己，
+// 导致 main.go 卡在这里、永远走不到 Connect()，表现为 Agent 一直不上线。
 func CheckPendingUpdate() *PendingFile {
 	pending, err := readPendingHost()
 	if err != nil || pending == nil {
 		return nil
 	}
-	// 检查 compose 状态：如果没有 running 的 srmc-agent 容器，补执行 compose up
+	// 检查 compose 状态：如果没有 running 的 srmc-agent 容器，异步补执行 compose up
 	if pending.ComposeFile != "" {
-		workDir := filepath.Dir(pending.ComposeFile)
 		out, err := runDockerCmd([]string{"docker", "ps", "--filter", "name=srmc-agent", "--format", "{{.Names}}"})
 		if err != nil || len(strings.TrimSpace(string(out))) == 0 {
-			log.Printf("[PENDING] compose not up yet, executing compose up for %s", pending.ComposeFile)
-			runComposeCmd(pending.ComposeFile, workDir, "up", "-d")
+			log.Printf("[PENDING] compose not up yet, triggering compose up for %s", pending.ComposeFile)
+			if err := triggerHostCompose(pending.ComposeFile); err != nil {
+				log.Printf("[PENDING] trigger compose up failed: %v", err)
+			}
 		}
 	}
 	return pending
@@ -342,10 +386,10 @@ func parseNewImageID(output string) string {
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "Loaded image:") {
-			return strings.TrimPrefix(line, "Loaded image:")
+			return strings.TrimSpace(strings.TrimPrefix(line, "Loaded image:"))
 		}
 		if strings.HasPrefix(line, "Loaded image ID:") {
-			return strings.TrimPrefix(line, "Loaded image ID:")
+			return strings.TrimSpace(strings.TrimPrefix(line, "Loaded image ID:"))
 		}
 	}
 	return ""
@@ -474,13 +518,25 @@ func executeBinaryUpdate(binPath string, p UpdateParams, report UpdateProgressFu
 			log.Printf("[UPDATE] write config.yaml: %v", err)
 		}
 	}
+	// 写入 deploy.version：服务重启后新 Agent 读到该版本，注册时上报给后端
+	setConfigVersionOnHost(p.Version)
 	if p.ServiceFileContent != "" {
-		report("同步 systemd 服务文件", "running", 44, "")
-		servicePath := "/etc/systemd/system/" + serviceName + ".service"
-		if err := writeContentToHost(p.ServiceFileContent, servicePath); err != nil {
-			log.Printf("[UPDATE] write service file: %v", err)
+		if hasSystemd() {
+			report("同步 systemd 服务文件", "running", 44, "")
+			servicePath := "/etc/systemd/system/" + serviceName + ".service"
+			if err := writeContentToHost(p.ServiceFileContent, servicePath); err != nil {
+				log.Printf("[UPDATE] write service file: %v", err)
+			}
+			runHostCommand(getShellPath(), "systemctl daemon-reload")
+		} else {
+			// SysV init：写到 /etc/init.d 并确保可执行
+			report("同步 SysV init 脚本", "running", 44, "")
+			servicePath := "/etc/init.d/" + serviceName
+			if err := writeContentToHost(p.ServiceFileContent, servicePath); err != nil {
+				log.Printf("[UPDATE] write init script: %v", err)
+			}
+			runHostCommand(getShellPath(), fmt.Sprintf("chmod 755 %s", shellQuote(servicePath)))
 		}
-		runHostCommand(getShellPath(), "systemctl daemon-reload")
 	}
 
 	// 备份（统一到 backup_dir）
@@ -762,8 +818,24 @@ func chmodHost(path string, mode os.FileMode) error {
 	return nil
 }
 
+// hasSystemd 探测宿主机是否有 systemd（systemctl 可用）。
+// CentOS 6 等老系统只有 SysV init，需要回退到 service 命令。
+func hasSystemd() bool {
+	out, err := runHostCommand(getShellPath(), "command -v systemctl >/dev/null 2>&1 && echo yes || echo no")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(out) == "yes"
+}
+
 func runSystemctl(action, service string) (string, error) {
-	cmd := fmt.Sprintf("systemctl %s %s", action, service)
+	var cmd string
+	if hasSystemd() {
+		cmd = fmt.Sprintf("systemctl %s %s", action, service)
+	} else {
+		// SysV init：service 命令（CentOS 6 等）
+		cmd = fmt.Sprintf("service %s %s", service, action)
+	}
 	out, err := runHostCommand(getShellPath(), cmd)
 	return strings.TrimSpace(out), err
 }
@@ -782,21 +854,8 @@ func writeContentToHost(content, path string) error {
 // server.url / server.token / agent.uuid / agent.name / agent.ip / deploy.deploy_dir
 // 新内容覆盖其他所有字段。
 func mergeConfigOnHost(newContent string) (string, error) {
-	configPath := filepath.Join(config.GlobalConfig.Deploy.DeployDir, "config.yaml")
-
 	// 读宿主机现有 config
-	var oldContent string
-	if !isRunningInContainer() {
-		data, err := os.ReadFile(configPath)
-		if err == nil {
-			oldContent = string(data)
-		}
-	} else {
-		out, err := runHostCommand(getShellPath(), fmt.Sprintf("cat %s 2>/dev/null || true", shellQuote(configPath)))
-		if err == nil {
-			oldContent = out
-		}
-	}
+	oldContent := readConfigOnHost()
 
 	if oldContent == "" {
 		// 宿主机没有旧 config，直接返回新内容
@@ -843,4 +902,60 @@ func mergeConfigOnHost(newContent string) (string, error) {
 		return newContent, err
 	}
 	return string(out), nil
+}
+
+// readConfigOnHost 读取宿主机 config.yaml 原文（容器内借助宿主机 shell 读）。
+func readConfigOnHost() string {
+	configPath := filepath.Join(config.GlobalConfig.Deploy.DeployDir, "config.yaml")
+	if !isRunningInContainer() {
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			return ""
+		}
+		return string(data)
+	}
+	out, err := runHostCommand(getShellPath(), fmt.Sprintf("cat %s 2>/dev/null || true", shellQuote(configPath)))
+	if err != nil {
+		return ""
+	}
+	return out
+}
+
+// setConfigVersionOnHost 只把宿主机 config.yaml 的 deploy.version 改成指定版本，其余字段原样保留。
+// 必须在 Agent 重启前调用：重启后 Agent 读到新版本并在注册时上报，后端据此判定更新成功。
+// 不要用「下发一份最小 config」的方式改版本：mergeConfigOnHost 是顶层浅合并，
+// 只保护 6 个私有字段，deploy 段其余字段（method/backup_keep/service_name 等）会被整体覆盖。
+func setConfigVersionOnHost(version string) {
+	if version == "" {
+		return
+	}
+	content := readConfigOnHost()
+	if strings.TrimSpace(content) == "" {
+		log.Printf("[UPDATE] 宿主机 config.yaml 不存在，跳过写入 deploy.version")
+		return
+	}
+
+	var cfg map[string]interface{}
+	if err := yaml.Unmarshal([]byte(content), &cfg); err != nil {
+		log.Printf("[UPDATE] 解析 config.yaml 失败，跳过写入 deploy.version: %v", err)
+		return
+	}
+	deploy, ok := cfg["deploy"].(map[string]interface{})
+	if !ok {
+		deploy = map[string]interface{}{}
+		cfg["deploy"] = deploy
+	}
+	deploy["version"] = version
+
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		log.Printf("[UPDATE] 序列化 config.yaml 失败，跳过写入 deploy.version: %v", err)
+		return
+	}
+	configPath := filepath.Join(config.GlobalConfig.Deploy.DeployDir, "config.yaml")
+	if err := writeContentToHost(string(out), configPath); err != nil {
+		log.Printf("[UPDATE] 写入 deploy.version 失败: %v", err)
+		return
+	}
+	log.Printf("[UPDATE] 已写入 deploy.version=%s", version)
 }

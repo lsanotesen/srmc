@@ -1,4 +1,4 @@
-"""Agent 批量装机 API：安装包管理 + SSH 推送装机任务"""
+"""Agent 批量部署 API：安装包管理 + SSH 推送部署任务"""
 import asyncio
 import uuid
 from datetime import datetime
@@ -7,16 +7,19 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, B
 from sqlalchemy.orm import Session
 
 from core.database import get_db, SessionLocal
+from models.agent import Agent
 from models.agent_deploy import AgentPackage, AgentDeployTask, AgentDeployTaskItem
+from models.server import Server
 from schemas.common import ResponseModel
 from api.dependencies import require_permission
 from services.audit_service import log_audit
-from utils.crypto import encrypt
+from utils.crypto import encrypt, decrypt
+from utils.version import normalize_version
 import services.agent_deploy_service as ads
 
 router = APIRouter()
 
-_run_semaphore = asyncio.Semaphore(3)  # SSH 装机并发（大文件传输，不宜过高）
+_run_semaphore = asyncio.Semaphore(3)  # SSH 部署并发（大文件传输，不宜过高）
 _running_tasks: dict = {}
 
 MAX_HOSTS_PER_TASK = 100
@@ -42,6 +45,7 @@ async def upload_package(
     if not file.filename:
         raise HTTPException(status_code=400, detail="缺少文件名")
 
+    version = normalize_version(version)
     package_id = uuid.uuid4().hex
     meta = await ads.save_package_stream(file, package_id)
 
@@ -97,7 +101,7 @@ async def delete_package(
     return ResponseModel(message="安装包已删除")
 
 
-# ==================== 装机任务 ====================
+# ==================== 部署任务 ====================
 
 @router.post("/tasks")
 async def create_deploy_task(
@@ -105,9 +109,15 @@ async def create_deploy_task(
     db: Session = Depends(get_db),
     user=Depends(require_permission("agent_manage")),
 ):
-    """创建批量装机任务，逐台通过 SSH 推送安装。"""
+    """创建批量部署任务，逐台通过 SSH 推送安装/覆盖升级。
+
+    目标主机两种指定方式（二选一）：
+      - hosts: [{ip, port, username, password, agent_name?, agent_ip?}] 手工填写
+      - agent_uuids: ["uuid", ...] 从已纳管 Agent 选择，自动解析 IP 并复用 servers 表凭据
+    """
     package_id = payload.get("package_id")
     hosts = payload.get("hosts", [])
+    agent_uuids = payload.get("agent_uuids", [])
     deploy_dir = (payload.get("deploy_dir") or "/etc/srmc-agent").strip()
     server_url = (payload.get("server_url") or "").strip()
 
@@ -119,14 +129,57 @@ async def create_deploy_task(
         raise HTTPException(status_code=400, detail="server_url 必须以 ws:// 或 wss:// 开头")
     if not deploy_dir:
         raise HTTPException(status_code=400, detail="部署目录不能为空")
-    if not hosts or not isinstance(hosts, list):
-        raise HTTPException(status_code=400, detail="未配置目标主机")
-    if len(hosts) > MAX_HOSTS_PER_TASK:
-        raise HTTPException(status_code=400, detail=f"单次装机主机数不能超过 {MAX_HOSTS_PER_TASK}")
 
     pkg = db.query(AgentPackage).filter(AgentPackage.package_id == package_id).first()
     if not pkg:
         raise HTTPException(status_code=404, detail="安装包不存在")
+
+    # 从已纳管 Agent 选择：解析出 IP，并从 servers 表取凭据
+    if agent_uuids:
+        if not isinstance(agent_uuids, list):
+            raise HTTPException(status_code=400, detail="agent_uuids 必须为数组")
+        agents = db.query(Agent).filter(Agent.uuid.in_(agent_uuids)).all()
+        if not agents:
+            raise HTTPException(status_code=400, detail="所选 Agent 不存在")
+        # 部署方式校验：Agent 自报的 deploy_type 必须与安装包类型一致，否则必然部署失败
+        mismatched = [
+            f"{a.hostname or a.ip}({a.deploy_type})"
+            for a in agents
+            if a.deploy_type and a.deploy_type != pkg.package_type
+        ]
+        if mismatched:
+            raise HTTPException(
+                status_code=400,
+                detail=f"以下 Agent 的部署方式与安装包类型（{pkg.package_type}）不一致："
+                       f"{'、'.join(mismatched[:5])}"
+                       + ("等" if len(mismatched) > 5 else ""),
+            )
+        hosts = []
+        for a in agents:
+            if not a.ip:
+                raise HTTPException(status_code=400, detail=f"Agent {a.hostname or a.uuid} 未上报 IP，无法部署")
+            srv = db.query(Server).filter(
+                Server.ip == a.ip,
+                Server.organization_id == user.organization_id,
+            ).first()
+            if not srv or not srv.password:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"主机 {a.ip} 无可用 SSH 凭据，请先在服务器管理中维护，或改用手工填写主机",
+                )
+            hosts.append({
+                "ip": a.ip,
+                "port": srv.ssh_port or 22,
+                "username": srv.username or "root",
+                "password": decrypt(srv.password),
+                "agent_name": a.hostname or "",
+                "agent_ip": a.ip,
+            })
+
+    if not hosts or not isinstance(hosts, list):
+        raise HTTPException(status_code=400, detail="未配置目标主机")
+    if len(hosts) > MAX_HOSTS_PER_TASK:
+        raise HTTPException(status_code=400, detail=f"单次部署主机数不能超过 {MAX_HOSTS_PER_TASK}")
 
     # 校验 + 去重（同 IP:端口 只保留第一条）
     seen = set()
@@ -190,10 +243,10 @@ async def create_deploy_task(
 
     log_audit(db, user.id, user.username, "AGENT_DEPLOY",
               result="success",
-              output=f"创建批量装机任务 task_id={task_id} 方式={pkg.package_type} 版本={pkg.version} 主机数={len(norm_hosts)}")
+              output=f"创建批量部署任务 task_id={task_id} 方式={pkg.package_type} 版本={pkg.version} 主机数={len(norm_hosts)}")
 
     _spawn_task(task_id)
-    return ResponseModel(data={"task_id": task_id}, message="装机任务已创建")
+    return ResponseModel(data={"task_id": task_id}, message="部署任务已创建")
 
 
 def _spawn_task(task_id: str):
@@ -203,19 +256,26 @@ def _spawn_task(task_id: str):
 
 
 async def _run_deploy_task(task_id: str):
-    """并发调度：信号量限流，逐台在线程中执行阻塞 SSH 装机。"""
+    """并发调度：信号量限流，逐台在线程中执行阻塞 SSH 部署。"""
     db = SessionLocal()
     try:
         task = db.query(AgentDeployTask).filter(AgentDeployTask.task_id == task_id).first()
         if not task:
             return
-        task.status = "running"
+        # 启动前已被取消的任务不要改回 running，否则会卡在 running 且无法删除
+        if task.status != "cancelled":
+            task.status = "running"
         task.updated_at = datetime.now()
         db.commit()
 
         items = (
             db.query(AgentDeployTaskItem)
-            .filter(AgentDeployTaskItem.task_id == task_id)
+            .filter(
+                AgentDeployTaskItem.task_id == task_id,
+                # 只执行待执行明细：新建任务全部为 waiting；重试时仅失败/取消的被重置为 waiting，
+                # 避免已成功的主机被重复推送安装
+                AgentDeployTaskItem.status == "waiting",
+            )
             .order_by(AgentDeployTaskItem.id)
             .all()
         )
@@ -232,7 +292,10 @@ async def _run_deploy_task(task_id: str):
                 if t and t.status == "cancelled":
                     it = chk.query(AgentDeployTaskItem).filter(AgentDeployTaskItem.id == item_id).first()
                     if it and it.status == "waiting":
-                        ads.update_item_progress(chk, task_id, item_id, step="任务已取消", status="cancelled")
+                        try:
+                            ads.update_item_progress(chk, task_id, item_id, step="任务已取消", status="cancelled")
+                        except ads.TaskDeletedError:
+                            pass  # 任务已被删除，无需再回写
                     return
             finally:
                 chk.close()
@@ -296,7 +359,7 @@ async def cancel_deploy_task(
     db.commit()
 
     log_audit(db, user.id, user.username, "AGENT_DEPLOY_CANCEL",
-              result="success", output=f"取消批量装机任务 task_id={task_id}")
+              result="success", output=f"取消批量部署任务 task_id={task_id}")
     return ResponseModel(message="任务已取消，进行中的主机将在完成当前步骤后停止")
 
 
@@ -308,7 +371,11 @@ async def retry_deploy_task(
     user=Depends(require_permission("agent_manage")),
 ):
     """重试失败/跳过的主机。仅重新执行 status=failed/skipped/cancelled 的 item，已成功的不动。
-    可选 payload: {"ssh_password": "xxx"} —— 旧任务密码可能已被清除，重试时重新填写。
+
+    可选 payload:
+      - {"ssh_password": "xxx"}：本任务所有待重试主机共用同一新密码（留空沿用明细已保存密码）
+      - {"credentials": [{"id": 明细ID, "ssh_username": "xx", "ssh_password": "yy"}]}：逐台覆盖用户名/密码，
+        用于各主机凭据不同的场景；非 root 用户会自动尝试 sudo 提权（复用登录密码），无需额外配置。
     """
     task = db.query(AgentDeployTask).filter(AgentDeployTask.task_id == task_id).first()
     if not task:
@@ -319,6 +386,16 @@ async def retry_deploy_task(
         raise HTTPException(status_code=400, detail="任务尚未开始，无需重试")
 
     ssh_password = (payload or {}).get("ssh_password") or ""
+    # 逐台覆盖凭据（各主机用户名/密码可能不同）
+    cred_map = {}
+    for c in (payload or {}).get("credentials") or []:
+        try:
+            cred_map[int(c.get("id"))] = {
+                "ssh_username": (c.get("ssh_username") or "").strip(),
+                "ssh_password": c.get("ssh_password") or "",
+            }
+        except (TypeError, ValueError):
+            continue
 
     retry_count = 0
     missing_pwd = 0
@@ -329,12 +406,18 @@ async def retry_deploy_task(
     )
     retry_items = [i for i in items if i.status in ("failed", "skipped", "cancelled")]
     for item in retry_items:
-        # 旧记录密码可能已被清除：优先用本次提交的密码，否则报错
-        if not item.ssh_password and not ssh_password:
+        cred = cred_map.get(item.id) or {}
+        # 优先级：本次主机级凭据 > 本次全局密码 > 明细已保存凭据
+        if cred.get("ssh_username"):
+            item.ssh_username = cred["ssh_username"]
+        if cred.get("ssh_password"):
+            item.ssh_password = encrypt(cred["ssh_password"])
+        elif ssh_password:
+            item.ssh_password = encrypt(ssh_password)
+
+        if not item.ssh_password:
             missing_pwd += 1
             continue
-        if ssh_password:
-            item.ssh_password = encrypt(ssh_password)
         item.status = "waiting"
         item.progress = 0
         item.current_step = ""
@@ -343,10 +426,10 @@ async def retry_deploy_task(
         item.finished_at = None
         retry_count += 1
 
-    if missing_pwd and not ssh_password:
+    if missing_pwd:
         raise HTTPException(
             status_code=400,
-            detail=f"有 {missing_pwd} 台主机的 SSH 密码已被清除，请重新输入密码后重试",
+            detail=f"有 {missing_pwd} 台主机缺少 SSH 密码，请为这些主机填写密码后重试",
         )
     if retry_count == 0:
         raise HTTPException(status_code=400, detail="没有可重试的主机（全部成功）")
@@ -365,7 +448,7 @@ async def retry_deploy_task(
     _spawn_task(task_id)
 
     log_audit(db, user.id, user.username, "AGENT_DEPLOY",
-              result="success", output=f"重试批量装机任务 task_id={task_id} 重试主机数={retry_count}")
+              result="success", output=f"重试批量部署任务 task_id={task_id} 重试主机数={retry_count}")
     return ResponseModel(message=f"已提交 {retry_count} 台失败主机的重试任务")
 
 
@@ -375,7 +458,7 @@ async def batch_delete_deploy_tasks(
     db: Session = Depends(get_db),
     user=Depends(require_permission("agent_manage")),
 ):
-    """批量删除装机任务（连同主机明细一起删）。执行中的任务需先取消。"""
+    """批量删除部署任务（连同主机明细一起删）。执行中的任务需先取消。"""
     task_ids = payload.get("task_ids") or []
     if not isinstance(task_ids, list) or not task_ids:
         raise HTTPException(status_code=400, detail="未选择要删除的任务")
@@ -402,8 +485,8 @@ async def batch_delete_deploy_tasks(
     db.commit()
 
     log_audit(db, user.id, user.username, "DELETE",
-              result="success", output=f"删除批量装机任务 {deleted} 个")
-    return ResponseModel(message=f"已删除 {deleted} 个装机任务")
+              result="success", output=f"删除批量部署任务 {deleted} 个")
+    return ResponseModel(message=f"已删除 {deleted} 个部署任务")
 
 
 @router.delete("/tasks/{task_id}")
@@ -412,7 +495,7 @@ async def delete_deploy_task(
     db: Session = Depends(get_db),
     user=Depends(require_permission("agent_manage")),
 ):
-    """删除单个装机任务（连同主机明细一起删）。执行中的任务需先取消。"""
+    """删除单个部署任务（连同主机明细一起删）。执行中的任务需先取消。"""
     task = db.query(AgentDeployTask).filter(AgentDeployTask.task_id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -426,7 +509,7 @@ async def delete_deploy_task(
     db.commit()
 
     log_audit(db, user.id, user.username, "DELETE",
-              result="success", output=f"删除批量装机任务 task_id={task_id}")
+              result="success", output=f"删除批量部署任务 task_id={task_id}")
     return ResponseModel(message="任务已删除")
 
 

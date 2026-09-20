@@ -1,0 +1,55 @@
+#!/bin/sh
+# chkconfig: 2345 95 20
+# description: SRMC Agent
+# 由 SRMC 批量部署自动生成（SysV init，适用于 CentOS 6 等无 systemd 的系统）
+
+DAEMON={DEPLOY_DIR}/srmc-agent
+CONFIG={DEPLOY_DIR}/config.yaml
+PIDFILE=/var/run/srmc-agent.pid
+LOGFILE=/var/log/srmc-agent.log
+
+start() {
+    echo -n "Starting SRMC Agent: "
+    if [ -f $PIDFILE ] && kill -0 $(cat $PIDFILE) 2>/dev/null; then
+        echo "already running (pid $(cat $PIDFILE))"
+        return 0
+    fi
+    cd {DEPLOY_DIR}
+    nohup $DAEMON --config $CONFIG > $LOGFILE 2>&1 &
+    echo $! > $PIDFILE
+    echo "OK"
+}
+
+stop() {
+    echo -n "Stopping SRMC Agent: "
+    if [ -f $PIDFILE ]; then
+        PID=$(cat $PIDFILE)
+        kill $PID 2>/dev/null
+        # 等待进程退出（最多 10 秒），避免 restart 时新旧进程抢端口
+        i=0
+        while [ $i -lt 10 ] && kill -0 $PID 2>/dev/null; do
+            sleep 1
+            i=$((i + 1))
+        done
+        # 仍未退出则强杀
+        kill -9 $PID 2>/dev/null
+        rm -f $PIDFILE
+    fi
+    echo "OK"
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop && sleep 2 && start ;;
+    status)
+        if [ -f $PIDFILE ] && kill -0 $(cat $PIDFILE) 2>/dev/null; then
+            echo "SRMC Agent is running (pid $(cat $PIDFILE))"
+            exit 0
+        fi
+        echo "SRMC Agent is stopped"
+        exit 3
+        ;;
+    *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac
+exit 0

@@ -23,7 +23,6 @@ const routes = [
       { path: '/service-groups', name: 'ServiceGroups', component: () => import('../pages/ServiceGroups.vue') },
       { path: '/servers', name: 'Servers', component: () => import('../pages/Servers.vue') },
       { path: '/agents', name: 'Agents', component: () => import('../pages/Agents.vue') },
-      { path: '/agent-update-tasks', name: 'AgentUpdateTasks', component: () => import('../pages/AgentUpdateTasks.vue') },
       { path: '/agent-deploy-tasks', name: 'AgentDeployTasks', component: () => import('../pages/AgentDeployTasks.vue') },
       
       { path: '/sql', name: 'SQL', component: () => import('../pages/SQL.vue') },

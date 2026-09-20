@@ -42,6 +42,7 @@
             <el-option label="全部状态" value="" />
             <el-option label="运行中" value="RUNNING" />
             <el-option label="已停止" value="STOPPED" />
+            <el-option label="未启用/已停止" value="INACTIVE" />
             <el-option label="状态未知" value="UNKNOWN" />
           </el-select>
           <el-select v-model="filters.agent_status" placeholder="Agent状态" clearable class="agent-select">
@@ -66,6 +67,9 @@
           </span>
           <span :class="['stats-chip stats-stopped', filters.status === 'STOPPED' ? 'active' : '']" @click="applyStatusFilter('STOPPED', '')">
             已停止 {{ statusStats.stopped }}
+          </span>
+          <span :class="['stats-chip stats-inactive', filters.status === 'INACTIVE' ? 'active' : '']" @click="applyStatusFilter('INACTIVE', '')">
+            未启用 {{ statusStats.inactive }}
           </span>
           <span :class="['stats-chip stats-agent-offline', filters.agent_status === 'offline' ? 'active' : '']" @click="applyStatusFilter('', 'offline')">
             Agent异常 {{ statusStats.agentOffline }}
@@ -357,6 +361,23 @@
             </span>
           </div>
         </el-descriptions-item>
+        <el-descriptions-item label="运行类型">
+          <el-select
+            v-if="canManageService"
+            :model-value="selectedService.service_run_mode || 'permanent'"
+            size="small"
+            style="width: 140px"
+            @change="changeServiceRunMode"
+          >
+            <el-option label="常驻服务" value="permanent" />
+            <el-option label="一次性任务" value="oneshot" />
+            <el-option label="未启用/停止" value="inactive" />
+          </el-select>
+          <el-tag v-else :type="getRunModeTagType(selectedService.service_run_mode)" size="small">
+            {{ getRunModeText(selectedService.service_run_mode) }}
+          </el-tag>
+          <span class="run-mode-hint">服务级默认，容器可单独覆盖</span>
+        </el-descriptions-item>
         <el-descriptions-item label="备注">{{ selectedService.remark || '-' }}</el-descriptions-item>
       </el-descriptions>
 
@@ -366,21 +387,43 @@
           <span class="containers-title">容器状态</span>
           <span class="containers-summary">
             共 {{ selectedService.containers.length }} 个容器，
-            <span class="text-success">{{ getRunningContainers(selectedService.containers) }} 个运行中</span>，
-            <span class="text-danger">{{ selectedService.containers.length - getRunningContainers(selectedService.containers) }} 个已停止</span>
+            <span class="text-success">{{ getHealthyContainers(selectedService.containers) }} 个正常</span>，
+            <span class="text-danger">{{ getAbnormalContainers(selectedService.containers) }} 个异常</span>
           </span>
         </div>
         <el-table :data="selectedService.containers" border size="small" style="width: 100%">
           <el-table-column prop="name" label="容器名称" min-width="160" show-overflow-tooltip />
-          <el-table-column prop="image" label="镜像" min-width="180" show-overflow-tooltip />
-          <el-table-column label="状态" width="120" align="center">
+          <el-table-column label="运行类型" width="150" align="center">
             <template #default="scope">
-              <el-tag :type="scope.row.running ? 'success' : 'danger'" size="small">
-                {{ scope.row.running ? '运行中' : '已停止' }}
+              <el-select
+                v-if="canManageService"
+                :model-value="scope.row.run_mode || 'permanent'"
+                size="small"
+                style="width: 120px"
+                @change="(val) => changeContainerRunMode(scope.row, val)"
+              >
+                <el-option label="常驻服务" value="permanent" />
+                <el-option label="一次性任务" value="oneshot" />
+                <el-option label="未启用/停止" value="inactive" />
+              </el-select>
+              <el-tag v-else :type="getRunModeTagType(scope.row.run_mode)" size="small">
+                {{ getRunModeText(scope.row.run_mode) }}
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="state" label="详细状态" width="120" show-overflow-tooltip />
+          <el-table-column label="状态" width="110" align="center">
+            <template #default="scope">
+              <el-tag :type="getContainerStatusType(scope.row.biz_status)" size="small">
+                {{ getContainerStatusText(scope.row.biz_status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="详细状态" width="180" show-overflow-tooltip>
+            <template #default="scope">
+              {{ getContainerDetailText(scope.row) }}
+            </template>
+          </el-table-column>
+          <el-table-column prop="image" label="镜像" min-width="180" show-overflow-tooltip />
           <el-table-column prop="ports" label="端口映射" min-width="150" show-overflow-tooltip />
           <el-table-column prop="id" label="容器ID" width="130" show-overflow-tooltip />
         </el-table>
@@ -663,7 +706,7 @@
   </div>
 </template>
 
-<script setup>import { ref, reactive, onMounted, onActivated, onBeforeUnmount, onUnmounted, onDeactivated, nextTick, Teleport, watch } from 'vue';
+<script setup>import { ref, reactive, computed, onMounted, onActivated, onBeforeUnmount, onUnmounted, onDeactivated, nextTick, Teleport, watch } from 'vue';
 import { ElMessage, ElMessageBox, ElMenu, ElMenuItem } from 'element-plus';
 import { Minus, Close, Promotion, QuestionFilled } from '@element-plus/icons-vue';
 import { useRouter, useRoute } from 'vue-router';
@@ -713,6 +756,7 @@ const statusStats = reactive({
   total: 0,
   running: 0,
   stopped: 0,
+  inactive: 0,
   agentOffline: 0,
   unknown: 0
 });
@@ -732,6 +776,7 @@ const loadStatusStats = async () => {
       statusStats.total = d.total || 0;
       statusStats.running = d.running || 0;
       statusStats.stopped = d.stopped || 0;
+      statusStats.inactive = d.inactive || 0;
       statusStats.agentOffline = d.agentOffline || 0;
       statusStats.unknown = d.unknown || 0;
     }
@@ -744,6 +789,11 @@ const applyStatusFilter = (statusVal, agentVal) => {
   filters.status = statusVal;
   filters.agent_status = agentVal;
   pagination.page = 1;
+  // 立即清空旧数据并显示 loading：否则新响应回来前会残留上一次的列表，
+  // 用户会误以为筛选没生效（尤其是筛选结果为空时）。
+  services.value = [];
+  pagination.total = 0;
+  loading.value = true;
   loadServices();
 };
 
@@ -854,6 +904,8 @@ const serviceForm = reactive({
 });
 let statusInterval = null;
 let isUpdatingStatus = false;  // 防止重入
+// 状态刷新定时器句柄（与 statusInterval 分开：切换项目/子系统时只暂停状态刷新，不影响 5s 轮询）
+let statusUpdateTimer = null;
 
 // 服务列表加载状态与请求控制
 const loading = ref(false);
@@ -872,6 +924,12 @@ const getStatusType = (status) => {
     case 'RUNNING':
     case 'Running':
       return 'success';
+    case 'COMPLETED':
+    case 'Completed':
+      return 'success';
+    case 'INACTIVE':
+    case 'Inactive':
+      return 'info';
     case 'STOPPED':
     case 'Stopped':
       return 'danger';
@@ -901,6 +959,8 @@ const getStatusText = (status) => {
   if (!status) return '未知';
   const s = status.toLowerCase();
   if (s === 'running') return '运行中';
+  if (s === 'completed') return '已完成';
+  if (s === 'inactive') return '未启用/已停止';
   if (s === 'stopped') return '已停止';
   if (s === 'partial') return '部分运行';
   if (s === 'starting') return '启动中';
@@ -914,6 +974,126 @@ const getStatusText = (status) => {
 const getRunningContainers = (containers) => {
   if (!containers) return 0;
   return containers.filter(c => c.running).length;
+};
+
+// 运行类型属于服务管理配置，有编辑权限的用户可修改
+const canManageService = computed(() => hasPermission('service:edit-config'));
+
+// 运行类型展示（只读用户）
+const getRunModeText = (runMode) => {
+  if (runMode === 'oneshot') return '一次性任务';
+  if (runMode === 'inactive') return '未启用/停止';
+  return '常驻服务';
+};
+
+const getRunModeTagType = (runMode) => {
+  if (runMode === 'oneshot') return 'warning';
+  if (runMode === 'inactive') return 'info';
+  return 'primary';
+};
+
+// 容器业务状态由后端领域层计算（run_mode + Docker 状态 + exit_code），前端只做展示
+const getContainerStatusType = (bizStatus) => {
+  switch (bizStatus) {
+    case 'RUNNING':
+      return 'success';
+    case 'COMPLETED':
+      return 'success';
+    case 'INACTIVE':
+      return 'info';
+    case 'STOPPED':
+      return 'danger';
+    case 'FAILED':
+      return 'danger';
+    case 'PARTIAL':
+      return 'warning';
+    default:
+      return 'info';
+  }
+};
+
+const getContainerStatusText = (bizStatus) => {
+  switch (bizStatus) {
+    case 'RUNNING':
+      return '运行中';
+    case 'COMPLETED':
+      return '已完成';
+    case 'INACTIVE':
+      return '未启用/已停止';
+    case 'STOPPED':
+      return '已停止';
+    case 'FAILED':
+      return '异常';
+    case 'PARTIAL':
+      return '部分运行';
+    default:
+      return '未知';
+  }
+};
+
+// 详细状态：exited 时附带退出码，便于区分"已完成"与"执行失败"
+const getContainerDetailText = (row) => {
+  const state = row.state || '-';
+  if (state === 'exited' && row.exit_code !== undefined && row.exit_code !== null && row.exit_code >= 0) {
+    return `${state} / ExitCode=${row.exit_code}`;
+  }
+  return state;
+};
+
+// 正常容器：运行中、一次性任务已完成、未启用/停止（预期状态）
+const getHealthyContainers = (containers) => {
+  if (!containers) return 0;
+  return containers.filter(c =>
+    c.biz_status === 'RUNNING' || c.biz_status === 'COMPLETED' || c.biz_status === 'INACTIVE'
+  ).length;
+};
+
+const getAbnormalContainers = (containers) => {
+  if (!containers) return 0;
+  return containers.filter(c => c.biz_status === 'FAILED' || c.biz_status === 'STOPPED').length;
+};
+
+// 修改容器运行类型（常驻服务 / 一次性任务 / 未启用）
+const changeContainerRunMode = async (row, runMode) => {
+  const prevMode = row.run_mode || 'permanent';
+  if (runMode === prevMode) return;
+  try {
+    const response = await axios.put(
+      `/api/services/${selectedService.id}/containers/run-mode`,
+      { container_name: row.name, run_mode: runMode }
+    );
+    if (response.data.code === 0) {
+      row.run_mode = runMode;
+      ElMessage.success('运行类型已更新');
+      // 重新拉取详情，让后端按新运行类型重算业务状态
+      await viewService({ id: selectedService.id });
+    } else {
+      ElMessage.error(response.data.message || '更新失败');
+    }
+  } catch (error) {
+    ElMessage.error(error.response?.data?.message || '更新失败');
+  }
+};
+
+// 修改服务级默认运行类型（作用于该服务下所有未单独配置的容器；物理机服务只能用它）
+const changeServiceRunMode = async (runMode) => {
+  const prevMode = selectedService.service_run_mode || 'permanent';
+  if (runMode === prevMode) return;
+  try {
+    const response = await axios.put(
+      `/api/services/${selectedService.id}/containers/run-mode`,
+      { container_name: '*', run_mode: runMode }
+    );
+    if (response.data.code === 0) {
+      selectedService.service_run_mode = runMode;
+      ElMessage.success('运行类型已更新');
+      await viewService({ id: selectedService.id });
+    } else {
+      ElMessage.error(response.data.message || '更新失败');
+    }
+  } catch (error) {
+    ElMessage.error(error.response?.data?.message || '更新失败');
+  }
 };
 
 const isRunning = (status) => {
@@ -945,7 +1125,7 @@ const loadServices = async () => {
   const currentRequestId = ++latestRequestId;
   pendingRequestCount++;
 
-  // 只在首次加载时显示 loading
+  // 列表为空时显示 loading（首次加载、或切换筛选后已清空）
   if (services.value.length === 0) {
     loading.value = true;
   }
@@ -1017,12 +1197,13 @@ const loadServices = async () => {
         safetyLoadingTimer = null;
       }
       loading.value = false;
+      // 列表请求已结束，恢复状态轮询（切换项目/子系统时被 pauseStatusRefresh 暂停）
+      resumeStatusRefresh();
     }
   }
 };
 
 // 状态更新防抖（500ms），用于 SSH 慢查询
-let statusUpdateTimer = null;
 const scheduleStatusUpdate = () => {
   if (statusUpdateTimer) clearTimeout(statusUpdateTimer);
   statusUpdateTimer = setTimeout(() => {
@@ -1127,6 +1308,26 @@ const loadGroups = async (subsystemId = '', forForm = false) => {
 // Vue 的 @change 事件在 nextTick（微任务）时触发，所以标志需等下一个 tick 之后才清除
 let isInternalTreeClick = false;
 
+// 切换项目/子系统/分组时暂停状态刷新：
+// 1) 取消已排队的 updateStatuses（否则它会用旧列表的 id 发请求，回来后覆盖新列表的状态）
+// 2) 暂停 5s 轮询，避免切换瞬间与列表请求抢 HTTP/1.1 连接池，造成点击后迟迟不切换
+const pauseStatusRefresh = () => {
+  if (statusUpdateTimer) {
+    clearTimeout(statusUpdateTimer);
+    statusUpdateTimer = null;
+  }
+  if (statusInterval) {
+    clearInterval(statusInterval);
+    statusInterval = null;
+  }
+};
+
+const resumeStatusRefresh = () => {
+  if (!statusInterval) {
+    statusInterval = setInterval(updateStatuses, 5000);
+  }
+};
+
 const handleTreeClick = (data) => {
   // 立即标记内部修改，开始保护窗口
   isInternalTreeClick = true;
@@ -1153,6 +1354,7 @@ const handleTreeClick = (data) => {
 
   // 只加载服务列表（唯一的请求）
   pagination.page = 1;
+  pauseStatusRefresh();
   scheduleLoadServices();
 
   // 延长标志时间：用 setTimeout 100ms 确保 Vue 异步 @change 事件处理完毕
@@ -1178,6 +1380,7 @@ const handleProjectChange = () => {
   groups.value = [];
 
   pagination.page = 1;
+  pauseStatusRefresh();
   scheduleLoadServices();
 };
 
@@ -1190,6 +1393,7 @@ const handleSubsystemChange = () => {
   // 从 Store 缓存取分组（零请求）
   groups.value = projectStore.groupsBySubsystem(currentSubsystemId);
   pagination.page = 1;
+  pauseStatusRefresh();
   scheduleLoadServices();
 };
 
@@ -3080,10 +3284,13 @@ const loadAgents = async () => {
 .left-panel {
   width: 280px;
   flex-shrink: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .right-panel {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -3103,6 +3310,7 @@ const loadAgents = async () => {
 
 .search-bar {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 20px;
   align-items: center;
@@ -3124,6 +3332,7 @@ const loadAgents = async () => {
 
 .status-stats-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   margin-bottom: 16px;
@@ -3164,6 +3373,8 @@ const loadAgents = async () => {
 .stats-chip.stats-running.active { background: #059669; color: #fff; }
 .stats-chip.stats-stopped { color: #dc2626; border-color: #fecaca; }
 .stats-chip.stats-stopped.active { background: #dc2626; color: #fff; }
+.stats-chip.stats-inactive { color: #64748b; border-color: #cbd5e1; }
+.stats-chip.stats-inactive.active { background: #64748b; color: #fff; }
 .stats-chip.stats-agent-offline { color: #6b7280; border-color: #e5e7eb; }
 .stats-chip.stats-agent-offline.active { background: #6b7280; color: #fff; }
 .stats-chip.stats-unknown { color: #d97706; border-color: #fde68a; }
@@ -3257,6 +3468,12 @@ const loadAgents = async () => {
   padding: 2px 6px;
   border-radius: 3px;
   font-weight: 500;
+}
+
+.run-mode-hint {
+  margin-left: 8px;
+  font-size: 12px;
+  color: #909399;
 }
 
 .agent-source {

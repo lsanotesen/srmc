@@ -269,8 +269,13 @@ async def get_services(
         if status:
             target = status.upper()
             if target == 'UNKNOWN':
-                # “状态未知”桶：所有非正常运行、非完全停止的服务（含 UNKNOWN / PARTIAL 部分运行等异常态）
-                enriched = [x for x in enriched if x[1] not in ('RUNNING', 'STOPPED')]
+                # “状态未知”桶：真正未知/异常态（UNKNOWN / PARTIAL 等），
+                # 不含 INACTIVE（未启用/停止）与 COMPLETED（一次性任务已完成）——它们是预期状态
+                enriched = [x for x in enriched
+                            if x[1] not in ('RUNNING', 'STOPPED', 'INACTIVE', 'COMPLETED')]
+            elif target == 'INACTIVE':
+                # “未启用/停止”桶：含一次性任务已完成（同为预期终态）
+                enriched = [x for x in enriched if x[1] in ('INACTIVE', 'COMPLETED')]
             else:
                 enriched = [x for x in enriched if x[1] == target]
         if agent_status:
@@ -473,15 +478,17 @@ async def count_services(
     if deploy_type:
         query = query.filter(AppService.deploy_type == deploy_type)
 
-    services = query.all()
+    # 只取统计需要的列（id / agent_uuid），避免加载整行 ORM 对象。
+    # 该接口在每次切换项目/子系统时都会被调用，全字段加载会明显拖慢切换。
+    services = query.with_entities(AppService.id, AppService.agent_uuid).all()
     total = len(services)
 
     # Redis 批量取状态做分布统计
-    running = stopped = unknown = agent_offline = 0
+    running = stopped = unknown = inactive = agent_offline = 0
     if services:
         try:
             from utils.redis_client import redis_client
-            service_ids = [s.id for s in services]
+            service_ids = [sid for sid, _ in services]
             status_keys = [f"service_status:{sid}" for sid in service_ids]
             source_keys = [f"service_status_source:{sid}" for sid in service_ids]
             status_vals = redis_client.mget(status_keys)
@@ -490,7 +497,7 @@ async def count_services(
             # 预查 Agent 在线状态（与列表筛选口径一致）
             from models.agent import Agent
             from datetime import datetime as _dt, timedelta as _td
-            agent_uuids = list({s.agent_uuid for s in services if s.agent_uuid})
+            agent_uuids = list({uuid for _, uuid in services if uuid})
             online_uuids = set()
             try:
                 from api.agent import manager as _mgr
@@ -512,7 +519,7 @@ async def count_services(
                     if is_online:
                         online_uuids.add(a.uuid)
 
-            for i, svc in enumerate(services):
+            for i, (svc_id, svc_agent_uuid) in enumerate(services):
                 raw_s = status_vals[i]
                 st = raw_s.decode().upper() if raw_s and isinstance(raw_s, bytes) else (raw_s or "UNKNOWN").upper()
                 raw_src = source_vals[i]
@@ -522,12 +529,15 @@ async def count_services(
                     running += 1
                 elif st == "STOPPED":
                     stopped += 1
+                elif st in ("INACTIVE", "COMPLETED"):
+                    # 未启用/停止 与 一次性任务已完成 都是预期状态，不计入异常/未知
+                    inactive += 1
                 else:
                     unknown += 1
 
                 # Agent 异常：服务关联了 agent_uuid，但该 Agent 当前离线（含 source=OFFLINE）
-                if svc.agent_uuid:
-                    agent_online = (svc.agent_uuid in online_uuids) and src != 'OFFLINE'
+                if svc_agent_uuid:
+                    agent_online = (svc_agent_uuid in online_uuids) and src != 'OFFLINE'
                     if not agent_online:
                         agent_offline += 1
         except Exception as e:
@@ -537,6 +547,7 @@ async def count_services(
         "total": total,
         "running": running,
         "stopped": stopped,
+        "inactive": inactive,
         "agentOffline": agent_offline,
         "unknown": unknown,
     })
@@ -783,9 +794,11 @@ async def get_service(
     subsystem = db.query(Subsystem).filter(Subsystem.id == service.subsystem_id).first() if service.subsystem_id else None
     service_group = db.query(ServiceGroup).filter(ServiceGroup.id == service.group_id).first() if service.group_id else None
 
-    # 从 Redis 读取当前状态和容器详情（用于 Docker Compose 服务的 Partial 状态展示）
+    # 从 Redis 读取当前状态和容器详情（用于 Docker Compose 服务的容器列表展示）
     import json
     from utils.redis_client import redis_client
+    from models.service_container_config import ServiceContainerConfig
+    import services.container_status_service as container_status_service
     current_status = None
     status_source = None
     containers = []
@@ -802,6 +815,29 @@ async def get_service(
             containers = json.loads(containers_str)
     except Exception as e:
         print(f"Get service status error: {e}")
+
+    # 为每个容器附加运行类型与业务状态，供前端直接展示（前端不再自行判断异常）
+    # 运行类型解析优先级：容器级配置 → 服务级默认('*') → permanent
+    run_mode_map = {}
+    try:
+        rows = (
+            db.query(ServiceContainerConfig)
+            .filter(ServiceContainerConfig.service_id == service_id)
+            .all()
+        )
+        run_mode_map = {r.container_name: r.run_mode for r in rows}
+    except Exception as e:
+        print(f"Load container run_mode error: {e}")
+
+    service_run_mode = container_status_service.resolve_run_mode(
+        run_mode_map, container_status_service.SERVICE_LEVEL_KEY
+    )
+
+    if containers:
+        for c in containers:
+            mode = container_status_service.resolve_run_mode(run_mode_map, c.get('name'))
+            c['run_mode'] = mode
+            c['biz_status'] = container_status_service.compute_container_status(c, mode)
 
     return ResponseModel(data={
         'id': service.id,
@@ -841,6 +877,8 @@ async def get_service(
         'current_status': current_status,
         'status_source': status_source,
         'containers': containers,
+        # 服务级默认运行类型（物理机服务无容器，只能用它；容器级配置优先）
+        'service_run_mode': service_run_mode,
     })
 
 @router.post("/services", response_model=ResponseModel)
@@ -1124,6 +1162,70 @@ async def delete_service(
               result="success", output=f"删除服务: {func_desc}")
 
     return ResponseModel(data={"id": service_id})
+
+@router.put("/services/{service_id}/containers/run-mode", response_model=ResponseModel)
+async def update_container_run_mode(
+    service_id: int,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    user = Depends(require_permission("service_manage"))
+):
+    """修改运行类型（常驻服务 permanent / 一次性任务 oneshot / 未启用 inactive）。
+
+    按 (service_id, container_name) 唯一，container_name 传 "*" 表示服务级默认值
+    （物理机服务无容器，只能用它；容器级配置优先于服务级默认）。
+    默认无记录 = permanent，因此只有改成 oneshot/inactive 才需要落库；
+    改回 permanent 时删除记录，保持"默认即常驻"的语义。
+    """
+    from models.service_container_config import ServiceContainerConfig
+    import services.container_status_service as container_status_service
+
+    service = db.query(AppService).filter(AppService.id == service_id).first()
+    if not service:
+        raise HTTPException(status_code=404, detail="服务不存在")
+
+    container_name = (payload.get("container_name") or "").strip()
+    run_mode = (payload.get("run_mode") or "").strip()
+    if not container_name:
+        raise HTTPException(status_code=400, detail="缺少 container_name")
+    if run_mode not in (container_status_service.RUN_MODE_PERMANENT,
+                        container_status_service.RUN_MODE_ONESHOT,
+                        container_status_service.RUN_MODE_INACTIVE):
+        raise HTTPException(status_code=400, detail="run_mode 必须为 permanent、oneshot 或 inactive")
+
+    existing = (
+        db.query(ServiceContainerConfig)
+        .filter(
+            ServiceContainerConfig.service_id == service_id,
+            ServiceContainerConfig.container_name == container_name,
+        )
+        .first()
+    )
+
+    if run_mode == container_status_service.RUN_MODE_PERMANENT:
+        # 默认值，无需保留记录
+        if existing:
+            db.delete(existing)
+    elif existing:
+        existing.run_mode = run_mode
+        existing.updated_by = user.username
+        existing.updated_at = datetime.now()
+    else:
+        db.add(ServiceContainerConfig(
+            service_id=service_id,
+            container_name=container_name,
+            run_mode=run_mode,
+            updated_by=user.username,
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        ))
+    db.commit()
+
+    log_audit(db, user.id, user.username, "SERVICE_UPDATE",
+              result="success",
+              output=f"修改容器运行类型: service={service_id} container={container_name} run_mode={run_mode}")
+
+    return ResponseModel(data={"container_name": container_name, "run_mode": run_mode})
 
 @router.post("/services/batch/delete", response_model=ResponseModel)
 async def batch_delete_services(
@@ -2703,9 +2805,8 @@ async def notify_agents_pull_services(db: Session, agent_uuid: str = None):
     """
     from datetime import datetime
 
-    # 如果没有指定 agent_uuid，根据当前所有服务的 IP 查找关联的在线 Agent
+    # 如果没有指定 agent_uuid，通知所有在线 Agent 刷新服务列表
     if agent_uuid is None:
-        from models.app_service import AppService
         from models.agent import Agent
 
         # 找出当前所有在线的 Agent
@@ -2713,15 +2814,12 @@ async def notify_agents_pull_services(db: Session, agent_uuid: str = None):
         if not online_agents:
             return
 
-        # 收集每个在线 Agent 管理的 IP（Agent.ip 字段就是它管理的目标服务器 IP）
-        agent_ips = {a.uuid: a.ip for a in online_agents}
-        # 找出所有服务的 IP
-        service_ips = set(s.ip for s in db.query(AppService).filter(AppService.ip.isnot(None)).distinct().all())
-
-        # 只通知那些有服务变更（IP 匹配）的 Agent
-        target_uuids = {uuid for uuid, ip in agent_ips.items() if ip in service_ips}
-        if not target_uuids:
-            return
+        # 不能用 Agent.ip 与 AppService.ip 匹配来筛选目标 Agent：
+        # agent.ip 是 Agent 自身所在机器的 IP，服务可能部署在 Agent 管理的其他机器上，
+        # 两者不相等时会被漏掉，导致配置变更通知不到对应 Agent。
+        # 服务与 Agent 的关联关系以 app_services.agent_uuid 为准，这里直接通知全部在线 Agent，
+        # 由 Agent 拉取时按 agent_uuid 取自己名下的服务（数量有限，开销可接受）。
+        target_uuids = {a.uuid for a in online_agents}
     else:
         if not agent_uuid:
             return
@@ -2730,15 +2828,30 @@ async def notify_agents_pull_services(db: Session, agent_uuid: str = None):
     # 发送 pull_services 消息
     try:
         from api.agent import manager
+        from models.agent import Agent
+
+        # 用软在线判断（WebSocket 连接 或 30s 内有心跳）。
+        # 只查 active_connections 会漏掉"后端刚重启、Agent 尚未重连"的情况，
+        # 导致通知被静默跳过，服务配置变更要等 Agent 重启才生效。
+        agent_map = {
+            a.uuid: a for a in db.query(Agent).filter(Agent.uuid.in_(target_uuids)).all()
+        }
         for uuid in target_uuids:
-            if manager.is_online(uuid):
-                pull_message = {
-                    "type": "pull_services",
-                    "request_id": "",
-                    "timestamp": datetime.now().timestamp(),
-                    "data": {}
-                }
-                await manager.send_message(uuid, pull_message)
+            agent = agent_map.get(uuid)
+            if not manager.is_online(uuid, agent.last_heartbeat if agent else None):
+                continue
+            pull_message = {
+                "type": "pull_services",
+                "request_id": "",
+                "timestamp": datetime.now().timestamp(),
+                "data": {}
+            }
+            ok = await manager.send_message(uuid, pull_message)
+            if not ok:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"notify_agents_pull_services: send to {uuid} failed (connection gone)"
+                )
     except Exception as e:
         # 通知失败不影响主流程
         import logging

@@ -70,6 +70,7 @@
                 class="ps-stopped clickable"
                 @click="goToServices({ project_id: p.projectId, status: 'STOPPED' })"
               >已停止 {{ p.stoppedCount }}</span>
+              <span v-if="p.inactiveCount > 0" class="ps-inactive">未启用 {{ p.inactiveCount }}</span>
               <span
                 v-if="p.agentOfflineCount > 0"
                 class="ps-agent clickable"
@@ -172,6 +173,7 @@ const overview = reactive({
   serviceCount: 0,
   runningCount: 0,
   stoppedCount: 0,
+  inactiveCount: 0,
   agentOfflineCount: 0,
   unknownCount: 0,
 });
@@ -510,6 +512,7 @@ onBeforeUnmount(() => {
 }
 .ps-running { color: #059669; }
 .ps-stopped { color: #dc2626; }
+.ps-inactive { color: #64748b; }
 .ps-agent { color: #6b7280; }
 .ps-unknown { color: #d97706; }
 .ps-stopped.clickable,
