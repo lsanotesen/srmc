@@ -2,7 +2,7 @@
   <div class="role-page">
     <div class="page-header">
       <h2>角色管理</h2>
-      <el-button type="primary" @click="openAddRoleDialog">
+      <el-button v-if="hasPermission('role:edit')" type="primary" @click="openAddRoleDialog">
         <el-icon><Plus /></el-icon>
         新增角色
       </el-button>
@@ -40,8 +40,8 @@
         </el-table-column>
         <el-table-column label="操作" width="180" fixed="right">
           <template #default="scope">
-            <el-button type="primary" size="small" link :disabled="scope.row.is_system" @click.stop="editRole(scope.row)">编辑</el-button>
-            <el-button type="danger" size="small" link :disabled="scope.row.is_system" @click.stop="deleteRole(scope.row)">删除</el-button>
+            <el-button v-if="hasPermission('role:edit')" type="primary" size="small" link :disabled="scope.row.is_system" @click.stop="editRole(scope.row)">编辑</el-button>
+            <el-button v-if="hasPermission('role:edit')" type="danger" size="small" link :disabled="scope.row.is_system" @click.stop="deleteRole(scope.row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -70,7 +70,7 @@
         </div>
       </div>
       <div class="tab-footer">
-        <el-button type="primary" @click="savePermissions">保存功能权限</el-button>
+        <el-button v-if="hasPermission('role:edit')" type="primary" @click="savePermissions">保存功能权限</el-button>
       </div>
     </el-card>
 
@@ -87,7 +87,7 @@
       </el-form>
       <template #footer>
         <el-button @click="showRoleDialog = false">取消</el-button>
-        <el-button type="primary" @click="saveRole">保存</el-button>
+        <el-button v-if="hasPermission('role:edit')" type="primary" @click="saveRole">保存</el-button>
       </template>
     </el-dialog>
   </div>
@@ -98,6 +98,9 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import axios from '@/utils/axios'
+import { usePermission } from '@/composables/usePermission'
+
+const { hasPermission } = usePermission()
 
 const roles = ref([])
 const permissions = ref([])
@@ -203,7 +206,7 @@ const saveRole = async () => {
       ElMessage.error(response.data.message || response.data.detail || '保存失败')
     }
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '保存失败')
+    ElMessage.error(error.response?.data?.message || error.response?.data?.detail || '保存失败')
   }
 }
 
@@ -240,7 +243,7 @@ const savePermissions = async () => {
       ElMessage.error(response.data.message || '保存失败')
     }
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '保存失败')
+    ElMessage.error(error.response?.data?.message || error.response?.data?.detail || '保存失败')
   }
 }
 

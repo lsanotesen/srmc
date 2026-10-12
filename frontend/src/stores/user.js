@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import axios from '@/utils/axios'
+import { useProjectStore } from './projectStore'
 
 export const useUserStore = defineStore('user', () => {
   const user = ref(null)
@@ -24,6 +25,8 @@ export const useUserStore = defineStore('user', () => {
       token.value = response.data.data.access_token
       localStorage.setItem('token', token.value)
       axios.defaults.headers.common['Authorization'] = `Bearer ${token.value}`
+      // 清理旧账号可能残留的项目树缓存，确保新账号登录后重新加载
+      useProjectStore().reset()
       fetchMenu().catch(err => console.error('加载菜单失败:', err))
       fetchPermissions().catch(err => console.error('加载权限失败:', err))
     }
@@ -77,6 +80,8 @@ export const useUserStore = defineStore('user', () => {
     delete axios.defaults.headers.common['Authorization']
     menu.value = []
     fetchMenuError.value = null
+    // 退出登录时清理项目树缓存，避免切换账号后残留上一个账号的项目
+    useProjectStore().reset()
   }
 
   return { user, token, menu, permissions, isLoading, fetchMenuError, login, logout, fetchMenu, fetchPermissions, fetchUserInfo, hasPermission }

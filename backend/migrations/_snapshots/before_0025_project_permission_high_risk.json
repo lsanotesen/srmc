@@ -1,0 +1,11 @@
+{
+  "columns_before": [
+    "id",
+    "project_id",
+    "target_type",
+    "target_id",
+    "permission",
+    "created_by",
+    "created_time"
+  ]
+}

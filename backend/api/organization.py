@@ -7,7 +7,8 @@ from models.department import Department
 from models.user import User
 from schemas.common import ResponseModel
 from core.database import get_db
-from api.dependencies import get_current_user
+from api.dependencies import get_current_user, require_permission
+from services.data_scope_service import DataScopeService
 from services.audit_service import log_audit
 
 router = APIRouter()
@@ -54,9 +55,15 @@ async def list_organizations(
     size: int = Query(20, ge=1, le=100),
     keyword: str = Query(None),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("organization:view")),
 ):
     query = db.query(Organization)
+    # 查看权限：organization:view 通过后，非超管仅限本组织范围
+    if not DataScopeService._is_super_admin(user):
+        if user.organization_id is not None:
+            query = query.filter(Organization.id == user.organization_id)
+        else:
+            query = query.filter(Organization.id == -1)
     if keyword:
         query = query.filter(Organization.name.like(f"%{keyword}%"))
     total = query.count()
@@ -184,8 +191,11 @@ async def delete_organization(
 async def get_department_tree(
     org_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("department:view")),
 ):
+    # 查看权限：department:view 通过后，非超管仅限本组织范围
+    if not DataScopeService._is_super_admin(user) and org_id != user.organization_id:
+        raise HTTPException(status_code=403, detail="无权查看其他组织的部门")
     depts = db.query(Department).filter(Department.organization_id == org_id).all()
 
     # Build user lookup
@@ -222,7 +232,7 @@ async def get_department_tree(
 async def create_department(
     data: DeptCreate,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("department:edit")),
 ):
     org = db.query(Organization).filter(Organization.id == data.organization_id).first()
     if not org:
@@ -261,7 +271,7 @@ async def update_department(
     dept_id: int,
     data: DeptUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("department:edit")),
 ):
     dept = db.query(Department).filter(Department.id == dept_id).first()
     if not dept:
@@ -328,7 +338,7 @@ async def update_department(
 async def delete_department(
     dept_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("department:edit")),
 ):
     dept = db.query(Department).filter(Department.id == dept_id).first()
     if not dept:

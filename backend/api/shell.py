@@ -56,6 +56,45 @@ async def websocket_endpoint(
             await websocket.close(code=1008)
             return
         
+        # 数据范围校验：token 校验通过后，还要确认用户对该服务所属项目有权限
+        from models.user import User
+        from api.permission_dependencies import user_can_access_project
+        user = db.query(User).filter(User.username == user_id).first()
+        if not user or not user.is_active or not user_can_access_project(db, user, service.project_id):
+            logger.warning(f"Data scope denied: user={user_id}, service_id={service_id}")
+            await websocket.send_text("[错误] 无权访问该服务")
+            await websocket.close(code=1008)
+            return
+        
+        # 功能权限校验（RBAC）：WebShell 登录需 webshell:login；以 root 登录时额外需 webshell:root-login
+        from services.permission_service import PermissionService
+        if not PermissionService.user_has_permission(db, user.id, "webshell:login"):
+            logger.warning(f"RBAC denied (webshell:login): user={user_id}, service_id={service_id}")
+            await websocket.send_text("[错误] 无 WebShell 登录权限")
+            await websocket.close(code=1008)
+            return
+        if (service.username or "").strip() == "root" and not PermissionService.user_has_permission(db, user.id, "webshell:root-login"):
+            logger.warning(f"RBAC denied (webshell:root-login): user={user_id}, service_id={service_id}")
+            await websocket.send_text("[错误] 无 Root WebShell 登录权限")
+            await websocket.close(code=1008)
+            return
+
+        # 项目级高风险独立授权：仅共享访问的用户，需共享记录中明确勾选 webshell / root
+        from models.project import Project
+        from services.data_scope_service import DataScopeService
+        project = db.query(Project).filter(Project.id == service.project_id).first()
+        if project:
+            if not DataScopeService.has_high_risk_grant(db, user, project, "webshell"):
+                logger.warning(f"High-risk grant denied (webshell): user={user_id}, service_id={service_id}")
+                await websocket.send_text("[错误] 该项目共享未授予 WebShell 权限")
+                await websocket.close(code=1008)
+                return
+            if (service.username or "").strip() == "root" and not DataScopeService.has_high_risk_grant(db, user, project, "root"):
+                logger.warning(f"High-risk grant denied (root): user={user_id}, service_id={service_id}")
+                await websocket.send_text("[错误] 该项目共享未授予 Root 登录权限")
+                await websocket.close(code=1008)
+                return
+
         logger.info(f"Found service: {service.func_desc}, IP: {service.ip}, Port: {service.ssh_port}")
         
         password = decrypt(service.password) if service.password else None

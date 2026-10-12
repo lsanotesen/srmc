@@ -17,6 +17,7 @@ python -m migrations.0019_create_agent_update_packages || true
 python -m migrations.0020_extend_audit_action_update_package || true
 python -m migrations.0021_create_service_container_configs || true
 python -m migrations.0022_extend_run_mode_inactive || true
+python -m migrations.0025_project_permission_high_risk || true
 
 echo "Starting FastAPI server with HTTP/2..."
 # --http httptools: 使用高性能 HTTP 解析器

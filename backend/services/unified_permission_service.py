@@ -47,7 +47,7 @@ class UnifiedPermissionService:
             return False
 
         # 超级管理员直接放行
-        if user.role == "ADMIN":
+        if DataScopeService._is_super_admin(user):
             return True
 
         # 第一层：DataScope - 项目访问权限
@@ -80,7 +80,7 @@ class UnifiedPermissionService:
         if not user or not user.is_active:
             return False
 
-        if user.role == "ADMIN":
+        if DataScopeService._is_super_admin(user):
             return True
 
         if resource_context.project_id:
@@ -109,7 +109,7 @@ class UnifiedPermissionService:
         禁止先查全部再内存过滤
         """
         user = db.query(User).filter(User.id == user_id).first()
-        if not user or user.role == "ADMIN":
+        if not user or DataScopeService._is_super_admin(user):
             return query
 
         if hasattr(query, "model_class") and query.model_class == Project:

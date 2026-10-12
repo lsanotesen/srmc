@@ -9,6 +9,13 @@ from schemas.common import ResponseModel
 from services.monitor_service import get_service_status, update_all_service_statuses
 from core.database import get_db
 from api.dependencies import require_permission
+from api.permission_dependencies import (
+    assert_legacy_service_access,
+    assert_legacy_services_access,
+    assert_server_access,
+    filter_legacy_services_query,
+    get_visible_project_ids,
+)
 
 router = APIRouter()
 
@@ -17,13 +24,15 @@ PROMETHEUS_URL = "http://srmc-prometheus:9090"
 NODE_INSTANCE = "host.docker.internal:9100"
 
 @router.get("/monitor/status/{service_id}", response_model=ResponseModel)
-async def get_service_status_endpoint(service_id: int, user = Depends(require_permission("service_view"))):
+async def get_service_status_endpoint(service_id: int, db: Session = Depends(get_db), user = Depends(require_permission("service_view"))):
+    assert_legacy_service_access(db, user, service_id)
     status = get_service_status(service_id)
     return ResponseModel(data={"service_id": service_id, "status": status})
 
 @router.get("/monitor/status", response_model=ResponseModel)
 async def get_all_statuses(db: Session = Depends(get_db), user = Depends(require_permission("service_view"))):
-    services = db.query(Service).all()
+    # 按当前用户数据范围过滤，避免看到其他组织的服务状态
+    services = filter_legacy_services_query(db, user, db.query(Service)).all()
     results = []
     running = 0
     stopped = 0
@@ -63,6 +72,7 @@ async def refresh_all_statuses(db: Session = Depends(get_db), user = Depends(req
 @router.post("/monitor/start/{service_id}", response_model=ResponseModel)
 async def start_service(service_id: int, db: Session = Depends(get_db), user = Depends(require_permission("service_operate"))):
     from services.batch_service import execute_service_operation
+    assert_legacy_service_access(db, user, service_id)
     result = await execute_service_operation(service_id, "START", db, user.id, user.username)
     if result["success"]:
         return ResponseModel(data=result)
@@ -71,6 +81,7 @@ async def start_service(service_id: int, db: Session = Depends(get_db), user = D
 @router.post("/monitor/stop/{service_id}", response_model=ResponseModel)
 async def stop_service(service_id: int, db: Session = Depends(get_db), user = Depends(require_permission("service_operate"))):
     from services.batch_service import execute_service_operation
+    assert_legacy_service_access(db, user, service_id)
     result = await execute_service_operation(service_id, "STOP", db, user.id, user.username)
     if result["success"]:
         return ResponseModel(data=result)
@@ -79,6 +90,7 @@ async def stop_service(service_id: int, db: Session = Depends(get_db), user = De
 @router.post("/monitor/restart/{service_id}", response_model=ResponseModel)
 async def restart_service(service_id: int, db: Session = Depends(get_db), user = Depends(require_permission("service_operate"))):
     from services.batch_service import execute_service_operation
+    assert_legacy_service_access(db, user, service_id)
     result = await execute_service_operation(service_id, "RESTART", db, user.id, user.username)
     if result["success"]:
         return ResponseModel(data=result)
@@ -87,6 +99,7 @@ async def restart_service(service_id: int, db: Session = Depends(get_db), user =
 @router.post("/monitor/batch/{operation}", response_model=ResponseModel)
 async def batch_operation(operation: str, service_ids: list, db: Session = Depends(get_db), user = Depends(require_permission("service_operate"))):
     from services.batch_service import execute_service_operation
+    assert_legacy_services_access(db, user, service_ids)
     tasks = [execute_service_operation(sid, operation.upper(), db, user.id, user.username) for sid in service_ids]
     results = await asyncio.gather(*tasks)
     return ResponseModel(data=results)
@@ -94,7 +107,8 @@ async def batch_operation(operation: str, service_ids: list, db: Session = Depen
 @router.get("/monitor/overview")
 async def get_monitor_overview(db: Session = Depends(get_db), user = Depends(require_permission("service_view"))):
     """监控中心概览 - 聚合KPI指标"""
-    services = db.query(Service).all()
+    # 按当前用户数据范围过滤遗留服务
+    services = filter_legacy_services_query(db, user, db.query(Service)).all()
     running = stopped = unknown = 0
     for svc in services:
         st = get_service_status(svc.id)
@@ -108,7 +122,12 @@ async def get_monitor_overview(db: Session = Depends(get_db), user = Depends(req
     cpu_values = []
     memory_values = []
     try:
-        app_services = db.query(AppService).all()
+        # 按当前用户可见项目过滤 AppService，避免聚合到无权项目的资源指标
+        app_service_query = db.query(AppService)
+        visible_project_ids = get_visible_project_ids(db, user)
+        if visible_project_ids is not None:
+            app_service_query = app_service_query.filter(AppService.project_id.in_(visible_project_ids))
+        app_services = app_service_query.all()
         async with httpx.AsyncClient(timeout=5.0) as client:
             for svc in app_services:
                 try:
@@ -155,7 +174,9 @@ from models.server import Server
 @router.get("/monitor/servers")
 async def get_server_list(db: Session = Depends(get_db), user = Depends(require_permission("service_view"))):
     """获取所有服务器及其实时资源指标"""
-    servers = db.query(Server).all()
+    # 复用 api.server 的组织隔离规则，仅返回当前用户可见服务器
+    from api.server import _scope_server_query
+    servers = _scope_server_query(db.query(Server), user).all()
     results = []
     
     async with httpx.AsyncClient(timeout=5.0) as client:
@@ -246,10 +267,7 @@ async def get_server_metrics(
     user = Depends(require_permission("service_view"))
 ):
     """获取单服务器的时间序列指标（CPU/内存/网络）"""
-    server = db.query(Server).filter(Server.id == server_id).first()
-    if not server:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Server not found")
+    server = assert_server_access(db, user, server_id)
     
     # 时间范围映射
     time_map = {"1h": "1h", "6h": "6h", "24h": "24h", "7d": "7d"}
@@ -351,13 +369,10 @@ async def get_server_services(
     user = Depends(require_permission("service_view"))
 ):
     """获取服务器上所有服务的状态历史"""
-    server = db.query(Server).filter(Server.id == server_id).first()
-    if not server:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Server not found")
+    server = assert_server_access(db, user, server_id)
     
-    # 获取该服务器上的所有服务
-    services = db.query(Service).filter(Service.ip == server.ip).all()
+    # 获取该服务器上的所有服务（按当前用户数据范围过滤）
+    services = filter_legacy_services_query(db, user, db.query(Service).filter(Service.ip == server.ip)).all()
     
     service_status_history = []
     for svc in services:
@@ -388,10 +403,7 @@ async def get_server_processes(
     user = Depends(require_permission("service_view"))
 ):
     """获取服务器上 Top N 进程（按 CPU/内存排序）"""
-    server = db.query(Server).filter(Server.id == server_id).first()
-    if not server:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Server not found")
+    server = assert_server_access(db, user, server_id)
     
     processes = []
     

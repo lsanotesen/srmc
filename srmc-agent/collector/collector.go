@@ -55,14 +55,17 @@ type ServiceStatus struct {
 
 // ContainerDetail 描述 Docker Compose 服务下单个容器的状态
 type ContainerDetail struct {
-	ID       string `json:"id"`        // 容器 ID（短）
-	Name     string `json:"name"`      // 容器名称
-	State    string `json:"state"`     // 容器状态（running/exited/dead/paused/restarting）
-	Status   string `json:"status"`    // 人类可读状态（如 Up 2 hours、Exited (0) 5 minutes ago）
-	Image    string `json:"image"`     // 镜像名称
-	Ports    string `json:"ports"`     // 端口映射
-	Running  bool   `json:"running"`   // 是否运行中
-	ExitCode int    `json:"exit_code"` // 退出码（仅 exited 时有意义；-1 表示未知）
+	ID         string `json:"id"`          // 容器 ID（短）
+	Name       string `json:"name"`        // 容器名称
+	State      string `json:"state"`       // 容器状态（running/exited/dead/paused/restarting）
+	Status     string `json:"status"`      // 人类可读状态（如 Up 2 hours、Exited (0) 5 minutes ago）
+	Image      string `json:"image"`       // 镜像名称
+	Ports      string `json:"ports"`       // 端口映射
+	Running    bool   `json:"running"`     // 是否运行中
+	ExitCode   int    `json:"exit_code"`   // 退出码（仅 exited 时有意义；-1 表示未知）
+	OOMKilled  bool   `json:"oom_killed"`  // 是否因内存超限被 OOM Kill
+	FinishedAt string `json:"finished_at"` // 最后退出时间（RFC3339；未退出为空）
+	ExitReason string `json:"exit_reason"` // 退出原因（Docker State.Error，通常为空）
 }
 
 type SystemMetrics struct {
@@ -738,42 +741,61 @@ func listContainersByComposeFile(composeFile string) ([]ContainerDetail, error) 
 		// restarting 状态不算运行中（容器正在尝试重启，但未正常工作）
 		running := state == "running"
 
-		// 退出码：仅对非 running 容器查询（running 容器无退出码，置 -1）
+		// 退出详情：仅对非 running 容器查询（running 容器无退出码，置 -1）
+		// 一次 inspect 同时拿到 ExitCode / OOMKilled / FinishedAt / Error，不额外增加轮询
 		exitCode := -1
+		oomKilled := false
+		finishedAt := ""
+		exitReason := ""
 		if !running {
-			exitCode = getContainerExitCode(id)
+			exitCode, oomKilled, finishedAt, exitReason = getContainerExitDetail(id)
 		}
 
 		containers = append(containers, ContainerDetail{
-			ID:       id,
-			Name:     name,
-			State:    state,
-			Status:   humanStatus,
-			Image:    image,
-			Ports:    ports,
-			Running:  running,
-			ExitCode: exitCode,
+			ID:         id,
+			Name:       name,
+			State:      state,
+			Status:     humanStatus,
+			Image:      image,
+			Ports:      ports,
+			Running:    running,
+			ExitCode:   exitCode,
+			OOMKilled:  oomKilled,
+			FinishedAt: finishedAt,
+			ExitReason: exitReason,
 		})
 	}
 
 	return containers, nil
 }
 
-// getContainerExitCode 查询容器退出码；查询失败返回 -1（未知）。
-func getContainerExitCode(containerIDOrName string) int {
-	out, err := runDockerCmd([]string{"docker", "inspect", "-f", "{{.State.ExitCode}}", containerIDOrName})
+// getContainerExitDetail 一次 inspect 获取退出详情（退出码/OOMKilled/最后退出时间/退出原因）。
+// 复用同一次 docker inspect，不额外增加轮询；查询失败时返回零值（exit_code=-1）。
+func getContainerExitDetail(containerIDOrName string) (exitCode int, oomKilled bool, finishedAt, exitReason string) {
+	exitCode = -1
+	out, err := runDockerCmd([]string{
+		"docker", "inspect", "-f",
+		"{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.FinishedAt}}|{{.State.Error}}",
+		containerIDOrName,
+	})
 	if err != nil {
-		return -1
+		return
 	}
-	s := strings.TrimSpace(string(out))
+	s := strings.TrimSpace(stripDockerCLILogLines(string(out)))
 	if s == "" {
-		return -1
+		return
 	}
-	code, err := strconv.Atoi(s)
-	if err != nil {
-		return -1
+	parts := strings.SplitN(s, "|", 4)
+	if len(parts) < 4 {
+		return
 	}
-	return code
+	if code, convErr := strconv.Atoi(strings.TrimSpace(parts[0])); convErr == nil {
+		exitCode = code
+	}
+	oomKilled = strings.TrimSpace(parts[1]) == "true"
+	finishedAt = strings.TrimSpace(parts[2])
+	exitReason = strings.TrimSpace(parts[3])
+	return
 }
 
 // runDockerCmd 执行 docker 命令，当遇到 API 版本不匹配错误时自动降级重试。
@@ -825,21 +847,28 @@ func inspectContainer(containerIDOrName string) (ContainerDetail, error) {
 	// restarting 状态下 .State.Running 可能为 true（Docker 正在尝试重启），但容器并未正常工作
 	running := state == "running"
 
-	// 退出码：仅对非 running 容器查询（running 容器无退出码，置 -1）
+	// 退出详情：仅对非 running 容器查询（running 容器无退出码，置 -1）
+	// 一次 inspect 同时拿到 ExitCode / OOMKilled / FinishedAt / Error，不额外增加轮询
 	exitCode := -1
+	oomKilled := false
+	finishedAt := ""
+	exitReason := ""
 	if !running {
-		exitCode = getContainerExitCode(containerIDOrName)
+		exitCode, oomKilled, finishedAt, exitReason = getContainerExitDetail(containerIDOrName)
 	}
 
 	return ContainerDetail{
-		ID:       truncateID(fullID),
-		Name:     name,
-		State:    state,
-		Status:   humanStatus,
-		Image:    image,
-		Ports:    ports,
-		Running:  running,
-		ExitCode: exitCode,
+		ID:         truncateID(fullID),
+		Name:       name,
+		State:      state,
+		Status:     humanStatus,
+		Image:      image,
+		Ports:      ports,
+		Running:    running,
+		ExitCode:   exitCode,
+		OOMKilled:  oomKilled,
+		FinishedAt: finishedAt,
+		ExitReason: exitReason,
 	}, nil
 }
 

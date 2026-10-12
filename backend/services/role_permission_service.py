@@ -8,6 +8,10 @@ from models.project import Project
 from models.subsystem import Subsystem
 
 
+# 系统内置超级管理员角色名（禁止清空其权限，避免破坏超管全权限逻辑）
+SUPER_ADMIN_ROLE_NAME = "超级管理员"
+
+
 DEFAULT_ROLES = [
     {
         "name": "超级管理员",
@@ -75,9 +79,13 @@ DEFAULT_PERMISSIONS = [
     {"resource": "agent", "action": "view", "name": "查看 Agent", "description": "查看 Agent 列表和状态"},
     {"resource": "agent", "action": "manage", "name": "管理 Agent", "description": "管理 Agent 配置"},
 
-    # 3.8 主机管理（不包含 create/delete，主机由底层基础设施管理）
+    # 3.8 主机管理
     {"resource": "host", "action": "view", "name": "查看主机", "description": "查看主机列表和详情"},
     {"resource": "host", "action": "reboot", "name": "重启主机", "description": "重启主机"},
+    {"resource": "host", "action": "manage", "name": "管理主机", "description": "新增/编辑/删除主机（服务器）"},
+
+    # 3.8.1 数据备份
+    {"resource": "backup", "action": "manage", "name": "管理数据库备份", "description": "配置/执行/下载/恢复/删除数据库备份"},
 
     # 3.9 组织管理
     {"resource": "organization", "action": "view", "name": "查看组织", "description": "查看组织信息"},
@@ -112,28 +120,29 @@ ROLE_PERMISSION_MAP = {
         "log:view", "log:download",
         "script:view", "script:run",
         "agent:view", "agent:manage",
-        "host:view", "host:reboot",
-        "organization:view", "organization:edit",
-        "department:view", "department:edit",
-        "user:view", "user:add", "user:edit",
-        "role:view",
+        "host:view", "host:manage",
+        "backup:manage",
+        "organization:view",
+        "department:view",
+        # 用户查看：组织管理员默认拥有，数据范围收敛到本组织（写权限 user:add/edit/delete 不授予）
+        "user:view",
         "audit:view",
     ],
     "部门管理员": [
         "project:view", "project:add", "project:edit", "project:delete", "project:share",
-        "service:view", "service:start", "service:stop", "service:restart",
+        "service:view", "service:start", "service:stop", "service:restart", "service:deploy", "service:edit-config",
         "container:view", "container:exec", "container:start", "container:stop", "container:restart",
         "webshell:login",
         "log:view", "log:download",
         "script:view", "script:run",
         "agent:view", "agent:manage",
         "host:view",
-        "organization:view",
-        "department:view",
+        # 用户查看：部门管理员默认拥有，数据范围收敛到本部门（写权限 user:add/edit/delete 不授予）
+        "user:view",
         "audit:view",
     ],
     "部门成员": [
-        "project:view", "project:add", "project:edit", "project:delete", "project:share",
+        "project:view",
         "service:view", "service:start", "service:stop", "service:restart",
         "container:view", "container:exec", "container:start", "container:stop", "container:restart",
         "webshell:login",
@@ -141,8 +150,6 @@ ROLE_PERMISSION_MAP = {
         "script:view",
         "agent:view",
         "host:view",
-        "organization:view",
-        "department:view",
     ],
     "只读用户": [
         "project:view",
@@ -152,8 +159,6 @@ ROLE_PERMISSION_MAP = {
         "script:view",
         "agent:view",
         "host:view",
-        "organization:view",
-        "department:view",
     ],
 }
 
@@ -219,22 +224,74 @@ class RolePermissionService:
         return query.all()
 
     @staticmethod
-    def assign_permissions_to_role(db: Session, role_id: int, permission_ids: List[int]) -> bool:
-        """为角色分配权限"""
-        role = db.query(Role).filter(Role.id == role_id).first()
+    def assign_permissions_to_role(db: Session, role_id: int, permission_ids: List[int]) -> Dict[str, Any]:
+        """为角色保存功能权限（覆盖式保存）。
+
+        提交的 permission_ids 表示该角色最终应拥有的完整权限集合：
+        - 已勾选（既存且提交）：保留；
+        - 取消勾选（既存但未提交）：从 role_permissions 删除；
+        - 新勾选（提交但既存没有）：新增。
+        删除与新增在同一事务内完成，异常时整体回滚。
+        返回 {"role_name": str, "added": [权限码], "removed": [权限码]}。
+        """
+        # 参数防御：None / 非列表 / 非法元素均报错，不会被误判为空集合（空集合 = 清空）
+        try:
+            target_ids = {int(pid) for pid in permission_ids}
+        except (TypeError, ValueError):
+            db.rollback()
+            raise ValueError("permission_ids 必须为整数数组")
+
+        # 锁定角色行，串行化同一角色的并发保存，避免相互覆盖丢失权限
+        role = db.query(Role).filter(Role.id == role_id).with_for_update().first()
         if not role:
+            db.rollback()
             raise ValueError("角色不存在")
 
-        existing = db.query(RolePermission).filter(RolePermission.role_id == role_id).all()
-        existing_ids = {rp.permission_id for rp in existing}
+        # 系统内置超级管理员角色禁止清空
+        if role.name == SUPER_ADMIN_ROLE_NAME and not target_ids:
+            db.rollback()
+            raise ValueError("超级管理员角色权限不可清空")
 
-        for pid in permission_ids:
-            if pid not in existing_ids:
-                rp = RolePermission(role_id=role_id, permission_id=pid)
-                db.add(rp)
+        # 校验提交的权限ID均存在，避免写入非法关联
+        code_by_id = {}
+        if target_ids:
+            for perm in db.query(Permission).filter(Permission.id.in_(target_ids)).all():
+                code_by_id[perm.id] = f"{perm.resource}:{perm.action}"
+        invalid_ids = target_ids - set(code_by_id.keys())
+        if invalid_ids:
+            db.rollback()
+            raise ValueError(f"存在无效的权限ID: {sorted(invalid_ids)}")
 
-        db.commit()
-        return True
+        existing_ids = {
+            rp.permission_id
+            for rp in db.query(RolePermission).filter(RolePermission.role_id == role_id).all()
+        }
+        added_ids = target_ids - existing_ids
+        removed_ids = existing_ids - target_ids
+
+        try:
+            if removed_ids:
+                db.query(RolePermission).filter(
+                    RolePermission.role_id == role_id,
+                    RolePermission.permission_id.in_(removed_ids),
+                ).delete(synchronize_session=False)
+            for pid in added_ids:
+                db.add(RolePermission(role_id=role_id, permission_id=pid))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+        # 组装审计用权限码（被移除的权限不在上面的查询范围内，需补查）
+        if removed_ids:
+            for perm in db.query(Permission).filter(Permission.id.in_(removed_ids)).all():
+                code_by_id[perm.id] = f"{perm.resource}:{perm.action}"
+
+        return {
+            "role_name": role.name,
+            "added": sorted(code_by_id[i] for i in added_ids),
+            "removed": sorted(code_by_id[i] for i in removed_ids),
+        }
 
     @staticmethod
     def remove_permissions_from_role(db: Session, role_id: int, permission_ids: List[int]) -> bool:
@@ -321,21 +378,24 @@ class RolePermissionService:
         for perm in db.query(Permission).all():
             perm_map[f"{perm.resource}:{perm.action}"] = perm
 
-        # 4. 按预设分配角色权限
+        # 4. 按预设分配角色权限（仅首次初始化）
+        #    数据库是运行时权限的唯一来源：角色一旦存在权限关联，就不再按预设覆盖，
+        #    否则每次启动都会把管理员在“功能权限分配”页面的覆盖式保存/基线迁移结果重新加回。
         for role_name, perm_keys in ROLE_PERMISSION_MAP.items():
             role = db.query(Role).filter(Role.name == role_name).first()
             if not role:
                 continue
 
-            existing_rp_ids = set()
-            for rp in db.query(RolePermission).filter(RolePermission.role_id == role.id).all():
-                existing_rp_ids.add(rp.permission_id)
+            has_any = db.query(RolePermission).filter(
+                RolePermission.role_id == role.id
+            ).first()
+            if has_any:
+                continue
 
             for perm_key in perm_keys:
                 perm = perm_map.get(perm_key)
-                if perm and perm.id not in existing_rp_ids:
-                    rp = RolePermission(role_id=role.id, permission_id=perm.id)
-                    db.add(rp)
+                if perm:
+                    db.add(RolePermission(role_id=role.id, permission_id=perm.id))
 
         db.commit()
 

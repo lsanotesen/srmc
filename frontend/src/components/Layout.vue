@@ -153,7 +153,7 @@ const menu = computed(() => {
     { id: 'overview', name: '运行总览', icon: 'data-analysis', path: '/overview', children: [] },
     {
       id: 'project-services',
-      name: '项目服务管理',
+      name: '项目资源管理',
       icon: 'folder-opened',
       path: '',
       children: [

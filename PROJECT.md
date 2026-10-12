@@ -2,6 +2,19 @@
 
 > **使用约定：后续任何任务请优先阅读本文档获取项目全貌与关键约定，不要批量遍历全部源码。**
 > 文档基于 2026-09 源码整理；如代码发生结构性变更，请同步更新本文档对应章节。
+> **§0 为强制约束，优先级最高，必须遵守；文中标注「已过时」的内容不得作为开发依据。**
+
+---
+
+## 0. AI 开发必须遵守的约束（强制）
+
+> 本节为强制约束，优先级高于文档中其他任何历史描述；若发现冲突，一律以本节为准。
+
+1. **服务运行状态只能由 Agent 判定**：状态完全来自 Agent 的上报与心跳，后端/前端不得自行推断服务运行状态。
+2. **Agent 离线 ≠ 服务已停止**：Agent 离线时服务状态一律为 UNKNOWN（来源 OFFLINE），必须如实展示，不得推断为「已停止」。
+3. **严禁 SSH 兜底判断服务状态**：不得新增、恢复、或引用任何「Agent 离线时通过 SSH 探测服务状态」的逻辑（含状态检测、健康检查、端口/进程探测）。历史文档、注释、遗留模块中此类描述一律视为**已过时**。
+4. **SSH 的使用边界**：SSH 仅用于明确需要 SSH 的操作，例如服务启动、停止、远程登录（Web 终端）。
+5. 修改状态相关代码前先确认与上述规则一致；**不得以旧文档、旧注释或遗留模块（如 `services/monitor_service.py`）为依据引入 SSH 状态兜底**。
 
 ---
 
@@ -11,7 +24,7 @@
 
 - 按「项目 → 子系统 → 程序分类 → 服务」四级结构管理大量服务（50~100+）
 - 实时监控每台服务器上各服务的运行状态（主机进程 / Docker / Docker Compose）
-- 通过 **Agent（Go，容器部署在目标服务器）** 优先采集状态与执行启停；Agent 离线时自动回退 **SSH** 检测
+- 通过 **Agent（Go，容器部署在目标服务器）** 采集服务运行状态并执行启停；**服务状态完全由 Agent 上报及心跳判断**，Agent 离线时状态为 UNKNOWN，**不用 SSH 探测**
 - 内置 Web 远程终端（xterm.js + SSH PTY）、Excel 批量导入导出、数据库备份恢复、RBAC 权限、审计日志
 
 ## 2. 总体架构
@@ -29,10 +42,10 @@
                                        │ SRMC Agent (Go)  │ ──────────────────▶ │ 目标服务器容器 │
                                        │ (每台目标机一个)   │  nsenter/su         │ 目标服务器进程 │
                                        └──────────────────┘                     └──────────────┘
-                                       后端在 Agent 离线时走 SSH 直连目标机检测（asyncssh/paramiko 池）
+                                       服务状态仅由 Agent 上报/心跳判定；Agent 离线即 UNKNOWN，不用 SSH 探测
 ```
 
-**状态检测优先原则**：服务 IP 必须与 Agent IP 一致才会被该 Agent 监控（不支持跨 IP）；Agent 在线 → 独占使用 Redis 缓存状态；Agent 离线 → SSH 检测（每次最多 10 个服务）。
+**状态判定原则（当前有效）**：服务 IP 必须与 Agent IP 一致才会被该 Agent 监控（不支持跨 IP）；服务运行状态**完全由 Agent 上报及心跳判断**——Agent 在线 → 使用其写入 Redis 的状态；Agent 离线 → 状态一律为 UNKNOWN，**不得通过 SSH 探测**。**Agent 离线不代表服务已停止**。SSH 仅用于明确需要 SSH 的操作（服务启动/停止/远程登录）。详见 §0 强制约束。
 
 ## 3. 目录结构与技术栈
 
@@ -119,7 +132,7 @@ srmc/
 | Agent | api/agent.py | `WS /ws/agent/{uuid}`（L279-319 连接与消息循环、断连清理缓存标记 OFFLINE）、注册自动关联同 IP 服务（L353-427）、debug 接口 |
 | 远程终端 | api/shell.py | `WS /shell/ws/{service_id}`：认证→查服务→SSH→PTY→转发（详见 §5.4） |
 | 备份 | api/backup.py | 备份策略配置（动态重排定时任务）、手动备份/下载/删除/**恢复**（受权限控制） |
-| 审计 | api/audit*.py | 审计日志查询（保留 `AUDIT_LOG_RETENTION_DAYS=90` 天） |
+| 审计 | api/audit.py、schemas/audit.py、services/audit_service.py | **唯一审计入口**：`GET /api/audit` 分页查询，支持 `action`(逗号分隔多值)/`project_id`/`subsystem_id`/`service_id`/`service_code`/`username`/`result`/`start_time`/`end_time` 过滤；`POST /api/audit` 写记录（所有 `log_audit` 调用最终经此写入）；内置 DataScope 权限过滤、`_attach_names()` 批量填充 project_name/subsystem_name/service_name；保留 90 天（`AUDIT_LOG_RETENTION_DAYS`） |
 | **运行总览** | api/dashboard.py | 4 个接口（全部经 DataScope 权限过滤）：`GET /api/dashboard/overview`（6 统计卡）、`GET /api/dashboard/projects`（项目聚合）、`GET /api/dashboard/stopped-services`（分页）、`GET /api/dashboard/agent-offline` |
 | **服务列表扩展** | api/services.py `get_services` | 新增 `status` / `agent_status` 查询参数（Redis 状态内存过滤，跳过列表缓存）；所有查询**接入 DataScopeService 权限过滤**（非 ADMIN 仅可见有权限的项目服务） |
 
@@ -133,17 +146,19 @@ srmc/
 
 ### 5.4 核心流程
 
-**① 服务状态采集（双通道）**
+**① 服务状态采集（仅 Agent 通道，当前有效）**
 ```
 前端轮询(5s) → GET /api/services... → 列表接口内 MGET Redis:
-  service_status:{id}          状态字符串(Running/Stopped/Partial/...)
-  service_status_source:{id}   来源 AGENT/SSH/OFFLINE
+  service_status:{id}          状态字符串(Running/Stopped/Partial/UNKNOWN)
+  service_status_source:{id}   来源 AGENT/OFFLINE（SSH 取值已废弃，不得再写入/新增）
   service_containers:{id}      Docker Compose 容器明细 JSON
-Agent 在线 → 这些 key 由心跳持续刷新（TTL 60s），SSH 查询被禁用
-Agent 离线 → SSH 兜底：utils/ssh_pool 连接执行检测（≤10 服务/次），状态检测优先
-  StartCmd 脚本解析（提取具体可执行文件名）而非 ProgramPath 泛匹配；端口检测优先于进程匹配
+Agent 在线 → 这些 key 由心跳持续刷新（TTL 60s）
+Agent 离线/断连 → 关联服务状态置 UNKNOWN、来源置 OFFLINE（见 api/agent.py 断连清理），不探测、不猜测
+状态明细判定由 Agent 端完成：StartCmd 脚本解析（提取具体可执行文件名）而非 ProgramPath 泛匹配；端口检测优先于进程匹配
 ```
-（旧 monitor_service.py 为 Server 维度的 SSH 检测实现，部分场景仍引用。）
+> **本条为当前有效规则（勿改）**：服务运行状态完全由 Agent 上报及心跳判断；**Agent 离线不代表服务已停止**；**严禁使用 SSH 兜底判断服务运行状态，严禁新增或恢复此类逻辑**。SSH 仅用于启动/停止/远程登录等明确需要 SSH 的操作。
+>
+> **已过时（历史遗留，勿参照）**：`services/monitor_service.py` 是旧的 **Server 维度** SSH 检测实现（`check_service_status` / `check_server_services` / `update_all_service_statuses`，仍被 `main.py` 定时调度及若干接口 import）。它面向旧 `Service`/`Server` 模型，**不是 AppService 的状态判定来源**；据此恢复或扩展 SSH 状态兜底属违规。
 
 **② Agent 生命周期**
 - 注册（agent.py L353-427）：复用/创建 Agent 记录 → **自动关联该 IP 上所有未关联服务** → 清旧缓存 → 下发服务清单（`handle_pull_services` L496-545 组装 ServiceConfig：`docker_name=container_name`、`compose_path=program_path`，start_cmd 相对路径自动拼 program_path 前缀）
@@ -251,13 +266,14 @@ collectSingleService 按 deploy_type 分发:
 | 页面 | 用途 |
 |---|---|
 | **Overview.vue**（运行总览） | 新增首页：6 统计卡（项目数/服务数/运行中/已停止/Agent异常/未知）+ 项目运行状态列表（点击下钻 `/services?project_id=xx`）+ 当前停止服务列表 + Agent 异常列表；支持自动刷新（60s 默认）、手动刷新、点击跳转服务管理带筛选条件 |
-| ServicesNew.vue | 服务管理主页面（已升级）：列表+详情弹窗+内嵌 xterm+日志流；**新增**：状态/Agent状态/部署方式三个筛选下拉、状态统计快捷筛选栏（点击运行中/已停止/Agent异常切换筛选）、**支持 URL query 初始化筛选**（运行总览下钻带条件进来自动生效） |
+| ServicesNew.vue | 服务管理主页面（已升级）：列表+详情弹窗+内嵌 xterm+日志流；**列表已移除「停止时间」列**（改在详情弹窗中展示）；详情弹窗含「停止时间」字段（仅 STOPPED 状态显示）、**「查看操作记录」按钮跳 `/audit` 并自动带入 project_id/subsystem_id/service_id 筛选条件**（`selectedService` 为 `reactive({})` 对象，直接访问属性，无 `.value`）；表格 4 个按钮列（操作/日志/启停控制/远程登录）`fixed="right"` 始终可见；table-wrapper `overflow: auto` 支持横向滚动 |
 | Agents.vue | Agent 列表：UUID 列（等宽字体）、在线状态（硬在线=ws 连接 ∨ 软在线=30s 内心跳）、最后心跳；**批量更新入口**：勾选或弹窗内多选目标 Agent → 选择更新类型（Docker 镜像/二进制）→ 流式上传（进度+SHA256）→ 配置参数 → 二次确认 → 创建任务 |
 | AgentUpdateTasks.vue | 批量更新任务列表/详情：任务级（ID/类型/版本/目标/成功/失败/执行中/创建人/状态）5s 轮询；详情逐台主机名/IP/状态/当前步骤/进度/起止时间/错误信息，支持取消执行中任务 |
 | Shell.vue | 独立简化终端页（textarea 逐条发送，非 xterm） |
 | ImportServices.vue / ExportServices.vue | Excel 导入导出向导 |
 | Backup.vue | 备份策略与记录、恢复 |
-| Layout.vue | 侧边菜单（后端菜单+兜底）、面包屑、侧栏折叠持久化 localStorage；菜单首项已改为"运行总览"（icon=data-analysis → DataAnalysis） |
+| Audit.vue | 审计日志（唯一入口）：查询全部操作记录（含服务启停/导入/回滚/增删改等）；支持 action/project_id/subsystem_id/service_id/username/result 多条件筛选；**支持从服务详情页跳转带入筛选条件**（通过 `watch route.query` 实现，含 keep-alive 缓存场景）；详情弹窗展示完整请求/响应/错误信息 |
+| Layout.vue | 侧边菜单（后端菜单+兜底）、面包屑、侧栏折叠持久化 localStorage；菜单已移除独立的「服务操作记录」入口，所有审计统一走 Audit 页面 |
 
 ### 7.5 xterm 终端协议（ServicesNew.vue）
 

@@ -43,14 +43,19 @@ LEGACY_TO_NEW_PERMISSIONS = {
     "project_manage": ["project:add", "project:edit", "project:delete", "project:share"],
     # 其他
     "webshell": ["webshell:login", "container:exec"],
-    "sql_execute": ["service:view"],
+    # SQL 执行：属于服务运维操作，复用“服务启停”权限集合，
+    # 避免映射到 service:view 让只读用户也能执行 SQL（原映射过宽）。
+    "sql_execute": ["service:start", "service:stop", "service:restart"],
     "sql_read": ["service:view"],
     "log_view": ["log:view"],
     "log_download": ["log:download"],
     "import": ["service:deploy"],
     "export": ["log:download"],
     "audit_view": ["audit:view"],
-    "user_manage": ["user:view", "user:add", "user:edit", "user:delete", "role:view", "role:edit", "organization:view", "organization:edit", "department:view", "department:edit"],
+    # 用户/角色管理：仅由 user:* / role:* 决定。
+    # 不再并入 organization:view/edit、department:view/edit，
+    # 否则持有 organization:view 的组织管理员会通过 user_manage 守卫获得用户管理权（越权）。
+    "user_manage": ["user:view", "user:add", "user:edit", "user:delete", "role:view", "role:edit"],
     "agent_view": ["agent:view"],
     "agent_manage": ["agent:manage"],
     "program:manage": ["service:deploy", "service:edit-config"],
@@ -63,9 +68,8 @@ def require_permission(permission: str):
     权限检查依赖（兼容旧版权限码，内部转换为新权限码检查）
     """
     def checker(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-        if user.role == "ADMIN":
-            return user
-
+        # 超级管理员由 PermissionService.get_user_permissions 直接返回全部系统权限，
+        # 无需在此短路（旧代码判断 user.role == "ADMIN" 与 User.role 枚举不符，为无效死分支）。
         # 将旧权限码转换为新权限码列表
         required_new_perms = LEGACY_TO_NEW_PERMISSIONS.get(permission, [permission])
 

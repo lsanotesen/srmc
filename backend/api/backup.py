@@ -8,7 +8,7 @@ import os
 
 from core.database import get_db
 from schemas.common import ResponseModel
-from api.dependencies import require_permission, get_current_user
+from api.dependencies import require_permission
 from models.db_backup import DbBackupConfig, DbBackupRecord
 from services import backup_service
 
@@ -30,7 +30,7 @@ class RestoreIn(BaseModel):
 @router.get("/backup/config", response_model=ResponseModel)
 async def get_backup_config(
     db: Session = Depends(get_db),
-    user=Depends(require_permission("user_manage"))
+    user=Depends(require_permission("backup:view"))
 ):
     backup_service.ensure_default_config()
     cfg = db.query(DbBackupConfig).first()
@@ -50,7 +50,7 @@ async def get_backup_config(
 async def update_backup_config(
     body: BackupConfigIn,
     db: Session = Depends(get_db),
-    user=Depends(require_permission("user_manage"))
+    user=Depends(require_permission("backup:manage"))
 ):
     backup_service.ensure_default_config()
     cfg = db.query(DbBackupConfig).first()
@@ -89,7 +89,7 @@ async def list_backup_records(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    user=Depends(require_permission("user_manage"))
+    user=Depends(require_permission("backup:view"))
 ):
     from sqlalchemy import func
     total = db.query(func.count(DbBackupRecord.id)).scalar()
@@ -114,7 +114,7 @@ async def list_backup_records(
 @router.post("/backup/run", response_model=ResponseModel)
 async def run_manual_backup(
     db: Session = Depends(get_db),
-    user=Depends(require_permission("user_manage"))
+    user=Depends(require_permission("backup:manage"))
 ):
     try:
         rec = backup_service.run_backup(
@@ -137,7 +137,7 @@ async def run_manual_backup(
 async def download_backup(
     record_id: int,
     db: Session = Depends(get_db),
-    user=Depends(require_permission("user_manage"))
+    user=Depends(require_permission("backup:manage"))
 ):
     rec = db.query(DbBackupRecord).filter(DbBackupRecord.id == record_id).first()
     if not rec:
@@ -153,7 +153,7 @@ async def download_backup(
 async def delete_backup_record(
     record_id: int,
     db: Session = Depends(get_db),
-    user=Depends(require_permission("user_manage"))
+    user=Depends(require_permission("backup:manage"))
 ):
     try:
         backup_service.delete_record(record_id)
@@ -167,7 +167,7 @@ async def restore_backup(
     record_id: int,
     body: RestoreIn,
     db: Session = Depends(get_db),
-    user=Depends(require_permission("user_manage"))
+    user=Depends(require_permission("backup:manage"))
 ):
     # 鉴权 SELECT 会在请求 session 上开启事务并保持到响应结束，
     # 长期持有 metadata lock 会阻塞恢复的 DDL，先显式提交释放

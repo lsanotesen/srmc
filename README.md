@@ -6,7 +6,7 @@
 
 ### 核心功能
 - **服务统一管理**：支持 APP、NGINX、REDIS、MYSQL、KINGBASE、DAMENG、ELASTICSEARCH、RABBITMQ 等多种服务类型
-- **远程启停与监控**：通过 SSH 连接实现服务的远程启停和状态监控
+- **远程启停与监控**：服务运行状态完全由 Agent 上报及心跳判断（Agent 离线时状态为 UNKNOWN，不用 SSH 探测）；启停操作优先经 Agent 执行，Agent 离线时回退 SSH 执行
 - **日志管理**：在线查看日志、实时 tail、关键字过滤
 - **WebShell**：基于 xterm.js 的远程终端访问
 - **SQL 控制台**：支持 MySQL、Kingbase、达梦数据库的 SQL 执行
@@ -17,7 +17,7 @@
 ### 安全特性
 - RBAC 权限管理（ADMIN/OPS/DEV/READONLY）
 - 操作审计日志（保留90天）
-- SSH 连接池复用
+- SSH 连接池复用（仅用于服务启停、远程登录等操作，不用于服务状态判定）
 - AES-256-GCM 密码加密存储
 
 ## 技术栈

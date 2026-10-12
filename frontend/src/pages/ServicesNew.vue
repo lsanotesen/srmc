@@ -113,22 +113,19 @@
             <el-table-column prop="ip" label="IP地址" min-width="120" />
             <el-table-column prop="username" label="用户名" min-width="100" />
             <el-table-column prop="program_path" label="程序路径" min-width="180" show-overflow-tooltip />
-            <el-table-column prop="status" label="状态" width="140">
+            <el-table-column prop="status" label="状态" width="120">
               <template #default="scope">
-                <div class="status-cell">
-                  <el-tag :type="getStatusType(scope.row.status)">
-                    {{ getStatusText(scope.row.status) }}
-                  </el-tag>
-                  <span v-if="scope.row.status_source === 'AGENT'" class="status-source agent-source">
-                    Agent
-                  </span>
-                  <span v-else-if="scope.row.status_source === 'OFFLINE'" class="status-source offline-source">
-                    Agent离线
-                  </span>
-                </div>
+                <el-tag :type="getStatusType(scope.row.status)">
+                  {{ getStatusText(scope.row.status) }}
+                </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="140" align="center">
+            <el-table-column prop="status_last_seen_at" label="状态最后更新时间" min-width="160">
+              <template #default="scope">
+                <span>{{ formatTimestamp(scope.row.status_last_seen_at) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="140" align="center" fixed="right">
               <template #default="scope">
                 <div class="action-buttons">
                   <div class="action-btn view-btn" @click="viewService(scope.row)">
@@ -140,7 +137,7 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="日志" width="80" align="center">
+            <el-table-column label="日志" width="80" align="center" fixed="right">
               <template #default="scope">
                 <div class="action-buttons">
                   <div v-if="hasPermission('log:view')" class="action-btn log-btn" @click="viewLog(scope.row)">
@@ -149,7 +146,7 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="启停控制" width="160" align="center">
+            <el-table-column label="启停控制" width="160" align="center" fixed="right">
               <template #default="scope">
                 <div class="action-buttons">
                   <template v-if="!isRunning(scope.row.status)">
@@ -171,7 +168,7 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="远程登录" width="100" align="center">
+            <el-table-column label="远程登录" width="100" align="center" fixed="right">
               <template #default="scope">
                 <div class="action-buttons">
                   <div v-if="hasPermission('webshell:login')" class="action-btn login-btn" @click="webShell(scope.row)">
@@ -353,13 +350,10 @@
             <el-tag :type="getStatusType(selectedService.status)">
               {{ getStatusText(selectedService.status) }}
             </el-tag>
-            <span v-if="selectedService.status_source === 'AGENT'" class="status-source agent-source">
-              Agent
-            </span>
-            <span v-else-if="selectedService.status_source === 'OFFLINE'" class="status-source offline-source">
-              Agent离线
-            </span>
           </div>
+        </el-descriptions-item>
+        <el-descriptions-item label="停止时间">
+          {{ selectedService.status === 'STOPPED' && selectedService.stopped_at ? formatTimestamp(selectedService.stopped_at) : '-' }}
         </el-descriptions-item>
         <el-descriptions-item label="运行类型">
           <el-select
@@ -423,6 +417,22 @@
               {{ getContainerDetailText(scope.row) }}
             </template>
           </el-table-column>
+          <el-table-column label="退出原因" width="170" show-overflow-tooltip>
+            <template #default="scope">
+              <span v-if="scope.row.state === 'exited' || scope.row.state === 'dead'">
+                {{ getContainerExitReason(scope.row) }}
+              </span>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="最后退出时间" width="170">
+            <template #default="scope">
+              <span v-if="scope.row.state === 'exited' || scope.row.state === 'dead'">
+                {{ formatContainerFinishedAt(scope.row.finished_at) }}
+              </span>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="image" label="镜像" min-width="180" show-overflow-tooltip />
           <el-table-column prop="ports" label="端口映射" min-width="150" show-overflow-tooltip />
           <el-table-column prop="id" label="容器ID" width="130" show-overflow-tooltip />
@@ -430,6 +440,14 @@
       </div>
 
       <template #footer>
+        <el-button
+          v-if="selectedService"
+          type="primary"
+          plain
+          @click="goToServiceOperationLogs"
+        >
+          查看操作记录
+        </el-button>
         <el-button @click="showDetailDialog = false">关闭</el-button>
       </template>
     </el-dialog>
@@ -971,6 +989,22 @@ const getStatusText = (status) => {
   return status;
 };
 
+const formatTimestamp = (timestamp) => {
+  if (!timestamp) return '-';
+  // 如果是Unix时间戳（数字），需要转换
+  const date = typeof timestamp === 'number' ? new Date(timestamp * 1000) : new Date(timestamp);
+  if (isNaN(date.getTime())) return '-';
+  return date.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+};
+
 const getRunningContainers = (containers) => {
   if (!containers) return 0;
   return containers.filter(c => c.running).length;
@@ -1038,6 +1072,38 @@ const getContainerDetailText = (row) => {
     return `${state} / ExitCode=${row.exit_code}`;
   }
   return state;
+};
+
+// 退出原因：OOMKilled 优先，其次 Docker State.Error，最后按退出码归类
+const getContainerExitReason = (row) => {
+  if (row.oom_killed) return 'OOMKilled';
+  if (row.exit_reason) return row.exit_reason;
+  const code = row.exit_code;
+  if (code === undefined || code === null || code < 0) return '-';
+  if (code === 0) return '正常退出';
+  if (code === 137) return '被强制终止 (SIGKILL)';
+  if (code === 143) return '被终止 (SIGTERM)';
+  if (code === 139) return '段错误 (SIGSEGV)';
+  if (code === 134) return '程序中止 (SIGABRT)';
+  return `异常退出 (ExitCode=${code})`;
+};
+
+// 最后退出时间：Docker FinishedAt 为 RFC3339，未退出（零值）时显示 -
+const formatContainerFinishedAt = (finishedAt) => {
+  if (!finishedAt) return '-';
+  // Docker 未退出时返回 0001-01-01T00:00:00Z
+  if (finishedAt.startsWith('0001-01-01')) return '-';
+  const date = new Date(finishedAt);
+  if (isNaN(date.getTime())) return '-';
+  return date.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
 };
 
 // 正常容器：运行中、一次性任务已完成、未启用/停止（预期状态）
@@ -1569,6 +1635,20 @@ const viewService = async (service) => {
   }
 };
 
+// 跳转到审计日志，带入当前服务筛选条件
+const goToServiceOperationLogs = () => {
+  if (!selectedService.id) return
+  showDetailDialog.value = false
+  router.push({
+    path: '/audit',
+    query: {
+      project_id: selectedService.project_id,
+      subsystem_id: selectedService.subsystem_id,
+      service_id: selectedService.id
+    }
+  })
+}
+
 const editService = async (service) => {
   serviceForm.id = service.id;
   serviceForm.project_id = service.project_id;
@@ -1977,7 +2057,8 @@ const startLogStream = () => {
   stopLogStream();
   
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${protocol}//${window.location.host}/api/services/${selectedLogService.value.id}/log/ws`;
+  const token = localStorage.getItem('token');
+  const wsUrl = `${protocol}//${window.location.host}/api/services/${selectedLogService.value.id}/log/ws?token=${token}`;
   
   logWebSocket = new WebSocket(wsUrl);
   
@@ -3383,7 +3464,7 @@ const loadAgents = async () => {
 
 .table-wrapper {
   flex: 1;
-  overflow-y: auto;
+  overflow: auto;
 }
 
 .el-table {

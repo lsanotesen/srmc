@@ -120,6 +120,19 @@ export const useProjectStore = defineStore('project', {
     },
 
     /**
+     * 清空缓存（退出登录/切换账号时调用）
+     * 避免切换账号后残留上一个账号的项目树数据
+     */
+    reset() {
+      this.tree = []
+      this.lastFetchTime = 0
+      this.loading = false
+      this.error = null
+      this.subsystemIndex = new Map()
+      this.groupIndex = new Map()
+    },
+
+    /**
      * 数据变更后强制刷新缓存
      * 在新增/编辑/删除 项目/子系统/分组 后调用
      */

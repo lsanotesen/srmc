@@ -74,7 +74,7 @@ async def get_server(server_id: int, db: Session = Depends(get_db), user = Depen
     return ResponseModel(data=_serialize_server(server))
 
 @router.post("/servers", response_model=ResponseModel)
-async def create_server(server_create: ServerCreate, db: Session = Depends(get_db), user = Depends(require_permission("user_manage"))):
+async def create_server(server_create: ServerCreate, db: Session = Depends(get_db), user = Depends(require_permission("host:manage"))):
     existing = db.query(Server).filter(
         Server.ip == str(server_create.ip),
         Server.organization_id == user.organization_id,
@@ -100,7 +100,7 @@ async def create_server(server_create: ServerCreate, db: Session = Depends(get_d
     return ResponseModel(data=_serialize_server(server))
 
 @router.put("/servers/{server_id}", response_model=ResponseModel)
-async def update_server(server_id: int, server_update: ServerUpdate, db: Session = Depends(get_db), user = Depends(require_permission("user_manage"))):
+async def update_server(server_id: int, server_update: ServerUpdate, db: Session = Depends(get_db), user = Depends(require_permission("host:manage"))):
     server = _scope_server_query(db.query(Server), user).filter(Server.id == server_id).first()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
@@ -120,7 +120,7 @@ async def update_server(server_id: int, server_update: ServerUpdate, db: Session
     return ResponseModel(data=_serialize_server(server))
 
 @router.delete("/servers/{server_id}", response_model=ResponseModel)
-async def delete_server(server_id: int, db: Session = Depends(get_db), user = Depends(require_permission("user_manage"))):
+async def delete_server(server_id: int, db: Session = Depends(get_db), user = Depends(require_permission("host:manage"))):
     server = _scope_server_query(db.query(Server), user).filter(Server.id == server_id).first()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")

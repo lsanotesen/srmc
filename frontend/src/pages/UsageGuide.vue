@@ -13,39 +13,54 @@
 
       <div class="guide-section">
         <h2>二、部署方式说明</h2>
-        <p>系统支持三种部署方式，根据服务类型选择合适的部署方式：</p>
+        <p>系统支持四种部署方式，根据服务类型选择合适的部署方式：</p>
         
         <div class="deploy-cards">
           <div class="deploy-card">
             <div class="deploy-icon host">🖥️</div>
-            <h3>主机部署</h3>
-            <p>直接在物理主机上运行的服务，需要手动编写启动和停止脚本。</p>
+            <h3>主机进程部署 (PROCESS)</h3>
+            <p>直接在物理主机上运行的服务进程，通过进程名/端口/PID 文件检测状态。</p>
             <ul>
-              <li><strong>适用场景：</strong>传统服务、自定义脚本部署</li>
+              <li><strong>适用场景：</strong>传统 Java/Go/Python 服务、自定义脚本部署</li>
               <li><strong>必填字段：</strong>程序路径、启动脚本、停止脚本</li>
+              <li><strong>状态检测：</strong>PID 文件 → 端口 → StartCmd 脚本解析 → 进程名</li>
               <li><strong>启停方式：</strong>执行用户自定义脚本</li>
             </ul>
           </div>
 
           <div class="deploy-card">
-            <div class="deploy-icon docker">🐳</div>
-            <h3>Docker容器部署</h3>
-            <p>单个Docker容器运行的服务，系统自动使用docker命令管理容器。</p>
+            <div class="deploy-icon host">🏠</div>
+            <h3>主机命令部署 (HOST)</h3>
+            <p>主机上通过 systemd 管理或命令启动的服务。</p>
             <ul>
-              <li><strong>适用场景：</strong>单容器应用（如Nginx、MySQL）</li>
+              <li><strong>适用场景：</strong>systemd 管理的服务、标准系统服务</li>
+              <li><strong>必填字段：</strong>程序路径</li>
+              <li><strong>状态检测：</strong>同 PROCESS 检测链</li>
+            </ul>
+          </div>
+
+          <div class="deploy-card">
+            <div class="deploy-icon docker">🐳</div>
+            <h3>Docker容器部署 (DOCKER)</h3>
+            <p>单个 Docker 容器运行的服务，系统通过 docker inspect 自动管理。</p>
+            <ul>
+              <li><strong>适用场景：</strong>单容器应用（Nginx、MySQL、Redis 等）</li>
               <li><strong>必填字段：</strong>程序路径、容器名称</li>
-              <li><strong>启停命令：</strong>docker start/stop {容器名称}</li>
+              <li><strong>启停命令：</strong>docker start/stop/restart {容器名称}</li>
+              <li><strong>日志查看：</strong>docker logs -f</li>
             </ul>
           </div>
 
           <div class="deploy-card">
             <div class="deploy-icon compose">📦</div>
-            <h3>Docker Compose部署</h3>
-            <p>使用docker-compose编排的多容器应用，系统自动管理整个应用栈。</p>
+            <h3>Docker Compose部署 (DOCKER_COMPOSE)</h3>
+            <p>使用 docker-compose 编排的多容器应用，系统自动管理整个 Compose 项目。</p>
             <ul>
-              <li><strong>适用场景：</strong>多容器应用（含数据库、中间件）</li>
-              <li><strong>必填字段：</strong>程序路径（docker-compose.yml所在目录）</li>
-              <li><strong>启停命令：</strong>docker-compose up -d / docker-compose down</li>
+              <li><strong>适用场景：</strong>多容器应用（含数据库、中间件、前端等）</li>
+              <li><strong>必填字段：</strong>程序路径（docker-compose.yml 所在目录）</li>
+              <li><strong>启停命令：</strong>docker compose up -d / down / restart</li>
+              <li><strong>状态检测：</strong>两种方式互为兜底（docker inspect 单容器 / docker ps --filter compose.project.config_files）</li>
+              <li><strong>注意：</strong>compose 文件建议配唯一顶层 `name` 字段</li>
             </ul>
           </div>
         </div>
@@ -66,13 +81,28 @@
         </div>
 
         <div class="guide-subsection">
-          <h3>3.2 启动/停止服务</h3>
-          <p>在服务列表中，点击对应服务的"启动"或"停止"按钮，系统会通过SSH连接到目标服务器执行相应命令。</p>
+          <h3>3.2 启动/停止/重启服务</h3>
+          <p>在服务列表中，点击对应服务行的「启动」「停止」「重启」按钮即可操作。系统优先通过 Agent（WebSocket）在目标服务器上执行，Agent 离线时回退到 SSH 直连执行。服务运行状态完全由 Agent 上报及心跳判断，Agent 离线时状态显示为「未知」，<strong>不会</strong>通过 SSH 探测状态。</p>
+          <ul>
+            <li>操作会自动记录到审计日志（见 §五）</li>
+            <li>如果 Agent 在线，操作几乎实时执行；离线时走 SSH，略有延迟</li>
+            <li>Docker Compose 部署的服务操作作用于<strong>整个 compose 项目</strong>的全部容器</li>
+          </ul>
         </div>
 
         <div class="guide-subsection">
           <h3>3.3 查看服务详情</h3>
-          <p>点击服务列表中的服务名称，可查看服务的详细信息，包括配置参数、运行状态等。</p>
+          <p>点击服务列表中的「详情」按钮（或服务名称），弹出详情弹窗，包含：</p>
+          <ul>
+            <li><strong>基本信息：</strong>项目、子系统、程序分类、功能描述、对应模块</li>
+            <li><strong>部署信息：</strong>部署方式、容器名称、程序路径、启停脚本</li>
+            <li><strong>主机信息：</strong>IP 地址、SSH 端口、用户名、Agent 状态（在线/离线/未关联）</li>
+            <li><strong>运行状态：</strong>当前状态（运行中/已停止/部分运行）、状态最后更新时间</li>
+            <li><strong>停止时间：</strong>仅当服务处于「已停止」状态时显示</li>
+            <li><strong>远程终端：</strong>内嵌 Web 终端（xterm.js），自动 cd 到程序路径</li>
+            <li><strong>实时日志：</strong>通过 WebSocket 流式查看服务日志（tail -f）</li>
+            <li><strong>查看操作记录：</strong>一键跳转到审计日志，自动带入当前服务的筛选条件，只显示该服务的所有历史操作</li>
+          </ul>
         </div>
       </div>
 
@@ -83,11 +113,13 @@
           <h3>4.1 导入服务</h3>
           <ol>
             <li>点击"导入服务"菜单进入导入页面</li>
-            <li>下载导入模板，按照模板格式填写数据</li>
+            <li>下载导入模板，按照模板格式填写数据（每行一个服务）</li>
             <li>选择项目和程序分类</li>
-            <li>上传Excel文件，系统会自动识别部署方式</li>
-            <li>查看导入结果，处理失败的数据</li>
+            <li>上传 Excel 文件，系统自动识别部署方式并校验字段</li>
+            <li>查看导入结果（成功/失败/跳过），处理失败数据</li>
+            <li>导入后系统自动尝试将新增服务关联到同 IP 的在线 Agent</li>
           </ol>
+          <p><strong>导入回滚：</strong>每次导入生成一个批次记录，可在导入页面将该批次的全部新增服务删除（回滚）。</p>
         </div>
 
         <div class="guide-subsection">
@@ -103,7 +135,7 @@
 
       <div class="guide-section">
         <h2>五、模板使用说明</h2>
-        <p>模板包含完整的字段列表，用于标准化导入数据。模板中的示例数据展示了三种部署方式的填写格式。</p>
+        <p>模板包含完整的字段列表，用于标准化导入数据。模板中的示例数据展示了四种部署方式的填写格式。</p>
         
         <h3>字段说明</h3>
         <table class="field-table">
@@ -111,15 +143,17 @@
             <tr>
               <th>字段名</th>
               <th>说明</th>
-              <th>主机部署</th>
-              <th>Docker容器</th>
-              <th>Docker Compose</th>
+              <th>主机进程 (PROCESS)</th>
+              <th>主机命令 (HOST)</th>
+              <th>Docker容器 (DOCKER)</th>
+              <th>Docker Compose (DOCKER_COMPOSE)</th>
             </tr>
           </thead>
           <tbody>
             <tr>
               <td>功能描述</td>
               <td>服务的功能说明</td>
+              <td>必填</td>
               <td>必填</td>
               <td>必填</td>
               <td>必填</td>
@@ -130,10 +164,12 @@
               <td>选填</td>
               <td>选填</td>
               <td>选填</td>
+              <td>选填</td>
             </tr>
             <tr>
               <td>IP地址</td>
               <td>服务器IP</td>
+              <td>必填</td>
               <td>必填</td>
               <td>必填</td>
               <td>必填</td>
@@ -144,10 +180,12 @@
               <td>选填</td>
               <td>选填</td>
               <td>选填</td>
+              <td>选填</td>
             </tr>
             <tr>
               <td>用户名</td>
               <td>SSH登录用户名</td>
+              <td>必填</td>
               <td>必填</td>
               <td>必填</td>
               <td>必填</td>
@@ -158,10 +196,12 @@
               <td>必填</td>
               <td>必填</td>
               <td>必填</td>
+              <td>必填</td>
             </tr>
             <tr>
               <td>程序路径</td>
-              <td>代码或docker-compose.yml所在目录</td>
+              <td>代码或 docker-compose.yml 所在目录</td>
+              <td>必填</td>
               <td>必填</td>
               <td>必填</td>
               <td>必填</td>
@@ -172,6 +212,7 @@
               <td>必填</td>
               <td>不填</td>
               <td>不填</td>
+              <td>不填</td>
             </tr>
             <tr>
               <td>停止脚本</td>
@@ -179,10 +220,12 @@
               <td>必填</td>
               <td>不填</td>
               <td>不填</td>
+              <td>不填</td>
             </tr>
             <tr>
               <td>日志路径</td>
               <td>日志文件或目录路径</td>
+              <td>选填</td>
               <td>选填</td>
               <td>选填</td>
               <td>选填</td>
@@ -193,31 +236,36 @@
               <td>选填</td>
               <td>选填</td>
               <td>选填</td>
+              <td>选填</td>
             </tr>
             <tr>
               <td>部署方式</td>
-              <td>主机部署 / Docker容器 / Docker Compose</td>
+              <td>PROCESS / HOST / DOCKER / DOCKER_COMPOSE</td>
+              <td>-</td>
               <td>-</td>
               <td>-</td>
               <td>-</td>
             </tr>
             <tr>
               <td>容器名称</td>
-              <td>Docker容器名称</td>
+              <td>Docker 容器名称（用于 docker start/stop/restart）</td>
+              <td>不填</td>
               <td>不填</td>
               <td>必填</td>
               <td>不填</td>
             </tr>
             <tr>
               <td>镜像名称</td>
-              <td>Docker镜像名称</td>
+              <td>Docker 镜像名称</td>
+              <td>不填</td>
               <td>不填</td>
               <td>选填</td>
               <td>不填</td>
             </tr>
             <tr>
               <td>端口映射</td>
-              <td>端口映射配置，如8080:80</td>
+              <td>端口映射配置，如 8080:80</td>
+              <td>不填</td>
               <td>不填</td>
               <td>选填</td>
               <td>不填</td>
@@ -225,6 +273,7 @@
             <tr>
               <td>日志类型</td>
               <td>HOST_DIR（主机目录）/ DOCKER_LOGS（容器日志）</td>
+              <td>不填</td>
               <td>不填</td>
               <td>选填</td>
               <td>选填</td>
@@ -235,10 +284,12 @@
               <td>选填</td>
               <td>选填</td>
               <td>选填</td>
+              <td>选填</td>
             </tr>
             <tr>
               <td>备注</td>
               <td>备注信息</td>
+              <td>选填</td>
               <td>选填</td>
               <td>选填</td>
               <td>选填</td>
@@ -248,7 +299,52 @@
       </div>
 
       <div class="guide-section">
-        <h2>六、注意事项</h2>
+        <h2>六、审计日志</h2>
+        <p>系统自动记录所有重要操作到审计日志，支持追溯和安全审计。</p>
+        
+        <div class="guide-subsection">
+          <h3>6.1 入口</h3>
+          <ul>
+            <li><strong>侧边栏：</strong>系统设置 → 审计日志</li>
+            <li><strong>服务详情：</strong>详情弹窗中点击「查看操作记录」按钮，自动带入当前服务的筛选条件</li>
+          </ul>
+        </div>
+
+        <div class="guide-subsection">
+          <h3>6.2 记录的操作类型</h3>
+          <table class="field-table">
+            <thead>
+              <tr><th>操作类型</th><th>触发场景</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>SERVICE_START</td><td>启动服务</td></tr>
+              <tr><td>SERVICE_STOP</td><td>停止服务</td></tr>
+              <tr><td>SERVICE_RESTART</td><td>重启服务</td></tr>
+              <tr><td>SERVICE_CREATE</td><td>新增服务</td></tr>
+              <tr><td>SERVICE_UPDATE</td><td>编辑服务信息</td></tr>
+              <tr><td>SERVICE_DELETE</td><td>删除服务</td></tr>
+              <tr><td>SERVICE_IMPORT</td><td>Excel 导入服务</td></tr>
+              <tr><td>IMPORT_REVERT</td><td>导入回滚（删除某个批次的全部新增服务）</td></tr>
+              <tr><td>BACKUP_*</td><td>备份策略变更、手动备份、恢复等</td></tr>
+              <tr><td>AUTH_*</td><td>登录、登出、密码重置等</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="guide-subsection">
+          <h3>6.3 筛选</h3>
+          <p>支持以下多条件组合筛选：</p>
+          <ul>
+            <li>操作类型（多选，如同时查看启动+停止）</li>
+            <li>项目 → 子系统（级联）</li>
+            <li>服务 ID（从服务详情跳转自动带入）</li>
+            <li>操作人、操作结果（成功/失败）、时间范围</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="guide-section">
+        <h2>七、注意事项</h2>
         <ul>
           <li><strong>密码安全：</strong>系统会加密存储密码，请确保密码强度足够</li>
           <li><strong>网络连通性：</strong>确保SRMC服务器能够访问目标服务器的SSH端口</li>
@@ -259,7 +355,7 @@
       </div>
 
       <div class="guide-section">
-        <h2>七、常见问题</h2>
+        <h2>八、常见问题</h2>
         
         <div class="faq-item">
           <h3>Q: 为什么Docker部署的服务启动失败？</h3>

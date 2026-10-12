@@ -27,6 +27,7 @@ def log_audit(
     request_params: str = None,
     user_agent: str = None,
     project_id: int = None,
+    subsystem_id: int = None,
 ):
     """
     增强版审计日志记录
@@ -60,6 +61,8 @@ def log_audit(
         service_code=service_code,
         server_id=server_id,
         ip=ip,
+        project_id=project_id,
+        subsystem_id=subsystem_id,
         organization_id=org_id,
         department_id=dept_id,
         request_url=request_url,

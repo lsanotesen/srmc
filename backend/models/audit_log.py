@@ -36,6 +36,8 @@ class AuditLog(Base):
     service_code = Column(VARCHAR(64))
     server_id = Column(BIGINT, ForeignKey("servers.id"))
     ip = Column(VARCHAR(45))
+    project_id = Column(BIGINT, comment="项目ID（关联 app_services.project_id）")
+    subsystem_id = Column(BIGINT, comment="子系统ID（关联 app_services.subsystem_id）")
     organization_id = Column(BIGINT, comment="组织ID")
     department_id = Column(BIGINT, comment="部门ID")
     request_url = Column(VARCHAR(500), comment="请求URL")
@@ -49,4 +51,6 @@ class AuditLog(Base):
     __table_args__ = (
         Index("idx_audit_org", "organization_id"),
         Index("idx_audit_dept", "department_id"),
+        Index("idx_audit_project", "project_id"),
+        Index("idx_audit_subsystem", "subsystem_id"),
     )

@@ -1,13 +1,10 @@
-from typing import Optional, List, Dict, Any
-from enum import Enum
+from typing import List, Dict, Any
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
 from models.role import Role
 from models.permission import Permission
 from models.role_permission import RolePermission
 from models.user_role import UserRole
 from models.user import User
-from core.capabilities import ROLE_PERMISSIONS
 
 
 SYSTEM_PERMISSIONS = {
@@ -19,8 +16,12 @@ SYSTEM_PERMISSIONS = {
     "container:view", "container:exec", "container:start", "container:stop", "container:restart",
     # WebShell
     "webshell:login", "webshell:root-login",
-    # 主机管理（不包含 create/delete）
-    "host:view", "host:reboot",
+    # 主机管理（基础查看/重启；host:manage 为服务器（主机）增删改的独立权限码）
+    "host:view", "host:reboot", "host:manage",
+    # 数据备份（查看配置/记录；管理=配置/执行/下载/恢复/删除）
+    "backup:view", "backup:manage",
+    # 系统设置（查看）
+    "settings:view",
     # 日志管理
     "log:view", "log:download",
     # 脚本管理
@@ -40,148 +41,89 @@ SYSTEM_PERMISSIONS = {
 }
 
 
+# 系统角色（User.role 枚举）→ 数据库系统角色名称的映射（方案 C 运行时权限来源）
+ROLE_NAME_BY_USER_ROLE = {
+    "SUPER_ADMIN": "超级管理员",
+    "ORG_ADMIN": "组织管理员",
+    "DEPT_ADMIN": "部门管理员",
+    "DEPT_MEMBER": "部门成员",
+    "READONLY": "只读用户",
+}
+
+
 class PermissionService:
     """
     第二层：RBAC功能权限服务
     负责：菜单权限、API权限、按钮权限、功能操作权限
+
+    授权规则（方案 C，统一来源）：
+    - SUPER_ADMIN 始终拥有全部系统权限，不依赖数据库角色关联；
+    - 其余系统角色按 User.role 映射到数据库系统角色（ROLE_NAME_BY_USER_ROLE）；
+    - 自定义角色（is_system=False）只能与系统角色权限取交集，不得扩大系统角色权限。
     """
 
     @staticmethod
-    def user_has_permission(db: Session, user_id: int, permission_code: str) -> bool:
-        """判断用户是否拥有指定功能权限"""
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            return False
-
-        if user.role == "SUPER_ADMIN":
-            return True
-
-        legacy_permissions = ROLE_PERMISSIONS.get(user.role, [])
-        if PermissionService._match_legacy_permission(permission_code, legacy_permissions):
-            return True
-
-        user_roles = db.query(UserRole).filter(UserRole.user_id == user_id).all()
-        if not user_roles:
-            return False
-
-        role_ids = [ur.role_id for ur in user_roles]
-
-        rp_count = db.query(RolePermission).join(Permission).filter(
-            RolePermission.role_id.in_(role_ids),
-            Permission.resource == permission_code.split(":")[0],
-            Permission.action == permission_code.split(":")[1],
-        ).count()
-
-        return rp_count > 0
-
-    @staticmethod
-    def _match_legacy_permission(permission_code: str, legacy_permissions: List[str]) -> bool:
-        """匹配旧版权限码（用于兼容旧用户角色）"""
-        legacy_map = {
-            # 项目管理
-            "project:view": ["project_view"],
-            "project:add": ["project_manage"],
-            "project:edit": ["project_manage"],
-            "project:delete": ["project_manage"],
-            "project:share": ["project_manage"],
-            # 服务管理
-            "service:view": ["service_view"],
-            "service:start": ["service_operate", "service_manage"],
-            "service:stop": ["service_operate", "service_manage"],
-            "service:restart": ["service_operate", "service_manage"],
-            "service:deploy": ["service_manage"],
-            "service:edit-config": ["service_manage"],
-            # 容器管理（docker 权限映射到 container）
-            "container:view": ["service_view"],
-            "container:exec": ["webshell"],
-            "container:start": ["service_operate", "service_manage"],
-            "container:stop": ["service_operate", "service_manage"],
-            "container:restart": ["service_operate", "service_manage"],
-            # WebShell
-            "webshell:login": ["webshell"],
-            "webshell:root-login": ["service_manage"],
-            # 主机管理
-            "host:view": ["service_view"],
-            "host:reboot": ["service_manage"],
-            # 日志管理
-            "log:view": ["log_view"],
-            "log:download": ["log_download"],
-            # 脚本管理
-            "script:view": ["service_view"],
-            "script:run": ["webshell", "service_operate"],
-            # Agent 管理
-            "agent:view": ["agent_view"],
-            "agent:manage": ["agent_manage"],
-            # 组织管理
-            "organization:view": ["project_view"],
-            "organization:edit": ["user_manage"],
-            # 部门管理
-            "department:view": ["project_view"],
-            "department:edit": ["user_manage"],
-            # 用户管理
-            "user:view": ["user_manage"],
-            "user:add": ["user_manage"],
-            "user:edit": ["user_manage"],
-            "user:delete": ["user_manage"],
-            # 角色管理
-            "role:view": ["user_manage"],
-            "role:edit": ["user_manage"],
-            # 审计日志
-            "audit:view": ["audit_view"],
-        }
-
-        allowed_legacy = legacy_map.get(permission_code, [])
-        return any(lp in legacy_permissions for lp in allowed_legacy)
+    def _role_permission_codes(db: Session, role_id: int) -> set:
+        """取某数据库角色拥有的新版权限码集合"""
+        rows = (
+            db.query(Permission)
+            .join(RolePermission, RolePermission.permission_id == Permission.id)
+            .filter(RolePermission.role_id == role_id)
+            .all()
+        )
+        return {f"{p.resource}:{p.action}" for p in rows}
 
     @staticmethod
     def get_user_permissions(db: Session, user_id: int) -> List[str]:
-        """获取用户的所有功能权限"""
+        """获取用户的所有功能权限（方案 C 统一来源）"""
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             return []
 
-        permissions = set()
-
+        # 超级管理员：直接返回全部系统权限，不依赖数据库角色关联
         if user.role == "SUPER_ADMIN":
             return list(SYSTEM_PERMISSIONS)
 
-        legacy_perms = ROLE_PERMISSIONS.get(user.role, [])
-        for lp in legacy_perms:
-            matched = PermissionService._reverse_match_legacy_permission(lp)
-            permissions.update(matched)
+        role_name = ROLE_NAME_BY_USER_ROLE.get(user.role)
+        if not role_name:
+            return []
+        role = db.query(Role).filter(Role.name == role_name).first()
+        if not role:
+            return []
 
-        user_roles = db.query(UserRole).filter(UserRole.user_id == user_id).all()
-        role_ids = [ur.role_id for ur in user_roles]
+        system_perms = PermissionService._role_permission_codes(db, role.id)
 
-        if role_ids:
-            rps = db.query(RolePermission).join(Permission).filter(
-                RolePermission.role_id.in_(role_ids)
-            ).all()
-            for rp in rps:
-                perm = db.query(Permission).filter(Permission.id == rp.permission_id).first()
-                if perm:
-                    permissions.add(f"{perm.resource}:{perm.action}")
+        # 自定义角色：仅与系统角色权限取交集（只能收窄，不能扩权）
+        custom_role_ids = [
+            row[0]
+            for row in db.query(Role.id)
+            .join(UserRole, UserRole.role_id == Role.id)
+            .filter(UserRole.user_id == user_id, Role.is_system.is_(False))
+            .all()
+        ]
+        if not custom_role_ids:
+            return sorted(system_perms)
 
-        return list(permissions)
+        custom_perms = set()
+        for rid in custom_role_ids:
+            custom_perms |= PermissionService._role_permission_codes(db, rid)
+        return sorted(system_perms & custom_perms)
 
     @staticmethod
-    def _reverse_match_legacy_permission(legacy_perm: str) -> List[str]:
-        """旧版权限码转换为新版权限码（用于兼容旧用户角色）"""
-        reverse_map = {
-            "project_view": ["project:view"],
-            "project_manage": ["project:add", "project:edit", "project:delete", "project:share"],
-            "service_view": ["service:view", "container:view", "host:view", "script:view"],
-            "service_operate": ["service:start", "service:stop", "service:restart", "script:run", "container:start", "container:stop", "container:restart"],
-            "service_manage": ["service:deploy", "service:edit-config", "host:reboot", "webshell:root-login"],
-            "webshell": ["webshell:login", "container:exec", "script:run"],
-            "log_view": ["log:view"],
-            "log_download": ["log:download"],
-            "agent_view": ["agent:view"],
-            "agent_manage": ["agent:manage"],
-            "audit_view": ["audit:view"],
-            "user_manage": ["user:view", "user:add", "user:edit", "user:delete", "role:view", "role:edit", "organization:edit", "department:edit"],
-        }
-        return reverse_map.get(legacy_perm, [])
+    def user_has_permission(db: Session, user_id: int, permission_code: str) -> bool:
+        """判断用户是否拥有指定功能权限（与 get_user_permissions 同源）"""
+        if not permission_code:
+            return False
+        if ":" in permission_code:
+            required = [permission_code]
+        else:
+            # 兼容旧版权限码调用：转换为新码后判断
+            from api.dependencies import LEGACY_TO_NEW_PERMISSIONS
+            required = LEGACY_TO_NEW_PERMISSIONS.get(permission_code, [])
+        if not required:
+            return False
+        perms = set(PermissionService.get_user_permissions(db, user_id))
+        return any(code in perms for code in required)
 
     @staticmethod
     def assign_role(db: Session, user_id: int, role_id: int) -> bool:

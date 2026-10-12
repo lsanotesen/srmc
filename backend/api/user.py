@@ -12,6 +12,7 @@ from services.audit_service import log_audit
 from core.database import get_db
 from core.capabilities import ROLE_PERMISSIONS, SERVICE_TYPE_CAPABILITIES, ServiceType
 from api.dependencies import get_current_user, require_permission
+from services.data_scope_service import DataScopeService
 
 router = APIRouter()
 
@@ -68,32 +69,45 @@ def _user_to_dict(db: Session, u: User) -> dict:
 async def get_users(
     organization_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    user = Depends(require_permission("user_manage"))
+    user: User = Depends(require_permission("user:view"))
 ):
-    query = db.query(User)
+    # 查看权限：user:view 通过后，数据范围收敛（超管=全部；组织管理员=本组织；其余=本部门）
+    query = DataScopeService.filter_users_query(db, user)
     if organization_id is not None:
+        # 显式指定组织时也不得越出数据范围，防止篡改 organization_id 越权查询
+        if not DataScopeService._is_super_admin(user) and organization_id != user.organization_id:
+            raise HTTPException(status_code=403, detail="无权查看其他组织的用户")
         query = query.filter(User.organization_id == organization_id)
     users = query.all()
     result = [_user_to_dict(db, u) for u in users]
     return ResponseModel(data=result)
 
 @router.get("/users/{user_id}", response_model=ResponseModel)
-async def get_user(user_id: int, db: Session = Depends(get_db), user = Depends(require_permission("user_manage"))):
+async def get_user(user_id: int, db: Session = Depends(get_db), user: User = Depends(require_permission("user:view"))):
     u = db.query(User).filter(User.id == user_id).first()
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
+    # 查看权限：非超管仅可查看数据范围内的用户，防止篡改 user_id 越权访问
+    if not DataScopeService.can_access_user(user, u):
+        raise HTTPException(status_code=403, detail="无权查看该用户")
     return ResponseModel(data=_user_to_dict(db, u))
 
 @router.post("/users", response_model=ResponseModel)
-async def create_user(user_create: UserCreate, db: Session = Depends(get_db), user = Depends(require_permission("user_manage"))):
+async def create_user(user_create: UserCreate, db: Session = Depends(get_db), user = Depends(require_permission("user:add"))):
     existing = db.query(User).filter(User.username == user_create.username).first()
     if existing:
         raise HTTPException(status_code=400, detail="Username already exists")
 
+    # 数据范围：新增用户时指定的组织/部门必须在操作者范围内
+    if not DataScopeService.validate_user_scope_assignment(
+        db, user, user_create.organization_id, user_create.department_id
+    ):
+        raise HTTPException(status_code=403, detail="无权在该组织/部门下创建用户")
+
     new_user = User(
         username=user_create.username,
         password=get_password_hash(user_create.password),
-        role=user_create.role or "READONLY",
+        role=user_create.role or "DEPT_MEMBER",
         email=user_create.email,
         phone=user_create.phone,
         organization_id=user_create.organization_id,
@@ -115,10 +129,21 @@ async def create_user(user_create: UserCreate, db: Session = Depends(get_db), us
     return ResponseModel(data=_user_to_dict(db, new_user))
 
 @router.put("/users/{user_id}", response_model=ResponseModel)
-async def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get_db), user = Depends(require_permission("user_manage"))):
+async def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get_db), user = Depends(require_permission("user:edit"))):
     user_to_update = db.query(User).filter(User.id == user_id).first()
     if not user_to_update:
         raise HTTPException(status_code=404, detail="User not found")
+
+    # 数据范围：目标用户必须在操作者范围内，防止篡改 user_id 越权操作
+    if not DataScopeService.can_access_user(user, user_to_update):
+        raise HTTPException(status_code=403, detail="无权操作该用户")
+
+    # 数据范围：调整组织/部门时不得越界或转移归属
+    if user_update.organization_id is not None or user_update.department_id is not None:
+        target_org_id = user_update.organization_id if user_update.organization_id is not None else user_to_update.organization_id
+        target_dept_id = user_update.department_id if user_update.department_id is not None else user_to_update.department_id
+        if not DataScopeService.validate_user_scope_assignment(db, user, target_org_id, target_dept_id):
+            raise HTTPException(status_code=403, detail="无权将用户调整到该组织/部门")
 
     if user_update.password:
         user_to_update.password = get_password_hash(user_update.password)
@@ -158,10 +183,14 @@ async def update_user(user_id: int, user_update: UserUpdate, db: Session = Depen
     return ResponseModel(data=_user_to_dict(db, user_to_update))
 
 @router.delete("/users/{user_id}", response_model=ResponseModel)
-async def delete_user(user_id: int, db: Session = Depends(get_db), user = Depends(require_permission("user_manage"))):
+async def delete_user(user_id: int, db: Session = Depends(get_db), user = Depends(require_permission("user:delete"))):
     user_to_delete = db.query(User).filter(User.id == user_id).first()
     if not user_to_delete:
         raise HTTPException(status_code=404, detail="User not found")
+
+    # 数据范围：目标用户必须在操作者范围内，防止篡改 user_id 越权删除
+    if not DataScopeService.can_access_user(user, user_to_delete):
+        raise HTTPException(status_code=403, detail="无权删除该用户")
 
     if user_to_delete.role == "SUPER_ADMIN" and db.query(User).filter(User.role == "SUPER_ADMIN").count() <= 1:
         raise HTTPException(status_code=400, detail="Cannot delete the only ADMIN user")
@@ -188,7 +217,7 @@ async def get_user_menu(db: Session = Depends(get_db), user = Depends(get_curren
     # 运行总览 - 所有登录用户可见
     menu.append({"id": "overview", "name": "运行总览", "icon": "data-analysis", "path": "/overview", "children": []})
     
-    # 项目服务管理
+    # 项目资源管理
     project_children = []
     if has_perm("project") or has_perm("service", "view"):
         if has_perm("project", "view"):
@@ -199,7 +228,7 @@ async def get_user_menu(db: Session = Depends(get_db), user = Depends(get_curren
         project_children.append({"id": "service-groups", "name": "程序分类管理", "icon": "folder", "path": "/service-groups"})
         menu.append({
             "id": "project-services",
-            "name": "项目服务管理",
+            "name": "项目资源管理",
             "icon": "folder-opened",
             "path": "",
             "children": project_children
@@ -225,15 +254,15 @@ async def get_user_menu(db: Session = Depends(get_db), user = Depends(get_curren
     if has_perm("service", "view") and has_es_service:
         menu.append({"id": "es", "name": "Elasticsearch管理", "icon": "search", "path": "/es", "children": []})
     
-    # 权限管理（组织+角色+用户）
-    if has_perm("organization", "view") or has_perm("role", "view") or has_perm("user", "view"):
-        perm_children = []
-        if has_perm("organization", "view"):
-            perm_children.append({"id": "organization", "name": "组织管理", "icon": "office-building", "path": "/organization"})
-        if has_perm("role", "view"):
-            perm_children.append({"id": "roles", "name": "角色管理", "icon": "user", "path": "/roles"})
-        if has_perm("user", "view"):
-            perm_children.append({"id": "users", "name": "用户管理", "icon": "users", "path": "/users"})
+    # 权限管理（组织+角色+用户）：按查看权限码显示，仅显示有权限的项
+    perm_children = []
+    if has_perm("organization", "view"):
+        perm_children.append({"id": "organization", "name": "组织管理", "icon": "office-building", "path": "/organization"})
+    if has_perm("role", "view"):
+        perm_children.append({"id": "roles", "name": "角色管理", "icon": "user", "path": "/roles"})
+    if has_perm("user", "view"):
+        perm_children.append({"id": "users", "name": "用户管理", "icon": "users", "path": "/users"})
+    if perm_children:
         menu.append({
             "id": "permission",
             "name": "权限管理",
@@ -242,16 +271,16 @@ async def get_user_menu(db: Session = Depends(get_db), user = Depends(get_curren
             "children": perm_children
         })
     
-    # 审计日志
+    # 审计日志：需 audit:view
     if has_perm("audit", "view"):
         menu.append({"id": "audit", "name": "审计日志", "icon": "file-search", "path": "/audit", "children": []})
 
-    # 数据备份（管理员/用户管理权限可见）
-    if has_perm("user", "view"):
+    # 数据备份：需 backup:view（写操作另受 backup:manage 保护）
+    if has_perm("backup", "view"):
         menu.append({"id": "backup", "name": "数据备份", "icon": "box", "path": "/backup", "children": []})
     
-    # 系统设置
-    if has_perm("user", "view"):
+    # 系统设置：需 settings:view
+    if has_perm("settings", "view"):
         menu.append({"id": "settings", "name": "系统设置", "icon": "settings", "path": "/settings", "children": []})
     
     return ResponseModel(data=menu)

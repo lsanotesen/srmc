@@ -2,9 +2,10 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from utils.ssh_pool import ssh_pool
-from models.app_service import AppService
 from utils.crypto import decrypt
 from core.database import get_db
+from api.dependencies import get_current_user
+from api.permission_dependencies import assert_service_access, assert_high_risk_capability
 import os
 import tempfile
 from datetime import datetime
@@ -13,6 +14,13 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _assert_sftp(db: Session, user, service_id: int):
+    """SFTP 数据范围校验 + 项目级高风险（SFTP）独立授权校验"""
+    service = assert_service_access(db, user, service_id)
+    assert_high_risk_capability(db, user, service.project_id, "sftp")
+    return service
 
 def resolve_path(path: str, username: str, home_dir: str = None) -> str:
     """解析路径中的波浪号，~ 代表用户主目录"""
@@ -53,11 +61,9 @@ def resolve_path(path: str, username: str, home_dir: str = None) -> str:
     return path
 
 @router.get("/exists")
-async def check_file_exists(service_id: int, path: str, db: Session = Depends(get_db)):
+async def check_file_exists(service_id: int, path: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
     """检查远程文件或目录是否存在"""
-    service = db.query(AppService).filter(AppService.id == service_id).first()
-    if not service:
-        raise HTTPException(status_code=404, detail="服务不存在")
+    service = _assert_sftp(db, user, service_id)
     
     try:
         conn = await ssh_pool.get_connection(
@@ -86,11 +92,9 @@ async def check_file_exists(service_id: int, path: str, db: Session = Depends(ge
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/listdir")
-async def list_directory(service_id: int, path: str = '.', db: Session = Depends(get_db)):
+async def list_directory(service_id: int, path: str = '.', db: Session = Depends(get_db), user = Depends(get_current_user)):
     """列出远程服务器目录内容"""
-    service = db.query(AppService).filter(AppService.id == service_id).first()
-    if not service:
-        raise HTTPException(status_code=404, detail="服务不存在")
+    service = _assert_sftp(db, user, service_id)
     
     try:
         conn = await ssh_pool.get_connection(
@@ -135,7 +139,7 @@ def sftp_makedirs(sftp, remote_dir):
     logger.info(f"sftp_makedirs: 目录结构创建完成")
 
 @router.post("/upload")
-async def upload_file(service_id: int, remote_path: str, preserve_path: str = 'false', file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_file(service_id: int, remote_path: str, preserve_path: str = 'false', file: UploadFile = File(...), db: Session = Depends(get_db), user = Depends(get_current_user)):
     """上传文件到远程服务器"""
     logger.info(f"========== 开始上传文件 ==========")
     logger.info(f"service_id: {service_id}")
@@ -145,10 +149,7 @@ async def upload_file(service_id: int, remote_path: str, preserve_path: str = 'f
     logger.info(f"preserve_path type: {type(preserve_path)}")
     logger.info(f"preserve_path.lower(): {preserve_path.lower()}")
     
-    service = db.query(AppService).filter(AppService.id == service_id).first()
-    if not service:
-        logger.error(f"服务不存在: service_id={service_id}")
-        raise HTTPException(status_code=404, detail="服务不存在")
+    service = _assert_sftp(db, user, service_id)
     
     tmp_path = None
     try:
@@ -228,11 +229,9 @@ async def upload_file(service_id: int, remote_path: str, preserve_path: str = 'f
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/download")
-async def download_file(service_id: int, remote_path: str, db: Session = Depends(get_db)):
+async def download_file(service_id: int, remote_path: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
     """从远程服务器下载文件"""
-    service = db.query(AppService).filter(AppService.id == service_id).first()
-    if not service:
-        raise HTTPException(status_code=404, detail="服务不存在")
+    service = _assert_sftp(db, user, service_id)
     
     # 解析波浪号路径
     remote_path = resolve_path(remote_path, service.username)
@@ -272,11 +271,9 @@ async def download_file(service_id: int, remote_path: str, db: Session = Depends
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/delete")
-async def delete_file(service_id: int, remote_path: str, db: Session = Depends(get_db)):
+async def delete_file(service_id: int, remote_path: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
     """删除远程服务器上的文件"""
-    service = db.query(AppService).filter(AppService.id == service_id).first()
-    if not service:
-        raise HTTPException(status_code=404, detail="服务不存在")
+    service = _assert_sftp(db, user, service_id)
     
     # 解析波浪号路径
     remote_path = resolve_path(remote_path, service.username)
@@ -309,11 +306,9 @@ async def delete_file(service_id: int, remote_path: str, db: Session = Depends(g
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/rename")
-async def rename_file(service_id: int, old_path: str, new_path: str, db: Session = Depends(get_db)):
+async def rename_file(service_id: int, old_path: str, new_path: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
     """重命名远程服务器上的文件或目录"""
-    service = db.query(AppService).filter(AppService.id == service_id).first()
-    if not service:
-        raise HTTPException(status_code=404, detail="服务不存在")
+    service = _assert_sftp(db, user, service_id)
     
     # 解析波浪号路径
     old_path = resolve_path(old_path, service.username)
@@ -347,11 +342,9 @@ async def rename_file(service_id: int, old_path: str, new_path: str, db: Session
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/mkdir")
-async def create_directory(service_id: int, remote_path: str, db: Session = Depends(get_db)):
+async def create_directory(service_id: int, remote_path: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
     """在远程服务器创建目录"""
-    service = db.query(AppService).filter(AppService.id == service_id).first()
-    if not service:
-        raise HTTPException(status_code=404, detail="服务不存在")
+    service = _assert_sftp(db, user, service_id)
     
     # 解析波浪号路径
     remote_path = resolve_path(remote_path, service.username)

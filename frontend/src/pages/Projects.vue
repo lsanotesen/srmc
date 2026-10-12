@@ -75,6 +75,18 @@
             {{ scope.row.owner_name || '-' }}
           </template>
         </el-table-column>
+        <el-table-column label="资源数量" min-width="180" align="center">
+          <template #default="scope">
+            <div class="resource-counts">
+              <el-tag type="info" size="small" effect="plain">
+                子系统 {{ scope.row.subsystem_count ?? 0 }}
+              </el-tag>
+              <el-tag type="success" size="small" effect="plain">
+                服务 {{ scope.row.service_count ?? 0 }}
+              </el-tag>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column prop="description" label="项目描述" min-width="240">
           <template #default="scope">
             <span :class="['description-text', { 'empty-text': !scope.row.description }]">
@@ -191,8 +203,8 @@
       </template>
     </el-dialog>
 
-    <el-dialog title="项目详情" v-model="showDetailDialog" width="560px">
-      <el-descriptions :column="1" border v-if="selectedProject">
+    <el-dialog title="项目详情" v-model="showDetailDialog" width="860px">
+      <el-descriptions :column="2" border v-if="selectedProject">
         <el-descriptions-item label="项目名称">
           <span class="detail-name">{{ selectedProject.name }}</span>
         </el-descriptions-item>
@@ -216,10 +228,38 @@
         <el-descriptions-item label="创建人">
           {{ selectedProject.creator_name || '-' }}
         </el-descriptions-item>
-        <el-descriptions-item label="项目描述">
+        <el-descriptions-item label="资源数量">
+          <el-tag type="info" size="small" effect="plain">子系统 {{ projectResources.subsystem_count ?? 0 }}</el-tag>
+          <el-tag type="success" size="small" effect="plain" style="margin-left: 6px">服务 {{ projectResources.service_count ?? 0 }}</el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="项目描述" :span="2">
           {{ selectedProject.description || '-' }}
         </el-descriptions-item>
       </el-descriptions>
+
+      <div class="resource-section" v-loading="resourcesLoading">
+        <div class="resource-section-title">资源统计</div>
+        <div class="resource-stats">
+          <div class="stat-item">
+            <span class="stat-label">子系统</span>
+            <span class="stat-value">{{ projectResources.subsystem_count ?? 0 }}</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">服务</span>
+            <span class="stat-value">{{ projectResources.service_count ?? 0 }}</span>
+          </div>
+          <el-button
+            type="primary"
+            size="small"
+            :disabled="!projectResources.service_count"
+            @click="goToProjectServices"
+          >
+            查看服务
+          </el-button>
+        </div>
+        <div class="resource-hint">服务明细请在「服务管理」中查看与操作</div>
+      </div>
+
       <template #footer>
         <el-button @click="showDetailDialog = false">关闭</el-button>
       </template>
@@ -413,7 +453,7 @@
         style="margin-bottom: 12px;"
       >
         <template #title>
-          <span>将项目共享给组织/部门/用户，并设置访问权限（READ / EDIT / MANAGE）。仅 Project Owner、部门管理员、组织管理员、超级管理员可操作。</span>
+          <span>将项目共享给组织/部门/用户，访问级别仅「只读」或「读写」。高风险能力（WebShell、Root、SFTP、服务删除、服务发布、备份恢复）需单独勾选授权，不随「读写」自动开放。仅 Project Owner、部门管理员、组织管理员、超级管理员可操作。</span>
         </template>
       </el-alert>
 
@@ -427,7 +467,7 @@
           v-model="addShareForm.target_id"
           :placeholder="shareTargetPlaceholder"
           filterable
-          style="width: 260px;"
+          style="width: 220px;"
         >
           <el-option
             v-for="t in shareTargetOptions"
@@ -436,22 +476,35 @@
             :value="t.id"
           />
         </el-select>
-        <el-select v-model="addShareForm.permission" style="width: 140px;">
-          <el-option label="READ 只读" value="READ" />
-          <el-option label="EDIT 编辑" value="EDIT" />
-          <el-option label="MANAGE 管理" value="MANAGE" />
+        <el-select v-model="addShareForm.permission" style="width: 120px;">
+          <el-option label="只读" value="READ" />
+          <el-option label="读写" value="EDIT" />
         </el-select>
         <el-button type="primary" @click="addShare" :disabled="!addShareForm.target_id">添加共享</el-button>
       </div>
 
+      <div class="high-risk-toolbar">
+        <span class="high-risk-label">高风险独立授权：</span>
+        <el-checkbox v-model="addShareForm.allow_webshell">WebShell</el-checkbox>
+        <el-checkbox v-model="addShareForm.allow_root">Root 登录</el-checkbox>
+        <el-checkbox v-model="addShareForm.allow_sftp">SFTP</el-checkbox>
+        <el-checkbox v-model="addShareForm.allow_service_delete">服务删除</el-checkbox>
+        <el-checkbox v-model="addShareForm.allow_service_deploy">服务发布</el-checkbox>
+        <el-checkbox v-model="addShareForm.allow_backup">备份恢复</el-checkbox>
+      </div>
+
       <el-table :data="shares" border size="small">
-        <el-table-column label="目标类型" width="120">
+        <el-table-column label="目标类型" width="100">
           <template #default="scope">
             <el-tag size="small">{{ targetTypeLabel(scope.row.target_type) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="target_name" label="目标名称" min-width="180" />
-        <el-table-column label="权限级别" width="180">
+        <el-table-column prop="target_name" label="目标名称" min-width="150">
+          <template #default="scope">
+            <span class="wrap-text">{{ scope.row.target_name }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="访问级别" width="110">
           <template #default="scope">
             <el-select
               v-model="scope.row.permission"
@@ -459,13 +512,25 @@
               @change="updateSharePermission(scope.row)"
               style="width: 100%;"
             >
-              <el-option label="READ 只读" value="READ" />
-              <el-option label="EDIT 编辑" value="EDIT" />
-              <el-option label="MANAGE 管理" value="MANAGE" />
+              <el-option label="只读" value="READ" />
+              <el-option label="读写" value="EDIT" />
             </el-select>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="100" fixed="right">
+        <el-table-column label="高风险授权" min-width="230">
+          <template #default="scope">
+            <div class="risk-flags">
+              <el-checkbox
+                v-for="flag in riskFlags"
+                :key="flag.key"
+                :model-value="!!scope.row[flag.key]"
+                size="small"
+                @change="val => toggleShareFlag(scope.row, flag.key, val)"
+              >{{ flag.label }}</el-checkbox>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="80" fixed="right">
           <template #default="scope">
             <el-button type="danger" size="small" link @click="removeShare(scope.row)">取消</el-button>
           </template>
@@ -507,12 +572,14 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import axios from '@/utils/axios'
 import { usePermission } from '@/composables/usePermission'
 import { useUserStore } from '@/stores/user'
 
 const { hasPermission } = usePermission()
+const router = useRouter()
 
 const projects = ref([])
 const pagination = reactive({
@@ -602,7 +669,23 @@ const addShareForm = reactive({
   target_type: 'Organization',
   target_id: null,
   permission: 'READ',
+  allow_webshell: false,
+  allow_root: false,
+  allow_sftp: false,
+  allow_service_delete: false,
+  allow_service_deploy: false,
+  allow_backup: false,
 })
+
+// 高风险独立授权字段（与后端 ProjectPermission 字段一致）
+const riskFlags = [
+  { key: 'allow_webshell', label: 'WebShell' },
+  { key: 'allow_root', label: 'Root 登录' },
+  { key: 'allow_sftp', label: 'SFTP' },
+  { key: 'allow_service_delete', label: '服务删除' },
+  { key: 'allow_service_deploy', label: '服务发布' },
+  { key: 'allow_backup', label: '备份恢复' },
+]
 
 const shareTargetOptions = computed(() => {
   if (addShareForm.target_type === 'Organization') return allOrganizations.value
@@ -658,9 +741,46 @@ const resetFilters = () => {
   loadProjects()
 }
 
-const viewProject = (project) => {
+const viewProject = async (project) => {
   selectedProject.value = project
   showDetailDialog.value = true
+  await loadProjectResources(project.id)
+}
+
+// ===== 项目资源统计（仅数量，明细跳转服务管理）=====
+const resourcesLoading = ref(false)
+const projectResources = reactive({
+  subsystem_count: 0,
+  service_count: 0
+})
+
+const loadProjectResources = async (projectId) => {
+  resourcesLoading.value = true
+  // 重置，避免展示上一个项目的数据
+  projectResources.subsystem_count = 0
+  projectResources.service_count = 0
+  try {
+    const response = await axios.get(`/api/projects/${projectId}/resources`)
+    if (response.data.code === 0) {
+      const data = response.data.data || {}
+      projectResources.subsystem_count = data.subsystem_count ?? 0
+      projectResources.service_count = data.service_count ?? 0
+    }
+  } catch (error) {
+    ElMessage.error('加载项目资源失败')
+  } finally {
+    resourcesLoading.value = false
+  }
+}
+
+// 跳转到服务管理，并带入当前项目筛选条件
+const goToProjectServices = () => {
+  if (!selectedProject.value) return
+  showDetailDialog.value = false
+  router.push({
+    path: '/services',
+    query: { project_id: selectedProject.value.id }
+  })
 }
 
 const editProject = async (project) => {
@@ -1088,7 +1208,8 @@ async function loadOrganizations() {
   try {
     const response = await axios.get('/api/organizations')
     if (response.data.code === 0) {
-      allOrganizations.value = response.data.data || []
+      const data = response.data.data
+      allOrganizations.value = Array.isArray(data) ? data : (data.items || [])
     }
   } catch (error) {
     console.error('加载组织列表失败:', error)
@@ -1099,7 +1220,8 @@ async function loadDepartments() {
   try {
     const response = await axios.get('/api/organizations')
     if (response.data.code === 0) {
-      const orgs = response.data.data || []
+      const data = response.data.data
+      const orgs = Array.isArray(data) ? data : (data.items || [])
       const depts = []
       for (const org of orgs) {
         try {
@@ -1131,6 +1253,8 @@ async function loadShares(projectId) {
       const list = response.data.data || []
       for (const item of list) {
         item.target_name = await resolveShareTargetName(item.target_type, item.target_id)
+        // 归一为两级：MANAGE 兼容显示为「读写」
+        if (item.permission !== 'READ') item.permission = 'EDIT'
       }
       shares.value = list
     }
@@ -1165,6 +1289,7 @@ async function openShareDialog(project) {
   addShareForm.target_type = 'Organization'
   addShareForm.target_id = null
   addShareForm.permission = 'READ'
+  for (const flag of riskFlags) addShareForm[flag.key] = false
   await Promise.all([loadAllUsers(), loadOrganizations(), loadDepartments()])
   await loadShares(project.id)
 }
@@ -1176,6 +1301,12 @@ async function addShare() {
       target_type: addShareForm.target_type,
       target_id: addShareForm.target_id,
       permission: addShareForm.permission,
+      allow_webshell: addShareForm.allow_webshell,
+      allow_root: addShareForm.allow_root,
+      allow_sftp: addShareForm.allow_sftp,
+      allow_service_delete: addShareForm.allow_service_delete,
+      allow_service_deploy: addShareForm.allow_service_deploy,
+      allow_backup: addShareForm.allow_backup,
     })
     if (response.data.code === 0) {
       ElMessage.success('共享添加成功')
@@ -1198,6 +1329,26 @@ async function updateSharePermission(row) {
     )
     if (response.data.code === 0) {
       ElMessage.success('权限已更新')
+    } else {
+      ElMessage.error(response.data.message || '更新失败')
+      await loadShares(shareProject.value.id)
+    }
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '更新失败')
+    await loadShares(shareProject.value.id)
+  }
+}
+
+async function toggleShareFlag(row, flagKey, value) {
+  if (!shareProject.value) return
+  try {
+    const response = await axios.put(
+      `/api/projects/${shareProject.value.id}/permissions/${row.id}`,
+      { permission: row.permission, [flagKey]: value }
+    )
+    if (response.data.code === 0) {
+      row[flagKey] = value
+      ElMessage.success('高风险授权已更新')
     } else {
       ElMessage.error(response.data.message || '更新失败')
       await loadShares(shareProject.value.id)
@@ -1363,6 +1514,36 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
+.high-risk-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+
+.high-risk-label {
+  font-size: 13px;
+  color: #9a3412;
+  white-space: nowrap;
+}
+
+.risk-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.wrap-text {
+  white-space: normal;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
 .pagination-wrapper {
   padding: 20px 24px;
   border-top: 1px solid #e2e8f0;
@@ -1383,6 +1564,59 @@ onMounted(() => {
   font-weight: 600;
   font-size: 16px;
   color: #1e293b;
+}
+
+.resource-counts {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.resource-section {
+  margin-top: 16px;
+}
+
+.resource-section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 10px;
+  padding-left: 8px;
+  border-left: 3px solid #1890ff;
+}
+
+.resource-stats {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 14px 16px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.stat-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.stat-label {
+  font-size: 13px;
+  color: #64748b;
+}
+
+.stat-value {
+  font-size: 20px;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.resource-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #94a3b8;
 }
 
 .import-content {

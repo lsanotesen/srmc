@@ -17,6 +17,7 @@ import json
 import asyncio
 from datetime import datetime
 import uuid
+import time
 
 router = APIRouter()
 
@@ -605,6 +606,27 @@ def _handle_heartbeat_sync(message: dict, agent_uuid: str, db: Session):
                     svc_mode_map = run_mode_map.get(str(service_id), {})
                     svc_mode = container_status_service.resolve_run_mode(svc_mode_map, None)
                     status = container_status_service.compute_host_service_status(status, svc_mode)
+
+                # 【新增】先读取旧状态用于变化检测
+                old_status_bytes = redis_client.get(redis_key)
+                old_status = old_status_bytes.decode('utf-8') if old_status_bytes else None
+
+                # 【新增】计算当前时间戳
+                current_timestamp = int(time.time())
+
+                # 【修改】每次心跳更新"状态最后更新时间"（移到状态变化判断之前）
+                redis_client.set(f"status_last_seen_at:{service_id}", current_timestamp)
+
+                # 【修改】状态变化检测和停止时间记录（仅检测停止状态）
+                # 状态常量统一为大写（RUNNING/STOPPED/PARTIAL），此处必须大写比较，
+                # 否则条件恒为 False，stopped_at 永远不会写入。
+                should_update_stopped_at = (
+                    status == "STOPPED" and old_status in ["RUNNING", "PARTIAL"]
+                )
+
+                # 【修改】记录停止时间（如果需要）
+                if should_update_stopped_at:
+                    redis_client.set(f"stopped_at:{service_id}", current_timestamp)
 
                 # 缓存 TTL 60s，是心跳间隔 15s 的 4 倍，容忍心跳延迟
                 redis_client.set(redis_key, status, ex=60)

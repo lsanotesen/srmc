@@ -3,13 +3,15 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, List
 from models.project_member import ProjectMember
-from models.project_permission import ProjectPermission
+from models.project_permission import ProjectPermission, HIGH_RISK_FLAG_BY_CAPABILITY
 from models.project import Project
 from models.user import User
 from schemas.common import ResponseModel
 from core.database import get_db
 from api.dependencies import get_current_user
 from services.project_member_service import ProjectMemberService
+from services.permission_service import PermissionService
+from services.data_scope_service import DataScopeService
 from services.audit_service import log_audit
 
 router = APIRouter()
@@ -28,15 +30,114 @@ class ShareRequest(BaseModel):
     target_type: str
     target_id: int
     permission: str = "READ"
+    # 高风险能力独立授权（不随"读写"自动开放，默认关闭）
+    allow_webshell: Optional[bool] = False
+    allow_root: Optional[bool] = False
+    allow_sftp: Optional[bool] = False
+    allow_service_delete: Optional[bool] = False
+    allow_service_deploy: Optional[bool] = False
+    allow_backup: Optional[bool] = False
 
 
 class ShareUpdateRequest(BaseModel):
     permission: str
+    allow_webshell: Optional[bool] = None
+    allow_root: Optional[bool] = None
+    allow_sftp: Optional[bool] = None
+    allow_service_delete: Optional[bool] = None
+    allow_service_deploy: Optional[bool] = None
+    allow_backup: Optional[bool] = None
 
 
 VALID_PROJECT_ROLES = ["Owner", "Manager", "Developer", "Operator", "Viewer"]
 VALID_TARGET_TYPES = ["Organization", "Department", "User"]
-VALID_PERMISSIONS = ["READ", "EDIT", "MANAGE"]
+# 对外只保留两级：READ（只读）/ EDIT（读写）。WRITE、MANAGE 为兼容别名，统一归为读写。
+VALID_PERMISSIONS = ["READ", "EDIT", "WRITE", "MANAGE"]
+
+# 高风险授权字段 → 授权人自身需具备的系统权限码（None 表示无对应系统权限码，不做系统级前置约束）
+SHARE_CAPABILITY_PERMISSION = {
+    "allow_webshell": "webshell:login",
+    "allow_root": "webshell:root-login",
+    "allow_sftp": None,
+    "allow_service_delete": "service:deploy",
+    "allow_service_deploy": "service:deploy",
+    "allow_backup": "backup:manage",
+}
+
+
+def _normalize_permission(permission: str) -> Optional[str]:
+    """将共享级别归一为两级：READ / EDIT（读写）。非法值返回 None。"""
+    p = (permission or "").upper()
+    if p == "READ":
+        return "READ"
+    if p in ("EDIT", "MANAGE", "WRITE"):
+        return "EDIT"
+    return None
+
+
+def _assert_can_manage_sharing(db: Session, user: User, project: Project):
+    """共享管理鉴权：超管 / 组织级管理员（本组织）/ 项目共享管理者 / 具备 project:share 的固有权限用户。
+
+    仅通过 PUBLIC 可见或项目共享获得访问、不具备固有操作权的用户不得管理共享，
+    防止其擅自提升自身共享级别或越权管理他人的授权。
+    """
+    if DataScopeService._is_super_admin(user):
+        return
+    if not DataScopeService.can_access_project(db, user, project.id):
+        raise HTTPException(status_code=403, detail="无权访问该项目")
+    if not DataScopeService.has_intrinsic_project_authority(db, user, project):
+        raise HTTPException(status_code=403, detail="仅通过共享或公开可见获得访问，不能管理项目共享")
+    if DataScopeService._is_org_wide(user) and user.organization_id and user.organization_id == project.organization_id:
+        return
+    if ProjectMemberService.has_permission(db, user.id, project.id, "manage_sharing") or \
+       ProjectMemberService.has_permission(db, user.id, project.id, "manage_project"):
+        return
+    if PermissionService.user_has_permission(db, user.id, "project:share"):
+        return
+    raise HTTPException(status_code=403, detail="无权限管理项目共享")
+
+
+def _assert_valid_share_target(db: Session, target_type: str, target_id: int):
+    """校验共享目标对象存在，避免向不存在的用户/部门/组织写入授权记录。"""
+    from models.department import Department
+    from models.organization import Organization
+    if target_type == "User":
+        exists = db.query(User.id).filter(User.id == target_id).first() is not None
+    elif target_type == "Department":
+        exists = db.query(Department.id).filter(Department.id == target_id).first() is not None
+    elif target_type == "Organization":
+        exists = db.query(Organization.id).filter(Organization.id == target_id).first() is not None
+    else:
+        exists = False
+    if not exists:
+        raise HTTPException(status_code=400, detail=f"授权目标不存在: {target_type}:{target_id}")
+
+
+def _assert_sharer_can_grant(db: Session, user: User, flags: dict):
+    """授权上限校验：非管理员不得授予自身不具备的高风险能力。"""
+    if DataScopeService._is_super_admin(user):
+        return
+    for flag, value in flags.items():
+        if not value:
+            continue
+        code = SHARE_CAPABILITY_PERMISSION.get(flag)
+        if code and not PermissionService.user_has_permission(db, user.id, code):
+            raise HTTPException(status_code=403, detail=f"自身不具备该高风险能力，无法授予：{flag}")
+
+
+def _resolve_target_name(db: Session, target_type: str, target_id: int) -> str:
+    from models.department import Department
+    from models.organization import Organization
+    if target_type == "User":
+        u = db.query(User).filter(User.id == target_id).first()
+        return u.username if u else f"User_{target_id}"
+    if target_type == "Department":
+        d = db.query(Department).filter(Department.id == target_id).first()
+        return d.name if d else f"Department_{target_id}"
+    if target_type == "Organization":
+        o = db.query(Organization).filter(Organization.id == target_id).first()
+        return o.name if o else f"Organization_{target_id}"
+    return f"{target_type}_{target_id}"
 
 
 @router.get("/projects/{project_id}/members", response_model=ResponseModel)
@@ -48,6 +149,9 @@ async def get_project_members(
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+
+    if not DataScopeService.can_access_project(db, user, project_id):
+        raise HTTPException(status_code=403, detail="无权访问该项目")
 
     members = ProjectMemberService.get_project_members(db, project_id)
     result = []
@@ -173,16 +277,25 @@ async def get_project_permissions(
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
 
+    # 共享列表属敏感授权信息，仅具备共享管理权限者可见
+    _assert_can_manage_sharing(db, user, project)
+
     permissions = db.query(ProjectPermission).filter(ProjectPermission.project_id == project_id).all()
     result = []
     for perm in permissions:
-        target_name = f"{perm.target_type}_{perm.target_id}"
         result.append({
             "id": perm.id,
             "target_type": perm.target_type,
             "target_id": perm.target_id,
-            "target_name": target_name,
+            "target_name": _resolve_target_name(db, perm.target_type, perm.target_id),
             "permission": perm.permission,
+            "level": "READ" if perm.permission == "READ" else "EDIT",
+            "allow_webshell": bool(perm.allow_webshell),
+            "allow_root": bool(perm.allow_root),
+            "allow_sftp": bool(perm.allow_sftp),
+            "allow_service_delete": bool(perm.allow_service_delete),
+            "allow_service_deploy": bool(perm.allow_service_deploy),
+            "allow_backup": bool(perm.allow_backup),
             "created_by": perm.created_by,
             "created_time": str(perm.created_time) if perm.created_time else None,
         })
@@ -200,11 +313,19 @@ async def share_project(
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
 
+    _assert_can_manage_sharing(db, user, project)
+
     if data.target_type not in VALID_TARGET_TYPES:
         raise HTTPException(status_code=400, detail=f"无效的授权目标类型: {data.target_type}")
 
-    if data.permission not in VALID_PERMISSIONS:
+    _assert_valid_share_target(db, data.target_type, data.target_id)
+
+    normalized = _normalize_permission(data.permission)
+    if not normalized:
         raise HTTPException(status_code=400, detail=f"无效的权限等级: {data.permission}")
+
+    flags = {flag: bool(getattr(data, flag)) for flag in HIGH_RISK_FLAG_BY_CAPABILITY.values()}
+    _assert_sharer_can_grant(db, user, flags)
 
     existing = db.query(ProjectPermission).filter(
         ProjectPermission.project_id == project_id,
@@ -212,22 +333,25 @@ async def share_project(
         ProjectPermission.target_id == data.target_id,
     ).first()
     if existing:
-        existing.permission = data.permission
+        existing.permission = normalized
+        for flag, value in flags.items():
+            setattr(existing, flag, value)
         db.commit()
         log_audit(
             db, user.id, user.username, "PROJECT_SHARE",
             result="success",
-            output=f"更新项目 {project.name} 共享权限: {data.target_type}:{data.target_id} -> {data.permission}",
+            output=f"更新项目 {project.name} 共享权限: {data.target_type}:{data.target_id} -> {normalized}",
             project_id=project_id,
         )
-        return ResponseModel(data={"id": existing.id, "permission": existing.permission})
+        return ResponseModel(data={"id": existing.id, "permission": existing.permission, "level": normalized})
 
     perm = ProjectPermission(
         project_id=project_id,
         target_type=data.target_type,
         target_id=data.target_id,
-        permission=data.permission,
+        permission=normalized,
         created_by=user.id,
+        **flags,
     )
     db.add(perm)
     db.commit()
@@ -235,10 +359,10 @@ async def share_project(
     log_audit(
         db, user.id, user.username, "PROJECT_SHARE",
         result="success",
-        output=f"共享项目 {project.name} 给 {data.target_type}:{data.target_id} ({data.permission})",
+        output=f"共享项目 {project.name} 给 {data.target_type}:{data.target_id} ({normalized})",
         project_id=project_id,
     )
-    return ResponseModel(data={"id": perm.id, "permission": perm.permission})
+    return ResponseModel(data={"id": perm.id, "permission": perm.permission, "level": normalized})
 
 
 @router.put("/projects/{project_id}/permissions/{perm_id}", response_model=ResponseModel)
@@ -249,6 +373,12 @@ async def update_project_permission(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    _assert_can_manage_sharing(db, user, project)
+
     perm = db.query(ProjectPermission).filter(
         ProjectPermission.id == perm_id,
         ProjectPermission.project_id == project_id,
@@ -256,17 +386,27 @@ async def update_project_permission(
     if not perm:
         raise HTTPException(status_code=404, detail="授权记录不存在")
 
-    if data.permission not in VALID_PERMISSIONS:
+    normalized = _normalize_permission(data.permission)
+    if not normalized:
         raise HTTPException(status_code=400, detail=f"无效的权限等级: {data.permission}")
 
-    perm.permission = data.permission
+    # 仅更新显式传入的高风险字段，未传入的保持原值（兼容增量授权）
+    flags = {}
+    for flag in HIGH_RISK_FLAG_BY_CAPABILITY.values():
+        value = getattr(data, flag)
+        if value is not None:
+            flags[flag] = bool(value)
+    _assert_sharer_can_grant(db, user, flags)
+
+    perm.permission = normalized
+    for flag, value in flags.items():
+        setattr(perm, flag, value)
     db.commit()
 
-    project = db.query(Project).filter(Project.id == project_id).first()
     log_audit(
         db, user.id, user.username, "PROJECT_SHARE",
         result="success",
-        output=f"更新项目 {project.name} 共享权限 ID:{perm_id} -> {data.permission}",
+        output=f"更新项目 {project.name} 共享权限 ID:{perm_id} -> {normalized}",
         project_id=project_id,
     )
     return ResponseModel(message="权限更新成功")
@@ -279,6 +419,12 @@ async def remove_project_permission(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    _assert_can_manage_sharing(db, user, project)
+
     perm = db.query(ProjectPermission).filter(
         ProjectPermission.id == perm_id,
         ProjectPermission.project_id == project_id,
@@ -289,7 +435,6 @@ async def remove_project_permission(
     db.delete(perm)
     db.commit()
 
-    project = db.query(Project).filter(Project.id == project_id).first()
     log_audit(
         db, user.id, user.username, "PROJECT_SHARE_REMOVE",
         result="success",
@@ -309,6 +454,8 @@ async def update_project_visibility(
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+
+    _assert_can_manage_sharing(db, user, project)
 
     if visibility not in ["DEPARTMENT", "AUTHORIZED", "PUBLIC"]:
         raise HTTPException(status_code=400, detail=f"无效的可见性: {visibility}")

@@ -13,6 +13,14 @@ from utils.program_status import get_program_status, get_batch_program_status
 from services.audit_service import log_audit
 from core.database import get_db
 from api.dependencies import get_current_user, require_permission
+from api.permission_dependencies import (
+    assert_service_access,
+    assert_services_access,
+    assert_project_access,
+    assert_high_risk_capability,
+    assert_project_write_capability,
+    get_visible_project_ids,
+)
 from utils.ssh_pool import ssh_pool
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill, Font
@@ -136,7 +144,14 @@ async def list_services(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
-    services = db.query(AppService).all()
+    from services.data_scope_service import DataScopeService
+
+    query = db.query(AppService)
+    # DataScope 过滤：非管理员仅能查看有权限访问的项目下的服务
+    if not DataScopeService._is_super_admin(user):
+        visible_pids = DataScopeService.get_user_project_ids(db, user)
+        query = query.filter(AppService.project_id.in_(visible_pids))
+    services = query.all()
     result = []
     for service in services:
         project = db.query(Project).filter(Project.id == service.project_id).first()
@@ -206,6 +221,12 @@ async def get_services(
     if not DataScopeService._is_super_admin(user):
         visible_pids = DataScopeService.get_user_project_ids(db, user)
         filters.append(AppService.project_id.in_(visible_pids))
+        # 可见范围签名：避免不同可见范围的用户共享同一份 Redis 列表缓存（缓存污染）
+        scope_key = hashlib.md5(
+            ",".join(str(p) for p in sorted(visible_pids)).encode()
+        ).hexdigest()
+    else:
+        scope_key = "all"
 
     has_runtime_filter = bool(status or agent_status)
 
@@ -223,8 +244,15 @@ async def get_services(
             service_ids = [s.id for s in all_services]
             status_keys = [f"service_status:{sid}" for sid in service_ids]
             source_keys = [f"service_status_source:{sid}" for sid in service_ids]
+            # 【新增】批量获取时间字段
+            time_keys = [f"status_last_seen_at:{sid}" for sid in service_ids]
+            stopped_keys = [f"stopped_at:{sid}" for sid in service_ids]
+            
             status_values = redis_client.mget(status_keys)
             source_values = redis_client.mget(source_keys)
+            # 【新增】批量获取时间值
+            time_values = redis_client.mget(time_keys)
+            stopped_values = redis_client.mget(stopped_keys)
 
             # 预查 Agent 在线状态（与 count 接口口径一致：有 agent_uuid 且 Agent 在线才算在线）
             from models.agent import Agent
@@ -258,9 +286,15 @@ async def get_services(
                 st = (raw_s.decode() if raw_s and isinstance(raw_s, bytes) else (raw_s or "UNKNOWN")).upper()
                 raw_src = source_values[i]
                 src = raw_src.decode() if raw_src and isinstance(raw_src, bytes) else (raw_src or "")
+                # 【新增】处理时间字段，统一转换为Unix时间戳整数
+                raw_time = time_values[i]
+                status_last_seen_at = int(raw_time) if raw_time else None
+                raw_stopped = stopped_values[i]
+                stopped_at = int(raw_stopped) if raw_stopped else None
+                
                 # Agent 在线：服务关联了 agent_uuid 且该 Agent 当前在线
                 agent_online = bool(svc.agent_uuid) and (svc.agent_uuid in online_uuids) and src != 'OFFLINE'
-                enriched.append((svc, st, src, agent_online))
+                enriched.append((svc, st, src, agent_online, status_last_seen_at, stopped_at))
         except Exception as e:
             print(f"Redis status lookup error (non-critical): {e}")
             enriched = [(s, "UNKNOWN", "", False) for s in all_services]
@@ -303,14 +337,14 @@ async def get_services(
             filter(AppService.id.in_(page_ids)).all()
 
         id_to_row = {s.id: (s, p, sub, grp) for s, p, sub, grp in results}
-        status_by_id = {svc.id: (st, src, agent_online) for svc, st, src, agent_online in enriched}
+        status_by_id = {svc.id: (st, src, agent_online, status_last_seen_at, stopped_at) for svc, st, src, agent_online, status_last_seen_at, stopped_at in enriched}
 
         result = []
         for svc_id in page_ids:
             if svc_id not in id_to_row:
                 continue
             svc, project, subsystem, srv_group = id_to_row[svc_id]
-            st, src, agent_online = status_by_id.get(svc_id, ("UNKNOWN", "", False))
+            st, src, agent_online, status_last_seen_at, stopped_at = status_by_id.get(svc_id, ("UNKNOWN", "", False, None, None))
             result.append({
                 'id': svc.id,
                 'project_id': svc.project_id,
@@ -347,12 +381,15 @@ async def get_services(
                 'status': st,
                 'status_source': src,
                 'agent_status': 'online' if agent_online else 'offline',
+                # 【新增】时间字段
+                'status_last_seen_at': status_last_seen_at,
+                'stopped_at': stopped_at,
             })
 
         return ResponseModel(data={"items": result, "total": total, "page": page, "size": size})
 
     # ---- 无运行时状态筛选，走原有缓存路径 ----
-    filter_str = f"{project_id or 0}:{subsystem_id or 0}:{group_id or 0}:{deploy_type or ''}:{func_desc or ''}:{module or ''}:{ip or ''}:{owner or ''}:{page}:{size}"
+    filter_str = f"{scope_key}:{project_id or 0}:{subsystem_id or 0}:{group_id or 0}:{deploy_type or ''}:{func_desc or ''}:{module or ''}:{ip or ''}:{owner or ''}:{page}:{size}"
     cache_key = f"services_list:{hashlib.md5(filter_str.encode()).hexdigest()}"
 
     cached = get_cached(cache_key)
@@ -420,25 +457,47 @@ async def get_services(
         from utils.redis_client import redis_client
         if redis_client:
             service_ids = [s['id'] for s in result]
+            print(f"Service IDs: {service_ids}")
             if service_ids:
                 status_keys = [f"service_status:{sid}" for sid in service_ids]
                 source_keys = [f"service_status_source:{sid}" for sid in service_ids]
+                time_keys = [f"status_last_seen_at:{sid}" for sid in service_ids]
+                stopped_keys = [f"stopped_at:{sid}" for sid in service_ids]
                 status_values = redis_client.mget(status_keys)
                 source_values = redis_client.mget(source_keys)
+                time_values = redis_client.mget(time_keys)
+                stopped_values = redis_client.mget(stopped_keys)
+                print(f"Redis values count - status: {len(status_values) if status_values else 0}, time: {len(time_values) if time_values else 0}")
 
-                for i, service in enumerate(result):
-                    cached_status = status_values[i]
-                    cached_source = source_values[i]
-                    if cached_status:
-                        service['status'] = cached_status.decode() if isinstance(cached_status, bytes) else cached_status
-                        service['status_source'] = cached_source.decode() if cached_source and isinstance(cached_source, bytes) else (cached_source or 'AGENT')
-                        service['agent_status'] = 'online'
-                    else:
-                        service['status'] = 'UNKNOWN'
-                        service['status_source'] = ''
-                        service['agent_status'] = 'offline'
+            for i, service in enumerate(result):
+                print(f"Processing service {i}: ID={service.get('id')}, agent_uuid={service.get('agent_uuid')}")
+                cached_status = status_values[i] if status_values else None
+                cached_source = source_values[i] if source_values else None
+                raw_time = time_values[i] if time_values else None
+                raw_stopped = stopped_values[i] if stopped_values else None
+                
+                if cached_status:
+                    service['status'] = cached_status.decode() if isinstance(cached_status, bytes) else cached_status
+                    service['status_source'] = cached_source.decode() if cached_source and isinstance(cached_source, bytes) else (cached_source or 'AGENT')
+                    service['agent_status'] = 'online'
+                    # 【新增】处理时间字段，转换为整数 Unix 秒
+                    service['status_last_seen_at'] = int(raw_time) if raw_time else None
+                    service['stopped_at'] = int(raw_stopped) if raw_stopped else None
+                else:
+                    service['status'] = 'UNKNOWN'
+                    service['status_source'] = ''
+                    service['agent_status'] = 'offline'
+                    # 【新增】时间字段设为null
+                    service['status_last_seen_at'] = None
+                    service['stopped_at'] = None
     except Exception as e:
         print(f"Redis status lookup error (non-critical): {e}")
+        print(f"Redis connection: {redis_client is not None}")
+        print(f"Service count: {len(result)}")
+        if result and hasattr(result[0], 'id'):
+            print(f"First service ID: {result[0].id}")
+        import traceback
+        traceback.print_exc()
 
     # 构建缓存数据（不含实时状态字段）
     cache_items = []
@@ -449,6 +508,22 @@ async def get_services(
     set_cached(cache_key, {"items": cache_items, "total": total, "page": page, "size": size}, ttl=30)
 
     response_data = {"items": result, "total": total, "page": page, "size": size}
+    
+    # 【新增】详细的调试信息
+    print(f"=== API Response Debug ===")
+    print(f"Total services: {total}")
+    print(f"Returning items: {len(result)}")
+    
+    if result:
+        print(f"Service details:")
+        for i, service in enumerate(result[:5]):  # 显示前5个服务
+            print(f"  Service {i}: ID={service.get('id')}, Name={service.get('func_desc', 'N/A')}")
+            print(f"    Status: {service.get('status')}")
+            print(f"    Status Last Seen At: {service.get('status_last_seen_at')}")
+            print(f"    Stopped At: {service.get('stopped_at')}")
+            print(f"    Has Time Fields: {'status_last_seen_at' in service and 'stopped_at' in service}")
+            print()
+    
     return ResponseModel(data=response_data)
 
 @router.get("/services/count", response_model=ResponseModel)
@@ -789,7 +864,9 @@ async def get_service(
     service = db.query(AppService).filter(AppService.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="服务不存在")
-    
+    # DataScope：只能查看有权限项目下的服务
+    assert_service_access(db, user, service_id, service=service)
+
     project = db.query(Project).filter(Project.id == service.project_id).first()
     subsystem = db.query(Subsystem).filter(Subsystem.id == service.subsystem_id).first() if service.subsystem_id else None
     service_group = db.query(ServiceGroup).filter(ServiceGroup.id == service.group_id).first() if service.group_id else None
@@ -893,7 +970,11 @@ async def create_service(
     project = db.query(Project).filter(Project.id == service_create.project_id).first()
     if not project:
         raise HTTPException(status_code=400, detail="项目不存在")
-    
+
+    # DataScope：只能向有权限的项目创建服务；发布/创建属高风险，需项目共享独立授权
+    assert_project_access(db, user, service_create.project_id)
+    assert_high_risk_capability(db, user, service_create.project_id, "deploy")
+
     if service_create.subsystem_id:
         subsystem = db.query(Subsystem).filter(Subsystem.id == service_create.subsystem_id).first()
         if not subsystem:
@@ -966,6 +1047,9 @@ async def create_service(
             print(f"Sent pull_services to agent {online_agent.uuid}")
     
     log_audit(db, user.id, user.username, "SERVICE_CREATE", 
+              service_id=new_service.id,
+              project_id=new_service.project_id,
+              subsystem_id=new_service.subsystem_id,
               result="success", output=f"创建服务: {service_create.func_desc}")
     
     return ResponseModel(data={
@@ -1015,11 +1099,17 @@ async def update_service(
     service = db.query(AppService).filter(AppService.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="服务不存在")
-    
+    # DataScope：只能修改有权限项目下的服务
+    assert_service_access(db, user, service_id, service=service)
+    # 项目写操作：只读共享不得修改服务配置
+    assert_project_write_capability(db, user, service.project_id)
+
     if service_update.project_id is not None:
         project = db.query(Project).filter(Project.id == service_update.project_id).first()
         if not project:
             raise HTTPException(status_code=400, detail="项目不存在")
+        # DataScope：不允许把服务改挂到无权限的项目
+        assert_project_access(db, user, service_update.project_id)
         service.project_id = service_update.project_id
     
     if service_update.subsystem_id is not None:
@@ -1098,6 +1188,9 @@ async def update_service(
     service_group = db.query(ServiceGroup).filter(ServiceGroup.id == service.group_id).first() if service.group_id else None
     
     log_audit(db, user.id, user.username, "SERVICE_UPDATE", 
+              service_id=service.id,
+              project_id=service.project_id,
+              subsystem_id=service.subsystem_id,
               result="success", output=f"更新服务: {service.func_desc}")
     
     return ResponseModel(data={
@@ -1145,9 +1238,15 @@ async def delete_service(
     service = db.query(AppService).filter(AppService.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="服务不存在")
-    
+    # DataScope：只能删除有权限项目下的服务
+    assert_service_access(db, user, service_id, service=service)
+    # 高风险：服务删除需项目共享独立授权
+    assert_high_risk_capability(db, user, service.project_id, "delete")
+
     func_desc = service.func_desc
     agent_uuid = service.agent_uuid
+    deleted_project_id = service.project_id
+    deleted_subsystem_id = service.subsystem_id
     db.delete(service)
     db.commit()
 
@@ -1159,6 +1258,9 @@ async def delete_service(
     await notify_agents_pull_services(db, agent_uuid)
 
     log_audit(db, user.id, user.username, "SERVICE_DELETE",
+              service_id=service_id,
+              project_id=deleted_project_id,
+              subsystem_id=deleted_subsystem_id,
               result="success", output=f"删除服务: {func_desc}")
 
     return ResponseModel(data={"id": service_id})
@@ -1183,6 +1285,10 @@ async def update_container_run_mode(
     service = db.query(AppService).filter(AppService.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="服务不存在")
+    # DataScope：只能修改有权限项目下的服务
+    assert_service_access(db, user, service_id, service=service)
+    # 项目写操作：只读共享不得修改运行模式
+    assert_project_write_capability(db, user, service.project_id)
 
     container_name = (payload.get("container_name") or "").strip()
     run_mode = (payload.get("run_mode") or "").strip()
@@ -1222,6 +1328,7 @@ async def update_container_run_mode(
     db.commit()
 
     log_audit(db, user.id, user.username, "SERVICE_UPDATE",
+              service_id=service_id,
               result="success",
               output=f"修改容器运行类型: service={service_id} container={container_name} run_mode={run_mode}")
 
@@ -1237,7 +1344,11 @@ async def batch_delete_services(
         raise HTTPException(status_code=400, detail="请选择要删除的服务")
     
     # 先收集要删除的服务关联的 agent_uuid（删除后就查不到了）
-    target_services = db.query(AppService).filter(AppService.id.in_(service_ids)).all()
+    # DataScope：逐个校验待删除服务的数据范围，任一越权则整批拒绝
+    target_services = assert_services_access(db, user, service_ids)
+    # 高风险：服务删除需项目共享独立授权（逐个校验项目）
+    for _svc in target_services:
+        assert_high_risk_capability(db, user, _svc.project_id, "delete")
     affected_agent_uuids = set(s.agent_uuid for s in target_services if s.agent_uuid)
 
     # 使用批量删除，提高性能
@@ -1266,7 +1377,8 @@ async def batch_get_status(
     if not service_ids:
         return ResponseModel(data={})
     
-    services = db.query(AppService).filter(AppService.id.in_(service_ids)).all()
+    # DataScope：逐个校验数据范围，任一越权则整批拒绝
+    services = assert_services_access(db, user, service_ids)
     progs = []
     for service in services:
         progs.append({
@@ -1295,6 +1407,9 @@ async def get_status_from_cache(
     if not service_ids:
         return ResponseModel(data={})
     
+    # DataScope：逐个校验数据范围，任一越权则整批拒绝
+    assert_services_access(db, user, service_ids)
+    
     result = {}
     try:
         for service_id in service_ids:
@@ -1322,7 +1437,11 @@ async def start_service(
     service = db.query(AppService).filter(AppService.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="服务不存在")
-    
+    # DataScope：只能操作有权限项目下的服务
+    assert_service_access(db, user, service_id, service=service)
+    # 项目写操作：只读共享不得启停/重启
+    assert_project_write_capability(db, user, service.project_id)
+
     print(f"\n[START] Service {service_id}: func_desc={service.func_desc}, ip={service.ip}, agent_uuid={service.agent_uuid}, deploy_type={service.deploy_type}, program_path={service.program_path}, start_script={service.start_script}, username={service.username}")
     
     service_type = service.service_type or 'HOST_APP'
@@ -1339,6 +1458,9 @@ async def start_service(
             output = agent_result.get('output', '')
             result_message = agent_result.get('message', 'Agent操作完成')
             log_audit(db, user.id, user.username, "SERVICE_START",
+                      service_id=service.id,
+                      project_id=service.project_id,
+                      subsystem_id=service.subsystem_id,
                       result="success" if success else "failed",
                       output=f"服务: {service.func_desc}, IP: {service.ip}, 通过Agent启动, 结果: {result_message}")
             return ResponseModel(data={"success": success, "message": result_message, "output": output})
@@ -1405,12 +1527,18 @@ async def start_service(
         ssh.close()
         
         log_audit(db, user.id, user.username, "SERVICE_START",
+                  service_id=service.id,
+                  project_id=service.project_id,
+                  subsystem_id=service.subsystem_id,
                   result="success" if success else "partial",
                   output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 命令: {command}, 输出: {output[:200]}")
         
         return ResponseModel(data={"success": success, "message": result_message, "output": output[:500]})
     except Exception as e:
         log_audit(db, user.id, user.username, "SERVICE_START",
+                  service_id=service.id,
+                  project_id=service.project_id,
+                  subsystem_id=service.subsystem_id,
                   result="failed",
                   output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 错误: {str(e)}")
         return ResponseModel(data={"success": False, "message": str(e), "output": None}, code=500)
@@ -1424,7 +1552,11 @@ async def stop_service(
     service = db.query(AppService).filter(AppService.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="服务不存在")
-    
+    # DataScope：只能操作有权限项目下的服务
+    assert_service_access(db, user, service_id, service=service)
+    # 项目写操作：只读共享不得启停/重启
+    assert_project_write_capability(db, user, service.project_id)
+
     service_type = service.service_type or 'HOST_APP'
     result_message = ""
     output = ""
@@ -1437,6 +1569,9 @@ async def stop_service(
             output = agent_result.get('output', '')
             result_message = agent_result.get('message', 'Agent操作完成')
             log_audit(db, user.id, user.username, "SERVICE_STOP",
+                      service_id=service.id,
+                      project_id=service.project_id,
+                      subsystem_id=service.subsystem_id,
                       result="success" if success else "failed",
                       output=f"服务: {service.func_desc}, IP: {service.ip}, 通过Agent停止, 结果: {result_message}")
             return ResponseModel(data={"success": success, "message": result_message, "output": output})
@@ -1508,12 +1643,18 @@ async def stop_service(
         ssh.close()
         
         log_audit(db, user.id, user.username, "SERVICE_STOP",
+                  service_id=service.id,
+                  project_id=service.project_id,
+                  subsystem_id=service.subsystem_id,
                   result="success" if success else "partial",
                   output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 命令: {command}, 输出: {output[:200]}")
         
         return ResponseModel(data={"success": success, "message": result_message, "output": output[:500]})
     except Exception as e:
         log_audit(db, user.id, user.username, "SERVICE_STOP",
+                  service_id=service.id,
+                  project_id=service.project_id,
+                  subsystem_id=service.subsystem_id,
                   result="failed",
                   output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 错误: {str(e)}")
         return ResponseModel(data={"success": False, "message": str(e), "output": None}, code=500)
@@ -1527,7 +1668,11 @@ async def restart_service(
     service = db.query(AppService).filter(AppService.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="服务不存在")
-    
+    # DataScope：只能操作有权限项目下的服务
+    assert_service_access(db, user, service_id, service=service)
+    # 项目写操作：只读共享不得启停/重启
+    assert_project_write_capability(db, user, service.project_id)
+
     service_type = service.service_type or 'HOST_APP'
     result_message = ""
     output = ""
@@ -1540,6 +1685,9 @@ async def restart_service(
             output = agent_result.get('output', '')
             result_message = agent_result.get('message', 'Agent操作完成')
             log_audit(db, user.id, user.username, "SERVICE_RESTART",
+                      service_id=service.id,
+                      project_id=service.project_id,
+                      subsystem_id=service.subsystem_id,
                       result="success" if success else "failed",
                       output=f"服务: {service.func_desc}, IP: {service.ip}, 通过Agent重启, 结果: {result_message}")
             return ResponseModel(data={"success": success, "message": result_message, "output": output})
@@ -1605,12 +1753,18 @@ async def restart_service(
         ssh.close()
         
         log_audit(db, user.id, user.username, "SERVICE_RESTART",
+                  service_id=service.id,
+                  project_id=service.project_id,
+                  subsystem_id=service.subsystem_id,
                   result="success" if success else "partial",
                   output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 输出: {output[:200]}")
         
         return ResponseModel(data={"success": success, "message": result_message, "output": output[:500]})
     except Exception as e:
         log_audit(db, user.id, user.username, "SERVICE_RESTART",
+                  service_id=service.id,
+                  project_id=service.project_id,
+                  subsystem_id=service.subsystem_id,
                   result="failed",
                   output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 错误: {str(e)}")
         return ResponseModel(data={"success": False, "message": str(e), "output": None}, code=500)
@@ -1624,7 +1778,9 @@ async def list_log_files(
     service = db.query(AppService).filter(AppService.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="服务不存在")
-    
+    # DataScope：只能查看有权限项目下服务的日志
+    assert_service_access(db, user, service_id, service=service)
+
     try:
         ssh = await ssh_pool.get_connection(service.ip, service.ssh_port or 22, service.username, decrypt(service.password))
         if not ssh:
@@ -1702,13 +1858,36 @@ async def list_log_files(
         return ResponseModel(data={"files": [], "message": f"获取日志文件列表失败: {str(e)}"}, code=500)
 
 @router.websocket("/services/{service_id}/log/ws")
-async def service_log_websocket(websocket: WebSocket, service_id: int, db: Session = Depends(get_db)):
+async def service_log_websocket(websocket: WebSocket, service_id: int, token: str = Query(None), db: Session = Depends(get_db)):
     await websocket.accept()
     
+    # 1. token 校验 + 用户身份
+    from services.auth_service import decode_access_token
+    from models.user import User
+    from api.permission_dependencies import user_can_access_project
+    payload = decode_access_token(token) if token else None
+    username = payload.get("sub") if payload else None
+    if not username:
+        await websocket.send_json({"type": "error", "message": "无效的认证token"})
+        await websocket.close(code=1008)
+        return
+    user = db.query(User).filter(User.username == username).first()
+    if not user or not user.is_active:
+        await websocket.send_json({"type": "error", "message": "用户无效或已被禁用"})
+        await websocket.close(code=1008)
+        return
+    
+    # 2. 服务存在性校验
     service = db.query(AppService).filter(AppService.id == service_id).first()
     if not service:
         await websocket.send_json({"type": "error", "message": "服务不存在"})
-        await websocket.close()
+        await websocket.close(code=1008)
+        return
+    
+    # 3. 数据范围校验：只能订阅有权限项目下服务的日志
+    if not user_can_access_project(db, user, service.project_id):
+        await websocket.send_json({"type": "error", "message": "无权访问该服务"})
+        await websocket.close(code=1008)
         return
     
     from api.agent import manager
@@ -1763,7 +1942,9 @@ async def get_service_log(
     service = db.query(AppService).filter(AppService.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="服务不存在")
-    
+    # DataScope：只能查看有权限项目下服务的日志
+    assert_service_access(db, user, service_id, service=service)
+
     try:
         ssh = await ssh_pool.get_connection(service.ip, service.ssh_port or 22, service.username, decrypt(service.password))
         if not ssh:
@@ -1866,7 +2047,9 @@ async def download_service_log(
     service = db.query(AppService).filter(AppService.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="服务不存在")
-    
+    # DataScope：只能下载有权限项目下服务的日志
+    assert_service_access(db, user, service_id, service=service)
+
     if not service.log_path:
         raise HTTPException(status_code=400, detail="未配置日志路径")
     
@@ -2106,6 +2289,13 @@ async def import_services(
         batch_project = db.query(Project).filter(Project.id == project_id).first()
     if not batch_project:
         batch_project = db.query(Project).first()
+
+    # DataScope：只能向有权限的项目导入服务
+    assert_project_access(db, user, batch_project.id if batch_project else None,
+                          detail="无权向该项目导入服务")
+    # 项目级高风险独立授权：导入即批量创建/部署服务，仅共享访问的用户需被授予 deploy 高风险能力
+    assert_high_risk_capability(db, user, batch_project.id if batch_project else None, "deploy",
+                                detail="该项目共享未授予服务部署权限")
 
     # 导入前自动快照（兜底保险），失败不阻塞导入
     pre_snapshot_id = None
@@ -2507,8 +2697,14 @@ async def list_import_batches(
     """服务端导入历史（支持撤销状态展示）"""
     from models.import_batch import ImportBatch
     from sqlalchemy import func
-    total = db.query(func.count(ImportBatch.id)).scalar()
-    rows = (db.query(ImportBatch)
+    total = db.query(func.count(ImportBatch.id))
+    rows_q = db.query(ImportBatch)
+    visible = get_visible_project_ids(db, user)
+    if visible is not None:
+        total = total.filter(ImportBatch.project_id.in_(visible))
+        rows_q = rows_q.filter(ImportBatch.project_id.in_(visible))
+    total = total.scalar()
+    rows = (rows_q
             .order_by(ImportBatch.created_at.desc())
             .offset((page - 1) * size).limit(size).all())
     items = [{
@@ -2545,9 +2741,14 @@ async def revert_import_batch(
     if batch.status == 'reverted':
         raise HTTPException(status_code=400, detail="该批次已撤销过，无法重复撤销")
 
+    # DataScope：只能回滚有权限项目的导入批次
+    assert_project_access(db, user, batch.project_id, detail="无权回滚该导入批次")
+
     ops = db.query(ImportBatchOperation).filter(
         ImportBatchOperation.batch_id == batch.id).all()
     created_ids = [o.service_id for o in ops if o.op_type == 'created']
+    # DataScope：逐个校验本批新增服务的数据范围
+    assert_services_access(db, user, created_ids)
     repaired_ops = [o for o in ops if o.op_type == 'repaired']
 
     deleted_count = 0

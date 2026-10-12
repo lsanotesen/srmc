@@ -9,8 +9,19 @@ from services.monitor_service import get_service_status
 from core.database import get_db
 from core.capabilities import SERVICE_TYPE_CAPABILITIES, ServiceType
 from api.dependencies import get_current_user, require_permission
+from api.permission_dependencies import (
+    assert_legacy_service_access,
+    filter_legacy_services_query,
+)
 
 router = APIRouter()
+
+
+def _assert_server_usable(db: Session, user, server):
+    """校验用户对该服务器有数据范围权限（复用 api.server 的组织隔离规则）。"""
+    from api.server import _scope_server_query
+    if _scope_server_query(db.query(Server).filter(Server.id == server.id), user).first() is None:
+        raise HTTPException(status_code=403, detail="无权使用该服务器")
 
 def add_capabilities_to_service(service):
     capabilities = SERVICE_TYPE_CAPABILITIES.get(ServiceType(service.service_type), [])
@@ -37,7 +48,7 @@ async def get_services(
     if module:
         query = query.filter(Service.module == module)
     
-    services = query.all()
+    services = filter_legacy_services_query(db, user, query).all()
     result = []
     for service in services:
         service_dict = add_capabilities_to_service(service)
@@ -48,9 +59,7 @@ async def get_services(
 
 @router.get("/services/{service_id}", response_model=ResponseModel)
 async def get_service(service_id: int, db: Session = Depends(get_db), user = Depends(require_permission("service_view"))):
-    service = db.query(Service).filter(Service.id == service_id).first()
-    if not service:
-        raise HTTPException(status_code=404, detail="Service not found")
+    service = assert_legacy_service_access(db, user, service_id)
     
     service_dict = add_capabilities_to_service(service)
     service_dict['status'] = get_service_status(service.id)
@@ -66,6 +75,9 @@ async def create_service(service_create: ServiceCreate, db: Session = Depends(ge
     server = db.query(Server).filter(Server.ip == str(service_create.ip)).first()
     if not server:
         raise HTTPException(status_code=400, detail="Server with this IP not found")
+
+    # 数据范围校验：不能把服务创建到无权限的服务器上
+    _assert_server_usable(db, user, server)
     
     service = Service(
         service_name=service_create.service_name,
@@ -98,13 +110,13 @@ async def create_service(service_create: ServiceCreate, db: Session = Depends(ge
 
 @router.put("/services/{service_id}", response_model=ResponseModel)
 async def update_service(service_id: int, service_update: ServiceUpdate, db: Session = Depends(get_db), user = Depends(require_permission("service_operate"))):
-    service = db.query(Service).filter(Service.id == service_id).first()
-    if not service:
-        raise HTTPException(status_code=404, detail="Service not found")
+    service = assert_legacy_service_access(db, user, service_id)
     
     if service_update.ip:
         server = db.query(Server).filter(Server.ip == str(service_update.ip)).first()
         if server:
+            # 数据范围校验：不能把服务迁移到无权限的服务器上
+            _assert_server_usable(db, user, server)
             service.server_id = server.id
     
     for key, value in service_update.dict(exclude_unset=True).items():
@@ -121,9 +133,7 @@ async def update_service(service_id: int, service_update: ServiceUpdate, db: Ses
 
 @router.delete("/services/{service_id}", response_model=ResponseModel)
 async def delete_service(service_id: int, db: Session = Depends(get_db), user = Depends(require_permission("service_operate"))):
-    service = db.query(Service).filter(Service.id == service_id).first()
-    if not service:
-        raise HTTPException(status_code=404, detail="Service not found")
+    service = assert_legacy_service_access(db, user, service_id)
     
     db.delete(service)
     db.commit()

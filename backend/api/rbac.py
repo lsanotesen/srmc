@@ -9,8 +9,9 @@ from models.user_role import UserRole
 from models.user import User
 from schemas.common import ResponseModel
 from core.database import get_db
-from api.dependencies import get_current_user
+from api.dependencies import get_current_user, require_permission
 from services.role_permission_service import RolePermissionService
+from services.data_scope_service import DataScopeService
 from services.audit_service import log_audit
 
 router = APIRouter()
@@ -38,7 +39,7 @@ class UserRoleAssign(BaseModel):
 async def list_roles(
     include_system: bool = Query(True),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("role:view")),
 ):
     roles = RolePermissionService.list_roles(db, include_system=include_system)
     result = [
@@ -59,7 +60,7 @@ async def create_role(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role != "ADMIN":
+    if not DataScopeService._is_super_admin(user):
         raise HTTPException(status_code=403, detail="仅超级管理员可创建角色")
 
     try:
@@ -77,7 +78,7 @@ async def update_role(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role != "ADMIN":
+    if not DataScopeService._is_super_admin(user):
         raise HTTPException(status_code=403, detail="仅超级管理员可修改角色")
 
     try:
@@ -94,7 +95,7 @@ async def delete_role(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role != "ADMIN":
+    if not DataScopeService._is_super_admin(user):
         raise HTTPException(status_code=403, detail="仅超级管理员可删除角色")
 
     try:
@@ -109,7 +110,7 @@ async def delete_role(
 async def get_role_permissions(
     role_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("role:view")),
 ):
     perms = RolePermissionService.get_role_permissions(db, role_id)
     return ResponseModel(data=perms)
@@ -122,12 +123,22 @@ async def assign_permissions_to_role(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role != "ADMIN":
+    if not DataScopeService._is_super_admin(user):
         raise HTTPException(status_code=403, detail="仅超级管理员可分配权限")
 
-    RolePermissionService.assign_permissions_to_role(db, role_id, data.permission_ids)
-    log_audit(db, user.id, user.username, "PERMISSION_GRANT", result="success", output=f"为角色 ID:{role_id} 分配 {len(data.permission_ids)} 个权限")
-    return ResponseModel(message="权限分配成功")
+    try:
+        diff = RolePermissionService.assign_permissions_to_role(db, role_id, data.permission_ids)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    log_audit(
+        db, user.id, user.username, "PERMISSION_GRANT", result="success",
+        output=(
+            f"为角色 '{diff['role_name']}'(ID:{role_id}) 保存功能权限："
+            f"新增 {diff['added']}，移除 {diff['removed']}"
+        ),
+    )
+    return ResponseModel(message="权限保存成功")
 
 
 @router.delete("/roles/{role_id}/permissions", response_model=ResponseModel)
@@ -137,7 +148,7 @@ async def remove_permissions_from_role(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role != "ADMIN":
+    if not DataScopeService._is_super_admin(user):
         raise HTTPException(status_code=403, detail="仅超级管理员可移除权限")
 
     RolePermissionService.remove_permissions_from_role(db, role_id, data.permission_ids)
@@ -148,7 +159,7 @@ async def remove_permissions_from_role(
 @router.get("/permissions", response_model=ResponseModel)
 async def list_permissions(
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("role:view")),
 ):
     perms = RolePermissionService.list_permissions(db)
     result = [
@@ -168,8 +179,14 @@ async def list_permissions(
 async def get_user_roles(
     user_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("user:view")),
 ):
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    # 数据范围：不得查看数据范围外用户的角色
+    if not DataScopeService.can_access_user(user, target):
+        raise HTTPException(status_code=403, detail="无权查看该用户")
     roles = RolePermissionService.get_user_roles(db, user_id)
     return ResponseModel(data=roles)
 
@@ -181,7 +198,7 @@ async def assign_role_to_user(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role != "ADMIN":
+    if not DataScopeService._is_super_admin(user):
         raise HTTPException(status_code=403, detail="仅超级管理员可分配角色")
 
     RolePermissionService.assign_role(db, user_id, role_id)
@@ -196,7 +213,7 @@ async def revoke_role_from_user(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role != "ADMIN":
+    if not DataScopeService._is_super_admin(user):
         raise HTTPException(status_code=403, detail="仅超级管理员可撤销角色")
 
     RolePermissionService.revoke_role(db, user_id, role_id)
@@ -208,9 +225,15 @@ async def revoke_role_from_user(
 async def get_user_permissions(
     user_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("user:view")),
 ):
     from services.permission_service import PermissionService
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    # 数据范围：不得查看数据范围外用户的权限
+    if not DataScopeService.can_access_user(user, target):
+        raise HTTPException(status_code=403, detail="无权查看该用户")
     perms = PermissionService.get_user_permissions(db, user_id)
     return ResponseModel(data=perms)
 
@@ -227,16 +250,6 @@ async def check_permission(
     context = ResourceContext(resource_type, 0, project_id)
     has = UnifiedPermissionService.has_permission(db, user.id, context, action)
     return ResponseModel(data={"has_permission": has})
-
-
-@router.get("/projects/tree", response_model=ResponseModel)
-async def get_project_tree(
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """获取项目树（包含子系统）"""
-    tree = RolePermissionService.get_project_tree(db)
-    return ResponseModel(data=tree)
 
 
 # 注：项目权限管理已迁移至项目上下文

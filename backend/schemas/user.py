@@ -5,7 +5,7 @@ from typing import Optional, List
 class UserCreate(BaseModel):
     username: str = Field(..., max_length=64)
     password: str = Field(..., min_length=6)
-    role: Optional[str] = Field("READONLY", pattern="^(SUPER_ADMIN|ORG_ADMIN|DEPT_ADMIN|DEPT_MEMBER|READONLY)$")
+    role: Optional[str] = Field("DEPT_MEMBER", pattern="^(SUPER_ADMIN|ORG_ADMIN|DEPT_ADMIN|DEPT_MEMBER|READONLY)$")
     role_ids: Optional[List[int]] = Field(default_factory=list, description="RBAC角色ID列表")
     email: Optional[EmailStr] = None
     phone: Optional[str] = Field(None, max_length=20)

@@ -8,12 +8,50 @@ from schemas.common import ResponseModel
 from services.audit_service import log_audit
 from core.database import get_db
 from api.dependencies import get_current_user, require_permission
+from api.permission_dependencies import assert_project_access, assert_project_manage_capability
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill, Font
 from io import BytesIO
 import io
 
 router = APIRouter()
+
+
+def _project_resource_counts(db: Session, project_ids: list) -> dict:
+    """批量统计各项目下的资源数量（子系统数、服务数）。
+
+    返回 {project_id: {"subsystem_count": int, "service_count": int}}。
+    一次性聚合查询，避免逐项目 N+1。
+    """
+    from models.subsystem import Subsystem
+    from models.app_service import AppService
+    from sqlalchemy import func
+
+    counts = {pid: {"subsystem_count": 0, "service_count": 0} for pid in project_ids}
+    if not project_ids:
+        return counts
+
+    sub_rows = (
+        db.query(Subsystem.project_id, func.count(Subsystem.id))
+        .filter(Subsystem.project_id.in_(project_ids))
+        .group_by(Subsystem.project_id)
+        .all()
+    )
+    for pid, cnt in sub_rows:
+        if pid in counts:
+            counts[pid]["subsystem_count"] = cnt
+
+    svc_rows = (
+        db.query(AppService.project_id, func.count(AppService.id))
+        .filter(AppService.project_id.in_(project_ids))
+        .group_by(AppService.project_id)
+        .all()
+    )
+    for pid, cnt in svc_rows:
+        if pid in counts:
+            counts[pid]["service_count"] = cnt
+
+    return counts
 
 
 def _project_to_dict(db: Session, project: Project) -> dict:
@@ -73,7 +111,10 @@ async def get_projects(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
-    query = db.query(Project)
+    from services.data_scope_service import DataScopeService
+
+    # 复用 DataScope：非管理员仅能看到有权限的项目
+    query = DataScopeService.filter_projects_query(db, user)
 
     if name:
         query = query.filter(Project.name.like(f"%{name}%"))
@@ -84,6 +125,13 @@ async def get_projects(
     projects = query.offset((page - 1) * size).limit(size).all()
 
     result = [_project_to_dict(db, p) for p in projects]
+
+    # 附加项目下资源数量（子系统数 / 服务数），供项目资源管理页展示
+    counts = _project_resource_counts(db, [p.id for p in projects])
+    for item in result:
+        c = counts.get(item['id'], {})
+        item['subsystem_count'] = c.get('subsystem_count', 0)
+        item['service_count'] = c.get('service_count', 0)
 
     return ResponseModel(data={"items": result, "total": total, "page": page, "size": size})
 
@@ -96,15 +144,22 @@ async def get_project_tree(
     from models.service_group import ServiceGroup
     from sqlalchemy import select, func
     from utils.cache import get_or_set, invalidate_projects_tree, PROJECTS_TREE_CACHE_KEY, PROJECTS_TREE_TTL
+    from services.data_scope_service import DataScopeService
 
-    def load_tree_from_db():
-        """从数据库加载完整项目树（按 relation.display_order 排序）"""
+    def load_tree_from_db(scoped_user=None):
+        """从数据库加载项目树（按 relation.display_order 排序）。
+
+        scoped_user 为 None 表示超管全量；否则按该用户的 DataScope 过滤项目。
+        """
         from models.subsystem import Subsystem
         from models.service_group import ServiceGroup
         from models.subsystem_group_relation import SubsystemGroupRelation
 
-        # 1. 查所有项目（按 id 排序，稳定）
-        projects = db.query(Project).order_by(Project.id).all()
+        # 1. 查项目（超管全量；普通用户仅可见项目），按 id 排序保证稳定
+        if scoped_user is None:
+            projects = db.query(Project).order_by(Project.id).all()
+        else:
+            projects = DataScopeService.filter_projects_query(db, scoped_user).order_by(Project.id).all()
 
         result = []
         for project in projects:
@@ -149,8 +204,12 @@ async def get_project_tree(
             result.append(project_data)
         return result
 
-    # Cache-Aside: 先查 Redis，未命中查 DB 并写回（TTL 5 分钟）
-    tree_data = get_or_set(PROJECTS_TREE_CACHE_KEY, PROJECTS_TREE_TTL, load_tree_from_db)
+    # 超管可复用全局缓存（全量项目树，与用户无关）；
+    # 非超管直接按当前用户 DataScope 查询，跳过全局缓存，避免跨用户项目泄露
+    if DataScopeService._is_super_admin(user):
+        tree_data = get_or_set(PROJECTS_TREE_CACHE_KEY, PROJECTS_TREE_TTL, load_tree_from_db)
+    else:
+        tree_data = load_tree_from_db(user)
     return ResponseModel(data=tree_data)
 
 @router.get("/projects/{project_id}", response_model=ResponseModel)
@@ -159,9 +218,15 @@ async def get_project(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
+    from services.data_scope_service import DataScopeService
+
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+
+    # 复用 DataScope：无权限访问该项目时拒绝
+    if not DataScopeService.can_access_project(db, user, project_id):
+        raise HTTPException(status_code=403, detail="无权访问该项目")
 
     return ResponseModel(data={
         'id': project.id,
@@ -171,14 +236,94 @@ async def get_project(
         'description': project.description
     })
 
+@router.get("/projects/{project_id}/resources", response_model=ResponseModel)
+async def get_project_resources(
+    project_id: int,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user)
+):
+    """项目资源归属关系：项目 → 子系统 → 服务。
+
+    复用现有 Project / Subsystem / AppService 结构，不新建模型。
+    返回子系统列表（含各自服务）以及未归属子系统的服务。
+    """
+    from services.data_scope_service import DataScopeService
+    from models.subsystem import Subsystem
+    from models.app_service import AppService
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    if not DataScopeService.can_access_project(db, user, project_id):
+        raise HTTPException(status_code=403, detail="无权访问该项目")
+
+    subsystems = db.query(Subsystem).filter(
+        Subsystem.project_id == project_id
+    ).order_by(Subsystem.display_order, Subsystem.id).all()
+
+    services = db.query(AppService).filter(
+        AppService.project_id == project_id
+    ).order_by(AppService.id).all()
+
+    def _svc_brief(svc: AppService) -> dict:
+        return {
+            'id': svc.id,
+            'func_desc': svc.func_desc,
+            'module': svc.module,
+            'ip': svc.ip,
+            'port': svc.port,
+            'service_type': svc.service_type,
+            'deploy_type': svc.deploy_type,
+            'subsystem_id': svc.subsystem_id,
+            'group_id': svc.group_id,
+            'owner': svc.owner,
+        }
+
+    # 按子系统归组服务
+    svc_by_subsystem = {}
+    unassigned = []
+    for svc in services:
+        if svc.subsystem_id:
+            svc_by_subsystem.setdefault(svc.subsystem_id, []).append(_svc_brief(svc))
+        else:
+            unassigned.append(_svc_brief(svc))
+
+    subsystem_list = []
+    for sub in subsystems:
+        subsystem_list.append({
+            'id': sub.id,
+            'subsystem_name': sub.subsystem_name,
+            'subsystem_code': sub.subsystem_code,
+            'description': sub.description,
+            'display_order': sub.display_order,
+            'service_count': len(svc_by_subsystem.get(sub.id, [])),
+            'services': svc_by_subsystem.get(sub.id, []),
+        })
+
+    return ResponseModel(data={
+        'project_id': project.id,
+        'project_name': project.name,
+        'subsystem_count': len(subsystems),
+        'service_count': len(services),
+        'subsystems': subsystem_list,
+        'unassigned_services': unassigned,
+    })
+
 @router.get("/projects/{project_id}/subsystems", response_model=ResponseModel)
 async def get_project_subsystems(
     project_id: int,
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
+    """获取项目子系统列表"""
     from models.subsystem import Subsystem
-    
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    assert_project_access(db, user, project_id)
+
     subsystems = db.query(Subsystem).filter(Subsystem.project_id == project_id).all()
     result = []
     for subsystem in subsystems:
@@ -256,6 +401,11 @@ async def update_project(
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
 
+    # 数据范围校验：仅有 project_manage 不足以修改无权限项目
+    assert_project_access(db, user, project_id)
+    # 管理能力校验：仅通过项目共享/公开可见获得访问的用户不得修改项目属性与可见范围
+    assert_project_manage_capability(db, user, project_id)
+
     if project_update.name and project_update.name != project.name:
         existing = db.query(Project).filter(Project.name == project_update.name).first()
         if existing:
@@ -316,6 +466,11 @@ async def delete_project(
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+
+    # 数据范围校验：仅有 project_manage 不足以删除无权限项目
+    assert_project_access(db, user, project_id)
+    # 管理能力校验：仅通过项目共享/公开可见获得访问的用户不得删除项目
+    assert_project_manage_capability(db, user, project_id)
 
     project_name = project.name
 
@@ -395,7 +550,11 @@ async def export_projects(
     db: Session = Depends(get_db),
     user = Depends(require_permission("project_manage"))
 ):
-    projects = db.query(Project).all()
+    """导出项目列表"""
+    from services.data_scope_service import DataScopeService
+
+    # 与项目列表使用一致的数据范围，避免导出越权项目
+    projects = DataScopeService.filter_projects_query(db, user).all()
 
     headers = ['name', 'code', 'description']
 
@@ -511,6 +670,9 @@ async def list_projects(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
-    projects = db.query(Project).all()
+    from services.data_scope_service import DataScopeService
+
+    # 复用 DataScope：非管理员仅能看到有权限的项目
+    projects = DataScopeService.filter_projects_query(db, user).all()
     result = [{"id": p.id, "name": p.name, "project_name": p.name} for p in projects]
     return ResponseModel(data=result)
