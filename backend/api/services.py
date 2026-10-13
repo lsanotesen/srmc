@@ -9,7 +9,7 @@ from models.service_group import ServiceGroup
 from schemas.service import ServiceCreate, ServiceUpdate, ServiceResponse, ServiceOperationResult
 from schemas.common import ResponseModel
 from utils.crypto import encrypt, decrypt
-from utils.program_status import get_program_status, get_batch_program_status
+from utils.program_status import get_program_status
 from services.audit_service import log_audit
 from core.database import get_db
 from api.dependencies import get_current_user, require_permission
@@ -1374,26 +1374,22 @@ async def batch_get_status(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
+    from utils.redis_client import redis_client
+
     if not service_ids:
         return ResponseModel(data={})
-    
+
     # DataScope：逐个校验数据范围，任一越权则整批拒绝
     services = assert_services_access(db, user, service_ids)
-    progs = []
+
+    # 【已禁用 SSH 状态检测】状态只能由 Agent 上报及心跳判断（Agent 离线 → UNKNOWN），
+    # 原先经 get_batch_program_status 通过 SSH 探测服务状态属违规，现改为读取 Agent 写入的
+    # Redis 缓存。响应结构与原接口保持一致（{service_id: 状态字符串}），缺失时返回 UNKNOWN。
+    result = {}
     for service in services:
-        progs.append({
-            'id': service.id,
-            'ip': service.ip,
-            'username': service.username,
-            'password': decrypt(service.password),
-            'port': service.port,
-            'program_path': service.program_path,
-            'deploy_type': service.deploy_type,
-            'container_name': service.container_name,
-            'ssh_port': service.ssh_port or 22
-        })
-    
-    result = await get_batch_program_status(progs)
+        status = redis_client.get(f"service_status:{service.id}")
+        result[service.id] = status.decode('utf-8') if status else 'UNKNOWN'
+
     return ResponseModel(data=result)
 
 @router.post("/services/status/cache", response_model=ResponseModel)
@@ -1421,7 +1417,8 @@ async def get_status_from_cache(
             if status:
                 result[service_id] = {
                     'status': status.decode('utf-8'),
-                    'source': source.decode('utf-8') if source else 'SSH'
+                    # 来源缺失时不得伪标为 'SSH'，状态来源只能是 AGENT / OFFLINE
+                    'source': source.decode('utf-8') if source else 'UNKNOWN'
                 }
     except Exception as e:
         print(f"Redis cache error: {e}")

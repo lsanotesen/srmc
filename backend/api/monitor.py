@@ -6,7 +6,7 @@ from models.service import Service
 from models.app_service import AppService
 from schemas.monitor import ServiceStatusResponse, BatchStatusResponse
 from schemas.common import ResponseModel
-from services.monitor_service import get_service_status, update_all_service_statuses
+from services.monitor_service import get_service_status
 from core.database import get_db
 from api.dependencies import require_permission
 from api.permission_dependencies import (
@@ -66,7 +66,10 @@ async def get_all_statuses(db: Session = Depends(get_db), user = Depends(require
 
 @router.post("/monitor/refresh", response_model=ResponseModel)
 async def refresh_all_statuses(db: Session = Depends(get_db), user = Depends(require_permission("service_view"))):
-    await update_all_service_statuses()
+    # 【已禁用 SSH 状态检测】原先此处调用 update_all_service_statuses() 会通过 SSH
+    # 探测服务状态，违反"状态只能由 Agent 上报及心跳判断"的规则，故不再触发。
+    # SSH 仅用于启动、停止、远程登录等明确需要 SSH 的操作。
+    # 接口与响应格式保持不变，仅返回当前缓存状态。
     return await get_all_statuses(db, user)
 
 @router.post("/monitor/start/{service_id}", response_model=ResponseModel)

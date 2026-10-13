@@ -178,7 +178,9 @@ async def startup_event():
 
     scheduler = AsyncIOScheduler()
     # 定时任务自己管理数据库连接
-    scheduler.add_job(update_all_service_statuses, 'interval', seconds=60, max_instances=1)
+    # 【已禁用】服务运行状态只能由 Agent 上报及心跳判断，Agent 离线即 UNKNOWN，
+    # 严禁后台定时通过 SSH 检测服务状态，故不再调度 update_all_service_statuses。
+    # scheduler.add_job(update_all_service_statuses, 'interval', seconds=60, max_instances=1)
     scheduler.start()
 
     # 数据库备份：初始化默认配置并按配置注册定时任务

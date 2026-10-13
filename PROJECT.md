@@ -159,6 +159,8 @@ Agent 离线/断连 → 关联服务状态置 UNKNOWN、来源置 OFFLINE（见 
 > **本条为当前有效规则（勿改）**：服务运行状态完全由 Agent 上报及心跳判断；**Agent 离线不代表服务已停止**；**严禁使用 SSH 兜底判断服务运行状态，严禁新增或恢复此类逻辑**。SSH 仅用于启动/停止/远程登录等明确需要 SSH 的操作。
 >
 > **已过时（历史遗留，勿参照）**：`services/monitor_service.py` 是旧的 **Server 维度** SSH 检测实现（`check_service_status` / `check_server_services` / `update_all_service_statuses`，仍被 `main.py` 定时调度及若干接口 import）。它面向旧 `Service`/`Server` 模型，**不是 AppService 的状态判定来源**；据此恢复或扩展 SSH 状态兜底属违规。
+>
+> 其余 SSH 状态检测遗留点（同样**不得**作为 AppService 状态判定或前端状态轮询来源）：`utils/program_status.py`（`check_port_status` / `check_process_by_ssh` / `get_batch_program_status`，仅保留用于 SSH 启停后的结果校验）、旧接口 `POST /api/services/status/batch`（仅被旧页面 `Services.vue` / `ServicesNew.backup.vue` 使用）。当前服务列表状态一律走 `POST /api/services/status/cache`（读 Agent 上报写入的 Redis 缓存）。
 
 **② Agent 生命周期**
 - 注册（agent.py L353-427）：复用/创建 Agent 记录 → **自动关联该 IP 上所有未关联服务** → 清旧缓存 → 下发服务清单（`handle_pull_services` L496-545 组装 ServiceConfig：`docker_name=container_name`、`compose_path=program_path`，start_cmd 相对路径自动拼 program_path 前缀）

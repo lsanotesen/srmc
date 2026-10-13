@@ -260,19 +260,11 @@ async def _process_ip_services(ip, progs):
                 status = "UNKNOWN"
             
             result[prog['id']] = status
-            
-            # 缓存状态到Redis：只有状态真正改变时才更新
-            try:
-                redis = get_redis()
-                if redis:
-                    cache_key = f"service_status:{prog['id']}"
-                    cache_source_key = f"service_status_source:{prog['id']}"
-                    old_status = redis.get(cache_key)
-                    if old_status != status:
-                        redis.setex(cache_key, 60, status)
-                        redis.setex(cache_source_key, 60, 'SSH')
-            except:
-                pass
+
+            # 【已移除】此处曾将 SSH 检测结果写入 service_status:{id} /
+            # service_status_source:{id}，与 Agent 心跳写入的 key 完全重合，
+            # 会覆盖 Agent 上报的真实状态并伪标来源为 'SSH'。
+            # 状态缓存只能由 Agent 心跳与断连清理写入，本函数仅返回查询结果。
     except Exception:
         for prog in progs:
             result[prog['id']] = "UNKNOWN"

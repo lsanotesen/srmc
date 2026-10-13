@@ -1269,7 +1269,7 @@ const loadServices = async () => {
   }
 };
 
-// 状态更新防抖（500ms），用于 SSH 慢查询
+// 状态更新防抖（500ms）：状态来自 Agent 上报/心跳写入的 Redis 缓存，非 SSH 探测
 const scheduleStatusUpdate = () => {
   if (statusUpdateTimer) clearTimeout(statusUpdateTimer);
   statusUpdateTimer = setTimeout(() => {
