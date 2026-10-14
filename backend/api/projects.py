@@ -6,6 +6,7 @@ from models.subsystem_group_relation import SubsystemGroupRelation
 from schemas.project import ProjectCreate, ProjectUpdate, ProjectResponse
 from schemas.common import ResponseModel
 from services.audit_service import log_audit
+from services.project_member_service import ProjectMemberService
 from core.database import get_db
 from api.dependencies import get_current_user, require_permission
 from api.permission_dependencies import assert_project_access, assert_project_manage_capability
@@ -381,6 +382,9 @@ async def create_project(
     db.commit()
     db.refresh(new_project)
 
+    # 项目负责人应与项目成员中的 Owner 保持一致，避免「负责人无成员记录」导致成员管理接口 403
+    ProjectMemberService.ensure_owner_member(db, new_project.id, new_project.owner_id)
+
     # 清除项目树缓存
     from utils.cache import invalidate_projects_tree
     invalidate_projects_tree()
@@ -447,6 +451,9 @@ async def update_project(
 
     db.commit()
     db.refresh(project)
+
+    # 负责人变更后同步 Owner 成员记录，避免新负责人缺失项目成员记录
+    ProjectMemberService.ensure_owner_member(db, project.id, project.owner_id)
 
     # 清除项目树缓存
     from utils.cache import invalidate_projects_tree

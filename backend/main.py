@@ -176,6 +176,9 @@ async def startup_event():
     # 初始化企业级权限数据
     await init_permission_data()
 
+    # 修复历史数据：同步项目负责人与项目成员中的 Owner 记录
+    await init_project_owners()
+
     scheduler = AsyncIOScheduler()
     # 定时任务自己管理数据库连接
     # 【已禁用】服务运行状态只能由 Agent 上报及心跳判断，Agent 离线即 UNKNOWN，
@@ -275,6 +278,31 @@ async def init_permission_data():
         print("[Permission] 角色和权限初始化完成")
     except Exception as e:
         print(f"[Permission] 权限数据初始化失败: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+async def init_project_owners():
+    """修复历史数据：确保项目负责人（projects.owner_id）在 project_members 中存在 Owner 记录。
+
+    项目创建/负责人变更未同步成员记录时，会导致项目级 manage_project 校验失败
+    （成员管理相关接口 403）。幂等补齐，不改动其他成员角色。
+    """
+    from core.database import SessionLocal
+    from models.project import Project
+    from services.project_member_service import ProjectMemberService
+
+    db = SessionLocal()
+    try:
+        projects = db.query(Project).filter(Project.owner_id.isnot(None)).all()
+        fixed = 0
+        for p in projects:
+            if ProjectMemberService.ensure_owner_member(db, p.id, p.owner_id):
+                fixed += 1
+        if fixed:
+            print(f"[Project] 同步项目负责人成员记录，修复 {fixed} 个项目")
+    except Exception as e:
+        print(f"[Project] 同步项目负责人成员记录失败: {e}")
         db.rollback()
     finally:
         db.close()

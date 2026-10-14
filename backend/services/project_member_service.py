@@ -175,6 +175,30 @@ class ProjectMemberService:
         return member
 
     @staticmethod
+    def ensure_owner_member(db: Session, project_id: int, owner_id: Optional[int]) -> bool:
+        """确保项目负责人（projects.owner_id）在 project_members 中存在 Owner 记录（幂等）。
+
+        负责人应与项目成员中的 Owner 保持一致；若记录缺失或角色不是 Owner，
+        项目级 manage_project 校验会失败（成员管理接口返回 403）。
+        返回是否发生了变更。
+        """
+        if not owner_id:
+            return False
+        member = db.query(ProjectMember).filter(
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id == owner_id,
+        ).first()
+        if member:
+            if member.role != "Owner":
+                member.role = "Owner"
+                db.commit()
+                return True
+            return False
+        db.add(ProjectMember(project_id=project_id, user_id=owner_id, role="Owner"))
+        db.commit()
+        return True
+
+    @staticmethod
     def remove_member(db: Session, project_id: int, user_id: int) -> bool:
         """移除项目成员"""
         member = db.query(ProjectMember).filter(
