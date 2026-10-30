@@ -9,6 +9,9 @@ class ServerCreate(BaseModel):
     password: Optional[str] = None
     private_key: Optional[str] = None
     os_type: str = Field("LINUX", pattern="^(LINUX|UNIX)$")
+    bmc_type: Optional[str] = Field(None, max_length=32)
+    bmc_url: Optional[str] = Field(None, max_length=512)
+    remark: Optional[str] = Field(None, max_length=255)
 
 class ServerUpdate(BaseModel):
     hostname: Optional[str] = Field(None, max_length=128)
@@ -18,6 +21,23 @@ class ServerUpdate(BaseModel):
     password: Optional[str] = None
     private_key: Optional[str] = None
     os_type: Optional[str] = Field(None, pattern="^(LINUX|UNIX)$")
+    bmc_type: Optional[str] = Field(None, max_length=32)
+    bmc_url: Optional[str] = Field(None, max_length=512)
+    remark: Optional[str] = Field(None, max_length=255)
+
+class SshAccountCreate(BaseModel):
+    username: str = Field(..., max_length=64)
+    password: Optional[str] = None
+    private_key: Optional[str] = None
+    is_default: bool = False
+    remark: Optional[str] = Field(None, max_length=255)
+
+class SshAccountUpdate(BaseModel):
+    username: Optional[str] = Field(None, max_length=64)
+    password: Optional[str] = None
+    private_key: Optional[str] = None
+    is_default: Optional[bool] = None
+    remark: Optional[str] = Field(None, max_length=255)
 
 class ServerResponse(BaseModel):
     id: int

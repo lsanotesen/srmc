@@ -26,6 +26,28 @@ from services.data_scope_service import DataScopeService
 
 router = APIRouter()
 
+# 异常态（不等于"未知"）：FAILED/PARTIAL 等需要单独统计，避免被误报为状态未知
+ABNORMAL_STATUSES = {"FAILED", "PARTIAL", "STARTING", "STOPPING", "RESTARTING", "UNHEALTHY", "ERROR"}
+
+
+def _classify_status(status: str, missing: bool) -> str:
+    """把服务状态归类为 running/stopped/inactive/abnormal/unknown 五个桶。
+
+    只有"取不到状态"或状态本身为 UNKNOWN 才算 unknown；
+    FAILED/PARTIAL 等属于异常，单独统计。
+    """
+    if missing or not status or status == "UNKNOWN":
+        return "unknown"
+    if status == "RUNNING":
+        return "running"
+    if status == "STOPPED":
+        return "stopped"
+    if status in ("INACTIVE", "COMPLETED"):
+        return "inactive"
+    if status in ABNORMAL_STATUSES:
+        return "abnormal"
+    return "unknown"
+
 
 # ---------------------------------------------------------------------------
 # 内部辅助函数
@@ -63,11 +85,11 @@ def _bulk_fetch_status(db: Session, service_ids: list[int]) -> dict[int, dict]:
             status_str = (raw_s.decode() if raw_s and isinstance(raw_s, bytes) else (raw_s or "UNKNOWN")).upper()
             raw_src = source_vals[i]
             source_str = raw_src.decode() if raw_src and isinstance(raw_src, bytes) else (raw_src or "")
-            result[sid] = {"status": status_str, "source": source_str}
+            result[sid] = {"status": status_str, "source": source_str, "missing": raw_s is None}
     except Exception as e:
         print(f"[dashboard] Redis status lookup failed: {e}")
         for sid in service_ids:
-            result[sid] = {"status": "UNKNOWN", "source": ""}
+            result[sid] = {"status": "UNKNOWN", "source": "", "missing": True}
 
     return result
 
@@ -93,7 +115,7 @@ def _agent_is_online(agent: Optional[Agent]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 6 张统计卡片
+# 7 张统计卡片
 # ---------------------------------------------------------------------------
 
 @router.get("/dashboard/overview", response_model=ResponseModel)
@@ -101,7 +123,7 @@ async def dashboard_overview(
     db: Session = Depends(get_db),
     user=Depends(require_permission("service_view")),
 ):
-    """全局统计概览：6 张卡片"""
+    """全局统计概览：7 张卡片"""
     services = _get_visible_services(db, user)
     project_ids = {s.project_id for s in services}
 
@@ -118,20 +140,22 @@ async def dashboard_overview(
         for a in db.query(Agent).filter(Agent.uuid.in_(agent_uuids)).all():
             agents[a.uuid] = a
 
-    running = stopped = unknown = inactive = 0
+    running = stopped = unknown = inactive = abnormal = 0
     agent_offline_count = 0
 
     for svc in services:
-        st = status_map.get(svc.id, {}).get("status", "UNKNOWN").upper()
-        source = status_map.get(svc.id, {}).get("source", "")
+        info = status_map.get(svc.id, {})
+        st = info.get("status", "UNKNOWN").upper()
+        bucket = _classify_status(st, info.get("missing", False))
 
-        if st == "RUNNING":
+        if bucket == "running":
             running += 1
-        elif st == "STOPPED":
+        elif bucket == "stopped":
             stopped += 1
-        elif st in ("INACTIVE", "COMPLETED"):
-            # 未启用/停止 与 一次性任务已完成 都是预期状态，不计入异常/未知
+        elif bucket == "inactive":
             inactive += 1
+        elif bucket == "abnormal":
+            abnormal += 1
         else:
             unknown += 1
 
@@ -147,6 +171,7 @@ async def dashboard_overview(
         "runningCount": running,
         "stoppedCount": stopped,
         "inactiveCount": inactive,
+        "abnormalCount": abnormal,
         "agentOfflineCount": agent_offline_count,
         "unknownCount": unknown,
     })
@@ -193,20 +218,23 @@ async def dashboard_projects(
                 "runningCount": 0,
                 "stoppedCount": 0,
                 "inactiveCount": 0,
+                "abnormalCount": 0,
                 "agentOfflineCount": 0,
                 "unknownCount": 0,
             }
         ps = project_stats[pid]
         ps["serviceCount"] += 1
 
-        st = status_map.get(svc.id, {}).get("status", "UNKNOWN").upper()
-        if st == "RUNNING":
+        info = status_map.get(svc.id, {})
+        bucket = _classify_status(info.get("status", "UNKNOWN").upper(), info.get("missing", False))
+        if bucket == "running":
             ps["runningCount"] += 1
-        elif st == "STOPPED":
+        elif bucket == "stopped":
             ps["stoppedCount"] += 1
-        elif st in ("INACTIVE", "COMPLETED"):
-            # 未启用/停止 与 一次性任务已完成 都是预期状态，不计入异常/未知
+        elif bucket == "inactive":
             ps["inactiveCount"] += 1
+        elif bucket == "abnormal":
+            ps["abnormalCount"] += 1
         else:
             ps["unknownCount"] += 1
 
@@ -217,7 +245,7 @@ async def dashboard_projects(
 
     # 计算健康状态
     for ps in project_stats.values():
-        if ps["stoppedCount"] > 0:
+        if ps["stoppedCount"] > 0 or ps["abnormalCount"] > 0:
             ps["healthStatus"] = "异常"
         elif ps["agentOfflineCount"] > 0:
             ps["healthStatus"] = "Agent异常"

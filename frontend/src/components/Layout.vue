@@ -21,9 +21,6 @@
         router
         :collapse="isCollapse"
         :unique-opened="true"
-        background-color="transparent"
-        text-color="#666666"
-        active-text-color="#1890ff"
         :collapse-transition="true"
       >
         <template v-for="item in menu" :key="item.id">
@@ -60,6 +57,13 @@
         </div>
         <div class="header-right">
           <div class="header-actions">
+            <el-tooltip :content="themeStore.theme === 'dark' ? '切换为浅色主题' : '切换为深色主题'" placement="bottom">
+              <el-button class="header-btn theme-toggle" circle @click="themeStore.toggleTheme()">
+                <el-icon :size="16">
+                  <component :is="themeStore.theme === 'dark' ? Sunny : Moon" />
+                </el-icon>
+              </el-button>
+            </el-tooltip>
             <el-button
               icon="bell"
               class="header-btn"
@@ -112,11 +116,14 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { Sunny, Moon } from '@element-plus/icons-vue'
 import { useUserStore } from '../stores/user'
+import { useThemeStore } from '../stores/theme'
 
 const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
+const themeStore = useThemeStore()
 
 // 初始化时直接从localStorage读取折叠状态，避免刷新时闪烁
 const savedCollapse = localStorage.getItem('sidebarCollapse')
@@ -165,6 +172,9 @@ const menu = computed(() => {
     },
     { id: 'servers', name: '服务器管理', icon: 'computer', path: '/servers', children: [] },
     { id: 'agents', name: 'Agent管理', icon: 'cpu', path: '/agents', children: [] },
+    { id: 'monitoring', name: '监控中心', icon: 'data-line', path: '/monitoring', children: [] },
+    { id: 'alerts', name: '告警中心', icon: 'bell', path: '/alerts', children: [] },
+    { id: 'audit', name: '审计日志', icon: 'file-search', path: '/audit', children: [] },
     {
       id: 'permission',
       name: '权限管理',
@@ -176,7 +186,6 @@ const menu = computed(() => {
         { id: 'users', name: '用户管理', icon: 'users', path: '/users' }
       ]
     },
-    { id: 'audit', name: '审计日志', icon: 'file-search', path: '/audit', children: [] },
     { id: 'backup', name: '数据备份', icon: 'box', path: '/backup', children: [] },
     { id: 'settings', name: '系统设置', icon: 'settings', path: '/settings', children: [] }
   ]
@@ -214,6 +223,7 @@ const breadcrumb = computed(() => {
 const iconNameMap = {
   'data-analysis': 'DataAnalysis',
   dashboard: 'DataBoard',
+  'data-line': 'DataLine',
   server: 'Folder',
   cpu: 'Cpu',
   computer: 'Monitor',
@@ -228,6 +238,7 @@ const iconNameMap = {
   folder: 'Folder',
   'office-building': 'OfficeBuilding',
   lock: 'Lock',
+  bell: 'Bell',
   default: 'Folder'
 }
 
@@ -257,15 +268,15 @@ function goToUsageGuide() {
   height: 100vh;
   display: flex;
   overflow: hidden;
-  background: #f1f5f9;
+  background: var(--app-bg);
 }
 
 .aside {
-  background: #ffffff;
-  color: #333333;
+  background: var(--app-panel);
+  color: var(--app-text);
   position: relative;
   flex-shrink: 0;
-  border-right: 1px solid #e8e8e8;
+  border-right: 1px solid var(--app-border);
   transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   overflow: hidden;
 }
@@ -275,8 +286,8 @@ function goToUsageGuide() {
   align-items: center;
   gap: 12px;
   padding: 16px 20px;
-  border-bottom: 1px solid #e8e8e8;
-  background: #ffffff;
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-panel);
 }
 
 .logo-icon {
@@ -295,13 +306,13 @@ function goToUsageGuide() {
   margin: 0;
   font-size: 20px;
   font-weight: 700;
-  color: #1e293b;
+  color: var(--app-text);
 }
 
 .logo-text p {
   margin: 4px 0 0;
   font-size: 12px;
-  color: #64748b;
+  color: var(--app-text-2);
 }
 
 .logo-collapsed {
@@ -316,8 +327,8 @@ function goToUsageGuide() {
   transform: translateY(-50%);
   width: 36px;
   height: 36px;
-  background: #ffffff;
-  border: 1px solid #d9d9d9;
+  background: var(--app-panel);
+  border: 1px solid var(--app-border);
   border-left: none;
   border-radius: 0 6px 6px 0;
   display: flex;
@@ -330,40 +341,40 @@ function goToUsageGuide() {
 }
 
 .collapse-btn:hover {
-  background: #f5f5f5;
-  border-color: #bfbfbf;
+  background: var(--app-panel-soft);
+  border-color: var(--app-border-strong);
 }
 
 .collapse-icon {
   font-size: 20px;
   font-weight: bold;
   line-height: 1;
-  color: #666666;
+  color: var(--app-text-2);
   margin: 0;
   padding: 0;
   margin-left: -4px;
 }
 
 .collapse-btn:hover .collapse-icon {
-  color: #333333;
+  color: var(--app-text);
 }
 
 .collapse-btn-collapsed {
   right: auto;
   left: -18px;
-  border-left: 1px solid #d9d9d9;
+  border-left: 1px solid var(--app-border);
   border-right: none;
   border-radius: 6px 0 0 6px;
 }
 
 .collapse-btn-collapsed .collapse-icon {
-  color: #666666;
+  color: var(--app-text-2);
   margin-left: 0;
   margin-right: -4px;
 }
 
 .collapse-btn-collapsed:hover .collapse-icon {
-  color: #333333;
+  color: var(--app-text);
 }
 
 .menu {
@@ -371,20 +382,28 @@ function goToUsageGuide() {
   border-right: none;
 }
 
-.menu :deep(.el-menu-item) {
+.menu {
+  background: transparent;
+}
+
+.menu :deep(.el-menu-item),
+.menu :deep(.el-sub-menu__title) {
   margin: 4px 8px;
   border-radius: 10px;
   padding: 14px 16px;
   transition: all 0.3s ease;
+  background: transparent;
+  color: var(--app-text-2);
 }
 
-.menu :deep(.el-menu-item:hover) {
-  background: #f5f5f5;
+.menu :deep(.el-menu-item:hover),
+.menu :deep(.el-sub-menu__title:hover) {
+  background: var(--app-hover);
 }
 
 .menu :deep(.el-menu-item.is-active) {
-  background: #e6f7ff;
-  color: #1890ff;
+  background: var(--app-active-bg);
+  color: var(--app-active-text);
 }
 
 .menu :deep(.el-menu-item.is-active::before) {
@@ -395,7 +414,7 @@ function goToUsageGuide() {
   transform: translateY(-50%);
   width: 4px;
   height: 24px;
-  background: #1890ff;
+  background: var(--app-active-text);
   border-radius: 0 4px 4px 0;
 }
 
@@ -411,8 +430,8 @@ function goToUsageGuide() {
   justify-content: space-between;
   align-items: center;
   padding: 0 24px;
-  background: #fff;
-  border-bottom: 1px solid #e2e8f0;
+  background: var(--app-panel);
+  border-bottom: 1px solid var(--app-border);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
   height: 64px;
 }
@@ -426,12 +445,12 @@ function goToUsageGuide() {
 }
 
 .breadcrumb :deep(.el-breadcrumb__item:last-child .el-breadcrumb__inner) {
-  color: #334155;
+  color: var(--app-text);
   font-weight: 600;
 }
 
 .breadcrumb :deep(.el-breadcrumb__item:not(:last-child) .el-breadcrumb__inner) {
-  color: #64748b;
+  color: var(--app-text-2);
 }
 
 .header-right {
@@ -452,16 +471,16 @@ function goToUsageGuide() {
   align-items: center;
   justify-content: center;
   border-radius: 10px;
-  border: 1px solid #e2e8f0;
-  background: #fff;
-  color: #64748b;
+  border: 1px solid var(--app-border);
+  background: var(--app-panel);
+  color: var(--app-text-2);
   transition: all 0.3s ease;
 }
 
 .header-btn:hover {
-  background: #f1f5f9;
-  color: #334155;
-  border-color: #cbd5e1;
+  background: var(--app-bg);
+  color: var(--app-text);
+  border-color: var(--app-border-strong);
 }
 
 .user-info {
@@ -475,7 +494,7 @@ function goToUsageGuide() {
 }
 
 .user-info:hover {
-  background: #f8fafc;
+  background: var(--app-panel-soft);
 }
 
 .avatar {
@@ -499,18 +518,18 @@ function goToUsageGuide() {
 .user-name {
   font-size: 14px;
   font-weight: 600;
-  color: #1e293b;
+  color: var(--app-text);
 }
 
 .user-role {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--app-text-3);
 }
 
 .main-content {
   flex: 1;
   padding: 24px;
   overflow: auto;
-  background: #f1f5f9;
+  background: var(--app-bg);
 }
 </style>

@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query
 from sqlalchemy.orm import Session
 from models.app_service import AppService
@@ -24,6 +26,8 @@ async def websocket_endpoint(
     websocket: WebSocket,
     service_id: int,
     token: str = Query(...),
+    cols: int = Query(80, ge=1, le=1000),
+    rows: int = Query(24, ge=1, le=500),
     db: Session = Depends(get_db)
 ):
     logger.info(f"WebSocket connection attempt for service_id: {service_id}")
@@ -118,9 +122,11 @@ async def websocket_endpoint(
                 await websocket.close(code=1011)
                 return
             
-            # 请求PTY伪终端
+            # 请求PTY伪终端：按前端传入的实际终端尺寸创建，
+            # 避免首次提示符按 80x24 绘制、后续 resize 前长输入错位
+            logger.info(f"Request PTY with initial size {cols}x{rows} for service {service_id}")
             shell = await asyncio.wait_for(
-                conn.invoke_shell(term_type='xterm', width=80, height=24),
+                conn.invoke_shell(term_type='xterm', width=cols, height=rows),
                 timeout=10  # 10秒超时
             )
             
@@ -211,19 +217,20 @@ async def websocket_endpoint(
                             result = bytearray(message["bytes"])
                             if len(result) >= 5 and result[0] == 0x01:
                                 # resize: [0x01][cols_le][rows_le]
-                                cols = int.from_bytes(result[1:3], 'little')
-                                rows = int.from_bytes(result[3:5], 'little')
-                                logger.info(f"Resize PTY to {cols}x{rows}")
-                                try:
-                                    loop = asyncio.get_event_loop()
-                                    await loop.run_in_executor(
-                                        None,
-                                        shell.set_pty_size,
-                                        cols, rows,
-                                        cols * 8, rows * 24
-                                    )
-                                except Exception as resize_err:
-                                    logger.warning(f"Failed to resize PTY: {resize_err}")
+                                new_cols = int.from_bytes(result[1:3], 'little')
+                                new_rows = int.from_bytes(result[3:5], 'little')
+                                if new_cols <= 0 or new_rows <= 0:
+                                    logger.warning(f"Ignore invalid PTY size {new_cols}x{new_rows} for service {service_id}")
+                                else:
+                                    try:
+                                        loop = asyncio.get_event_loop()
+                                        await loop.run_in_executor(
+                                            None,
+                                            lambda c=new_cols, r=new_rows: shell.resize_pty(width=c, height=r)
+                                        )
+                                        logger.info(f"Resize PTY to {new_cols}x{new_rows} for service {service_id}")
+                                    except Exception as resize_err:
+                                        logger.warning(f"Failed to resize PTY to {new_cols}x{new_rows} for service {service_id}: {resize_err}")
                             else:
                                 logger.debug(f"Unknown binary control: {result[:10]}")
                         except Exception as bin_err:
@@ -282,3 +289,227 @@ async def fetch_service(db: Session, service_id: int):
     except Exception as e:
         logger.error(f"Database error in fetch_service: {e}")
         return None
+
+
+async def _bridge_shell(websocket: WebSocket, conn, shell, label: str):
+    """在已建立的 SSH shell 与 WebSocket 之间双向转发数据。"""
+    read_task = None
+    heartbeat_task = None
+    last_activity = asyncio.get_event_loop().time()
+
+    async def heartbeat():
+        nonlocal last_activity
+        while True:
+            try:
+                if asyncio.get_event_loop().time() - last_activity > 300:
+                    logger.warning(f"Connection timeout due to inactivity: {label}")
+                    await websocket.send_text("[警告] 连接超时，即将断开...")
+                    break
+                await asyncio.sleep(30)
+            except Exception:
+                break
+
+    async def read_output():
+        nonlocal last_activity
+        while True:
+            try:
+                if shell.recv_ready():
+                    data = shell.recv(8192)
+                    if data:
+                        try:
+                            output = data.decode('utf-8')
+                        except UnicodeDecodeError:
+                            try:
+                                output = data.decode('gbk')
+                            except Exception:
+                                output = data.decode('utf-8', errors='replace')
+                        await websocket.send_text(output)
+                        last_activity = asyncio.get_event_loop().time()
+                await asyncio.sleep(0.02)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error reading output: {e}")
+                break
+
+    try:
+        heartbeat_task = asyncio.create_task(heartbeat())
+        read_task = asyncio.create_task(read_output())
+
+        while True:
+            message = await websocket.receive()
+            last_activity = asyncio.get_event_loop().time()
+
+            if message.get("type") == "websocket.disconnect":
+                break
+
+            if message.get("text") is not None:
+                data = message["text"]
+                if data.strip().lower() == 'exit':
+                    break
+                shell.send(data)
+            elif message.get("bytes") is not None:
+                try:
+                    result = bytearray(message["bytes"])
+                    if len(result) >= 5 and result[0] == 0x01:
+                        new_cols = int.from_bytes(result[1:3], 'little')
+                        new_rows = int.from_bytes(result[3:5], 'little')
+                        if new_cols <= 0 or new_rows <= 0:
+                            logger.warning(f"Ignore invalid PTY size {new_cols}x{new_rows} ({label})")
+                        else:
+                            loop = asyncio.get_event_loop()
+                            try:
+                                await loop.run_in_executor(
+                                    None, lambda c=new_cols, r=new_rows: shell.resize_pty(width=c, height=r)
+                                )
+                                logger.info(f"Resize PTY to {new_cols}x{new_rows} ({label})")
+                            except Exception as resize_err:
+                                logger.warning(f"Failed to resize PTY to {new_cols}x{new_rows} ({label}): {resize_err}")
+                    else:
+                        logger.debug(f"Unknown binary control: {result[:10]}")
+                except Exception as bin_err:
+                    logger.warning(f"Binary message error: {bin_err}")
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected by client: {label}")
+    except Exception as e:
+        logger.error(f"Error during WebSocket communication ({label}): {e}")
+        try:
+            await websocket.send_text(f"[错误] {str(e)}")
+        except Exception:
+            pass
+    finally:
+        if read_task:
+            read_task.cancel()
+        if heartbeat_task:
+            heartbeat_task.cancel()
+        if shell:
+            try:
+                shell.close()
+            except Exception:
+                pass
+        if conn:
+            conn.close()
+
+
+@router.websocket("/shell/server/ws/{server_id}")
+async def server_websocket_endpoint(
+    websocket: WebSocket,
+    server_id: int,
+    token: str = Query(...),
+    cols: int = Query(80, ge=1, le=1000),
+    rows: int = Query(24, ge=1, le=500),
+    account_id: Optional[int] = Query(None, description="指定 SSH 账号；缺省使用默认账号"),
+    db: Session = Depends(get_db)
+):
+    """服务器管理页的远程登录：按服务器记录建立 SSH shell。
+
+    与服务 WebShell 一致使用 webshell:login / webshell:root-login 权限，
+    数据范围按服务器的组织隔离校验；不涉及项目共享高风险授权。
+    account_id 可指定服务器下的某个 SSH 账号，缺省使用默认账号。
+    """
+    logger.info(f"Server WebSocket connection attempt for server_id: {server_id}")
+    await websocket.accept()
+
+    try:
+        username = await authenticate_token(token, db)
+        if not username:
+            await websocket.send_text("[错误] 无效的认证token")
+            await websocket.close(code=1008)
+            return
+
+        from models.user import User
+        from models.server import Server, ServerSshAccount
+        from api.server import _scope_server_query
+        from services.permission_service import PermissionService
+        from services.audit_service import log_audit
+
+        user = db.query(User).filter(User.username == username).first()
+        if not user or not user.is_active:
+            await websocket.send_text("[错误] 用户不存在或已停用")
+            await websocket.close(code=1008)
+            return
+
+        server = _scope_server_query(db.query(Server), user).filter(Server.id == server_id).first()
+        if not server:
+            await websocket.send_text("[错误] 服务器不存在或无权访问")
+            await websocket.close(code=1008)
+            return
+
+        if not PermissionService.user_has_permission(db, user.id, "webshell:login"):
+            await websocket.send_text("[错误] 无 WebShell 登录权限")
+            await websocket.close(code=1008)
+            return
+
+        # 缺省使用默认账号（servers 兼容字段即默认账号镜像）；account_id 可指定多账号中的某一个
+        login_username = server.username
+        stored_password, stored_private_key = server.password, server.private_key
+        if account_id is not None:
+            account = db.query(ServerSshAccount).filter(
+                ServerSshAccount.id == account_id,
+                ServerSshAccount.server_id == server.id,
+            ).first()
+            if not account:
+                await websocket.send_text("[错误] SSH 账号不存在或不属于该服务器")
+                await websocket.close(code=1008)
+                return
+            login_username = account.username
+            stored_password, stored_private_key = account.password, account.private_key
+
+        if (login_username or "").strip() == "root" and not PermissionService.user_has_permission(db, user.id, "webshell:root-login"):
+            await websocket.send_text("[错误] 无 Root WebShell 登录权限")
+            await websocket.close(code=1008)
+            return
+
+        password = decrypt(stored_password) if stored_password else None
+        private_key = decrypt(stored_private_key) if stored_private_key else None
+        if not password and not private_key:
+            await websocket.send_text("[错误] 该 SSH 账号未配置密码或私钥")
+            await websocket.close(code=1008)
+            return
+
+        try:
+            conn = await asyncio.wait_for(
+                ssh_pool.get_connection(server.ip, server.ssh_port, login_username, password, private_key),
+                timeout=15
+            )
+            if not conn:
+                await websocket.send_text("[错误] 无法连接到服务器，请检查SSH配置")
+                await websocket.close(code=1011)
+                return
+
+            logger.info(f"Request PTY with initial size {cols}x{rows} for server {server_id}")
+            shell = await asyncio.wait_for(
+                conn.invoke_shell(term_type='xterm', width=cols, height=rows),
+                timeout=10
+            )
+            if not shell:
+                await websocket.send_text("[错误] 无法打开shell会话")
+                conn.close()
+                await websocket.close(code=1011)
+                return
+
+            log_audit(db, user.id, user.username, "SHELL",
+                      server_id=server.id, ip=server.ip, result="success",
+                      output=f"SSH账号: {login_username}",
+                      request_url=f"/api/shell/server/ws/{server_id}")
+            await asyncio.sleep(0.2)
+            await _bridge_shell(websocket, conn, shell, f"server#{server_id}")
+        except asyncio.TimeoutError:
+            await websocket.send_text("[错误] 连接超时，请检查网络或稍后重试")
+            await websocket.close(code=1011)
+        except Exception as ssh_error:
+            logger.error(f"SSH connection error (server {server_id}): {ssh_error}")
+            await websocket.send_text(f"[错误] SSH连接失败: {str(ssh_error)[:50]}...")
+            await websocket.close(code=1011)
+    except Exception as e:
+        logger.error(f"Unexpected error in server WebSocket endpoint: {e}")
+        try:
+            await websocket.send_text(f"[错误] {str(e)[:50]}...")
+        except Exception:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+        logger.info(f"Server WebSocket fully closed for server {server_id}")

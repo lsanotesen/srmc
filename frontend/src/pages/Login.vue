@@ -264,7 +264,7 @@ async function handleLogin() {
 .logo-text p {
   margin: 4px 0 0;
   font-size: 13px;
-  color: #94a3b8;
+  color: var(--app-text-3);
 }
 
 .form-title {
@@ -297,7 +297,7 @@ async function handleLogin() {
   left: 14px;
   top: 50%;
   transform: translateY(-50%);
-  color: #94a3b8;
+  color: var(--app-text-3);
   font-size: 18px;
 }
 
@@ -311,7 +311,7 @@ async function handleLogin() {
 }
 
 .custom-input::placeholder {
-  color: #64748b;
+  color: var(--app-text-2);
 }
 
 .custom-input :deep(.el-input__wrapper) {
@@ -331,7 +331,7 @@ async function handleLogin() {
 }
 
 .custom-input:disabled :deep(.el-input__inner) {
-  color: #64748b;
+  color: var(--app-text-2);
   cursor: not-allowed;
 }
 
@@ -343,7 +343,7 @@ async function handleLogin() {
 }
 
 .remember-item :deep(.el-checkbox__label) {
-  color: #94a3b8;
+  color: var(--app-text-3);
   font-size: 13px;
 }
 
@@ -396,7 +396,7 @@ async function handleLogin() {
 }
 
 .version-info span {
-  color: #64748b;
+  color: var(--app-text-2);
   font-size: 12px;
 }
 </style>

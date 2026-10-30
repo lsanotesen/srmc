@@ -409,7 +409,7 @@ watch(exportHistory, (newVal) => {
 .preview-card,
 .action-card,
 .history-card {
-  background: #fff;
+  background: var(--app-panel);
   border-radius: 16px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
   overflow: hidden;
@@ -421,7 +421,7 @@ watch(exportHistory, (newVal) => {
   gap: 10px;
   padding: 18px 24px;
   background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-  border-bottom: 1px solid #e8e8e8;
+  border-bottom: 1px solid var(--app-border);
 }
 
 .card-icon {
@@ -431,7 +431,7 @@ watch(exportHistory, (newVal) => {
 
 .card-header span {
   font-weight: 600;
-  color: #333;
+  color: var(--app-text);
 }
 
 .filter-form {
@@ -448,7 +448,7 @@ watch(exportHistory, (newVal) => {
   gap: 6px;
   margin-top: 8px;
   font-size: 12px;
-  color: #909399;
+  color: var(--app-text-3);
 }
 
 .form-hint el-icon {
@@ -474,13 +474,13 @@ watch(exportHistory, (newVal) => {
 
 .info-label {
   font-size: 14px;
-  color: #999;
+  color: var(--app-text-3);
 }
 
 .info-value {
   font-size: 18px;
   font-weight: 600;
-  color: #333;
+  color: var(--app-text);
 }
 
 .preview-hint {
@@ -557,18 +557,18 @@ watch(exportHistory, (newVal) => {
 .history-name {
   font-size: 14px;
   font-weight: 500;
-  color: #333;
+  color: var(--app-text);
 }
 
 .history-time {
   font-size: 12px;
-  color: #999;
+  color: var(--app-text-3);
 }
 
 .empty-history {
   padding: 40px;
   text-align: center;
-  color: #999;
+  color: var(--app-text-3);
 }
 
 .empty-icon {

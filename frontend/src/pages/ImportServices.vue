@@ -173,7 +173,7 @@
           <el-table-column label="操作" width="80" align="center">
             <template #default="{ row }">
               <el-button v-if="row.status === 'active'" link type="danger" size="small" :loading="revertingNo === row.batch_no" @click="revertBatch(row)">撤销</el-button>
-              <span v-else style="color:#999">-</span>
+              <span v-else style="color:var(--app-text-3)">-</span>
             </template>
           </el-table-column>
         </el-table>
@@ -455,7 +455,7 @@ onMounted(() => {
 /* ============ 整体 ============ */
 .import-services-page {
   padding: 24px;
-  background: #f0f2f5;
+  background: var(--app-panel-soft);
   min-height: calc(100vh - 60px);
 }
 
@@ -545,7 +545,7 @@ onMounted(() => {
 
 /* ============ 步骤卡片 ============ */
 .section-card {
-  background: #fff;
+  background: var(--app-panel);
   border-radius: 10px;
   padding: 18px 22px;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
@@ -565,7 +565,7 @@ onMounted(() => {
   border-bottom: 1px solid #f0f2f5;
   font-size: 15px;
   font-weight: 600;
-  color: #1f2d3d;
+  color: var(--app-text);
 }
 
 .step-num {
@@ -585,13 +585,13 @@ onMounted(() => {
 .section-title-text {
   font-size: 15px;
   font-weight: 600;
-  color: #1f2d3d;
+  color: var(--app-text);
 }
 
 .section-title-sub {
   font-size: 12px;
   font-weight: normal;
-  color: #909399;
+  color: var(--app-text-3);
   margin-left: 6px;
 }
 
@@ -612,7 +612,7 @@ onMounted(() => {
   align-items: center;
   gap: 4px;
   font-size: 12px;
-  color: #909399;
+  color: var(--app-text-3);
 }
 
 .form-hint .el-icon {
@@ -629,10 +629,10 @@ onMounted(() => {
 
 .upload-area {
   flex: 1;
-  border: 2px dashed #dcdfe6;
+  border: 2px dashed var(--app-border);
   border-radius: 8px;
   padding: 24px;
-  background: linear-gradient(135deg, #fafbfc 0%, #f5f7fa 100%);
+  background: linear-gradient(135deg, var(--app-panel-soft) 0%, var(--app-panel-soft) 100%);
   transition: all 0.25s ease;
   min-height: 160px;
   display: flex;
@@ -657,7 +657,7 @@ onMounted(() => {
 
 .upload-icon {
   font-size: 48px;
-  color: #c0c4cc;
+  color: var(--app-text-3);
   margin-bottom: 10px;
   transition: color 0.2s;
 }
@@ -671,13 +671,13 @@ onMounted(() => {
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  color: #606266;
+  color: var(--app-text-2);
   font-size: 14px;
 }
 
 .upload-sub {
   font-size: 12px;
-  color: #909399;
+  color: var(--app-text-3);
 }
 
 .link-blue {
@@ -707,7 +707,7 @@ onMounted(() => {
 .file-name {
   font-size: 15px;
   font-weight: 600;
-  color: #1f2d3d;
+  color: var(--app-text);
 }
 
 .file-size {
@@ -823,12 +823,12 @@ onMounted(() => {
 
 .stat-label {
   font-size: 12px;
-  color: #606266;
+  color: var(--app-text-2);
   font-weight: 500;
 }
 
 .error-detail {
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--app-border);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -845,7 +845,7 @@ onMounted(() => {
 .empty-history {
   padding: 50px;
   text-align: center;
-  color: #909399;
+  color: var(--app-text-3);
 }
 
 .empty-icon {
@@ -853,12 +853,12 @@ onMounted(() => {
   display: block;
   margin-bottom: 10px;
   opacity: 0.4;
-  color: #c0c4cc;
+  color: var(--app-text-3);
 }
 
 /* ============ 提示折叠 ============ */
 .tips-collapse {
-  background: #fff;
+  background: var(--app-panel);
   border-radius: 10px;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
   overflow: hidden;
@@ -868,7 +868,7 @@ onMounted(() => {
   padding: 0 18px;
   font-size: 14px;
   font-weight: 600;
-  color: #303133;
+  color: var(--app-text);
   border-bottom: none;
   height: 42px;
   line-height: 42px;
@@ -889,7 +889,7 @@ onMounted(() => {
   flex-direction: column;
   gap: 8px;
   font-size: 13px;
-  color: #606266;
+  color: var(--app-text-2);
 }
 
 .tips-content p {
@@ -898,13 +898,13 @@ onMounted(() => {
   gap: 8px;
   margin: 0;
   padding: 6px 10px;
-  background: #f9fafb;
+  background: var(--app-panel-soft);
   border-radius: 6px;
   transition: background 0.2s;
 }
 
 .tips-content p:hover {
-  background: #f0f4ff;
+  background: var(--app-panel-soft);
 }
 
 /* ============ 响应式 ============ */

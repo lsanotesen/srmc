@@ -13,6 +13,8 @@ from models.server import Server
 from schemas.common import ResponseModel
 from api.dependencies import require_permission
 from services.audit_service import log_audit
+from services.data_scope_service import DataScopeService
+from services.permission_service import PermissionService
 from utils.crypto import encrypt, decrypt
 from utils.version import normalize_version
 import services.agent_deploy_service as ads
@@ -111,15 +113,20 @@ async def create_deploy_task(
 ):
     """创建批量部署任务，逐台通过 SSH 推送安装/覆盖升级。
 
-    目标主机两种指定方式（二选一）：
+    目标主机三种指定方式（三选一）：
       - hosts: [{ip, port, username, password, agent_name?, agent_ip?}] 手工填写
       - agent_uuids: ["uuid", ...] 从已纳管 Agent 选择，自动解析 IP 并复用 servers 表凭据
+      - server_ids: [id, ...] 从服务器管理记录取 IP + SSH 凭据（前端不传密码）
     """
     package_id = payload.get("package_id")
     hosts = payload.get("hosts", [])
     agent_uuids = payload.get("agent_uuids", [])
+    server_ids = payload.get("server_ids", [])
     deploy_dir = (payload.get("deploy_dir") or "/etc/srmc-agent").strip()
     server_url = (payload.get("server_url") or "").strip()
+
+    if sum(1 for x in (hosts, agent_uuids, server_ids) if x) > 1:
+        raise HTTPException(status_code=400, detail="hosts / agent_uuids / server_ids 只能指定一种目标方式")
 
     if not package_id:
         raise HTTPException(status_code=400, detail="缺少安装包 package_id")
@@ -133,6 +140,59 @@ async def create_deploy_task(
     pkg = db.query(AgentPackage).filter(AgentPackage.package_id == package_id).first()
     if not pkg:
         raise HTTPException(status_code=404, detail="安装包不存在")
+
+    # 从服务器管理选择：后端校验权限 + 组织隔离，凭据只在服务端读取，不回传前端
+    if server_ids:
+        if not isinstance(server_ids, list):
+            raise HTTPException(status_code=400, detail="server_ids 必须为数组")
+        if len(server_ids) > MAX_HOSTS_PER_TASK:
+            raise HTTPException(status_code=400, detail=f"单次部署主机数不能超过 {MAX_HOSTS_PER_TASK}")
+
+        # 额外校验 host:manage：服务器管理是更高权限的入口，
+        # 避免仅凭 agent:manage 就能对任意服务器推送 SSH 凭据执行
+        user_perms = set(PermissionService.get_user_permissions(db, user.id))
+        if "host:manage" not in user_perms:
+            raise HTTPException(status_code=403, detail="缺少 host:manage 权限，无法从服务器管理选择目标")
+
+        try:
+            wanted_ids = [int(i) for i in server_ids]
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="server_ids 必须为整数数组")
+
+        q = db.query(Server).filter(Server.id.in_(wanted_ids))
+        if not DataScopeService._is_super_admin(user):
+            if user.organization_id is None:
+                raise HTTPException(status_code=403, detail="当前账号无所属组织，无法操作服务器")
+            q = q.filter(Server.organization_id == user.organization_id)
+        servers = q.all()
+
+        found_ids = {s.id for s in servers}
+        missing_ids = sorted(set(wanted_ids) - found_ids)
+        if missing_ids:
+            raise HTTPException(
+                status_code=403,
+                detail=f"以下服务器不存在或不在你的数据范围内：{', '.join(str(i) for i in missing_ids)}",
+            )
+
+        no_cred = []
+        hosts = []
+        for srv in servers:
+            if not srv.password:
+                no_cred.append(f"{srv.hostname}({srv.ip})")
+                continue
+            hosts.append({
+                "ip": srv.ip,
+                "port": srv.ssh_port or 22,
+                "username": srv.username or "root",
+                "password": decrypt(srv.password),
+                "agent_name": srv.hostname or "",
+                "agent_ip": srv.ip,
+            })
+        if no_cred:
+            raise HTTPException(
+                status_code=400,
+                detail=f"以下服务器缺少 SSH 密码凭据，请先在服务器管理中维护：{'、'.join(no_cred)}",
+            )
 
     # 从已纳管 Agent 选择：解析出 IP，并从 servers 表取凭据
     if agent_uuids:

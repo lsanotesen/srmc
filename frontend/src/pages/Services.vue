@@ -1083,7 +1083,7 @@ onUnmounted(() => {
 }
 
 .upload-section {
-  border: 2px dashed #dcdfe6;
+  border: 2px dashed var(--app-border);
   border-radius: 6px;
   padding: 20px;
   text-align: center;
@@ -1097,12 +1097,12 @@ onUnmounted(() => {
 .template-section {
   text-align: center;
   padding: 10px;
-  background: #f5f7fa;
+  background: var(--app-panel-soft);
   border-radius: 4px;
 }
 
 .import-tip {
-  color: #999;
+  color: var(--app-text-3);
   margin-top: 10px;
 }
 
@@ -1333,7 +1333,7 @@ onUnmounted(() => {
 .shell-control-icon {
   cursor: pointer;
   font-size: 18px;
-  color: #606266;
+  color: var(--app-text-2);
   transition: all 0.2s ease;
   padding: 4px;
   border-radius: 4px;
@@ -1341,13 +1341,13 @@ onUnmounted(() => {
 
 .shell-control-icon:hover {
   color: #409eff;
-  background: #ecf5ff;
+  background: var(--app-active-bg);
 }
 
 /* 对话框样式 */
 :deep(.shell-dialog .el-dialog__header) {
   padding: 15px 20px;
-  border-bottom: 1px solid #e4e7ed;
+  border-bottom: 1px solid var(--app-border);
   margin-right: 0;
 }
 

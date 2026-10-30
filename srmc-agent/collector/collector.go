@@ -80,6 +80,7 @@ type SystemMetrics struct {
 	Hostname      string  `json:"hostname"`
 	IP            string  `json:"ip"`
 	OS            string  `json:"os"`
+	OsDistro      string  `json:"os_distro"`
 	Kernel        string  `json:"kernel"`
 	Arch          string  `json:"arch"`
 	CPUModel      string  `json:"cpu_model"`
@@ -196,6 +197,7 @@ func CollectSystemMetrics() SystemMetrics {
 		Hostname:      hostname,
 		IP:            ip,
 		OS:            hostInfo.OS,
+		OsDistro:      detectHostDistro(),
 		Kernel:        hostInfo.KernelVersion,
 		Arch:          runtime.GOARCH,
 		MemoryTotal:   memInfo.Total,
@@ -1074,7 +1076,7 @@ func isPortListening(port int) bool {
 
 func findProcessByPath(path string) int {
 	candidates := resolvePathCandidates(path, "")
-	
+
 	for _, candidate := range candidates {
 		keywords := extractKeywords(candidate)
 		for _, keyword := range keywords {
@@ -1083,51 +1085,51 @@ func findProcessByPath(path string) int {
 			}
 		}
 	}
-	
+
 	keywords := extractKeywords(path)
 	for _, keyword := range keywords {
 		if pid := grepProcess(keyword); pid > 0 {
 			return pid
 		}
 	}
-	
+
 	return 0
 }
 
 func findProcessByName(name string) int {
 	keywords := extractKeywords(name)
-	
+
 	for _, keyword := range keywords {
 		if pid := grepProcess(keyword); pid > 0 {
 			return pid
 		}
 	}
-	
+
 	return 0
 }
 
 func findProcessByStartCmd(startCmd string, username string) int {
 	possiblePaths := resolvePathCandidates(startCmd, username)
 	log.Printf("[DEBUG] findProcessByStartCmd: startCmd=%s, username=%s, possiblePaths=%v", startCmd, username, possiblePaths)
-	
+
 	// 存储所有要检测的关键字
 	var keywords []string
-	
+
 	for _, scriptPath := range possiblePaths {
 		if scriptPath == "" {
 			log.Printf("[DEBUG] Skipping empty path")
 			continue
 		}
-		
+
 		// 检查文件是否存在
 		info, err := os.Stat(scriptPath)
 		if err != nil {
 			log.Printf("[DEBUG] Path not found: %s, error: %v", scriptPath, err)
 			continue
 		}
-		
+
 		log.Printf("[DEBUG] Found existing path: %s, isDir=%v", scriptPath, info.IsDir())
-		
+
 		// 如果是脚本文件，读取内容提取关键字
 		if strings.HasSuffix(scriptPath, ".sh") || strings.HasSuffix(scriptPath, ".py") || strings.HasSuffix(scriptPath, ".bat") {
 			content, err := os.ReadFile(scriptPath)
@@ -1135,10 +1137,10 @@ func findProcessByStartCmd(startCmd string, username string) int {
 				log.Printf("[DEBUG] Cannot read script %s: %v", scriptPath, err)
 				continue
 			}
-			
+
 			log.Printf("[DEBUG] Reading script: %s, content length=%d", scriptPath, len(content))
 			log.Printf("[DEBUG] Script content: %s", string(content))
-			
+
 			// ============ 核心修复：先解析并展开 bash 变量 ============
 			// 例如脚本中有：
 			//   app=casia-delete-es-event-data-month
@@ -1150,7 +1152,7 @@ func findProcessByStartCmd(startCmd string, username string) int {
 			log.Printf("[DEBUG] Parsed bash variables: %v", bashVars)
 			expandedContent := expandBashVariables(contentStr, bashVars)
 			log.Printf("[DEBUG] Expanded script content: %s", expandedContent)
-			
+
 			// 只从展开后的内容提取 jar 名（避免 $app.jar 中的 app.jar 被误匹配）
 			var jarMatches []string
 			jarRegex := regexp.MustCompile(`[a-zA-Z0-9_\-\.]+?\.jar`)
@@ -1164,7 +1166,7 @@ func findProcessByStartCmd(startCmd string, username string) int {
 					log.Printf("[DEBUG] Found jar in script: %s", jarName)
 				}
 			}
-			
+
 			// 如果没有找到 jar 文件，从脚本中提取原生二进制名
 			if len(jarMatches) == 0 {
 				for _, line := range strings.Split(expandedContent, "\n") {
@@ -1219,7 +1221,7 @@ func findProcessByStartCmd(startCmd string, username string) int {
 					}
 				}
 			}
-			
+
 			break
 		} else {
 			// 如果不是脚本文件，直接用文件名检测
@@ -1230,7 +1232,7 @@ func findProcessByStartCmd(startCmd string, username string) int {
 			break
 		}
 	}
-	
+
 	// 也从 startCmd 本身提取可执行文件（但过滤掉无用的）
 	if len(keywords) == 0 {
 		execPaths := extractExecutablesFromCmd(startCmd)
@@ -1241,7 +1243,7 @@ func findProcessByStartCmd(startCmd string, username string) int {
 			}
 		}
 	}
-	
+
 	// 去重并检测
 	seen := make(map[string]bool)
 	log.Printf("[DEBUG] All keywords to search: %v", keywords)
@@ -1250,13 +1252,13 @@ func findProcessByStartCmd(startCmd string, username string) int {
 			continue
 		}
 		seen[keyword] = true
-		
+
 		if pid := findProcessByCmdline(keyword); pid > 0 {
 			log.Printf("[DEBUG] Found process by keyword '%s': PID=%d", keyword, pid)
 			return pid
 		}
 	}
-	
+
 	log.Printf("[DEBUG] No process found for startCmd: %s", startCmd)
 	return 0
 }
@@ -1355,25 +1357,25 @@ func resolvePathCandidates(path string, username string) []string {
 	if path == "" {
 		return nil
 	}
-	
+
 	// 如果是绝对路径，直接返回
 	if strings.HasPrefix(path, "/") {
 		return []string{path}
 	}
-	
+
 	// 如果是 ~/ 开头，展开 ~
 	if strings.HasPrefix(path, "~/") {
 		var candidates []string
-		
+
 		// 清理 username（处理 "<nil>" 等情况）
 		cleanUsername := strings.TrimSpace(username)
 		if cleanUsername == "" || cleanUsername == "<nil>" || cleanUsername == "null" {
 			cleanUsername = ""
 		}
-		
+
 		// 收集所有可能的 home 目录
 		var homeDirs []string
-		
+
 		// 1. 如果有 username，优先用它
 		if cleanUsername != "" {
 			homeDir := getHomeDirByUser(cleanUsername)
@@ -1389,12 +1391,12 @@ func resolvePathCandidates(path string, username string) []string {
 				homeDirs = append(homeDirs, pattern)
 			}
 		}
-		
+
 		// 2. 当前用户的 home 目录
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
 			homeDirs = append(homeDirs, home)
 		}
-		
+
 		// 3. 常见的 home 目录（当 username 为空时使用）
 		if cleanUsername == "" {
 			for _, dir := range []string{
@@ -1405,7 +1407,7 @@ func resolvePathCandidates(path string, username string) []string {
 				homeDirs = append(homeDirs, dir)
 			}
 		}
-		
+
 		// 4. 去重并生成候选路径
 		seen := make(map[string]bool)
 		for _, homeDir := range homeDirs {
@@ -1418,16 +1420,16 @@ func resolvePathCandidates(path string, username string) []string {
 				candidates = append(candidates, resolved)
 			}
 		}
-		
+
 		return candidates
 	}
-	
+
 	// 相对路径，添加当前目录
 	absPath, err := filepath.Abs(path)
 	if err == nil {
 		return []string{absPath}
 	}
-	
+
 	return []string{path}
 }
 
@@ -1446,7 +1448,7 @@ func getHomeDirByUser(username string) string {
 			}
 		}
 	}
-	
+
 	// 常见的 home 目录模式
 	commonPaths := []string{
 		"/home/" + username,
@@ -1454,24 +1456,24 @@ func getHomeDirByUser(username string) string {
 		"/u02/" + username,
 		"/root",
 	}
-	
+
 	for _, p := range commonPaths {
 		if info, err := os.Stat(p); err == nil && info.IsDir() {
 			return p
 		}
 	}
-	
+
 	return ""
 }
 
 func getHomeDirectories() []string {
 	var homes []string
-	
+
 	// 添加当前用户的 home 目录
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		homes = append(homes, home)
 	}
-	
+
 	// 从 /etc/passwd 获取所有用户的 home 目录
 	if data, err := os.ReadFile("/etc/passwd"); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
@@ -1488,16 +1490,16 @@ func getHomeDirectories() []string {
 			}
 		}
 	}
-	
+
 	// 添加常见的目录
 	commonDirs := []string{
-		"/home", "/root", "/u01", "/u02", 
+		"/home", "/root", "/u01", "/u02",
 		"/opt", "/var", "/data", "/srv",
 	}
 	for _, dir := range commonDirs {
 		homes = append(homes, dir)
 	}
-	
+
 	// 去重
 	seen := make(map[string]bool)
 	var result []string
@@ -1507,22 +1509,22 @@ func getHomeDirectories() []string {
 			result = append(result, h)
 		}
 	}
-	
+
 	return result
 }
 
 func extractExecutablesFromCmd(cmd string) []string {
 	var executables []string
-	
+
 	cmd = strings.TrimSpace(cmd)
 	if cmd == "" {
 		return executables
 	}
-	
+
 	parts := strings.Fields(cmd)
 	for _, part := range parts {
 		cleaned := strings.Trim(part, "\"'")
-		
+
 		if strings.HasSuffix(cleaned, ".jar") {
 			executables = append(executables, cleaned)
 			jarName := strings.TrimSuffix(filepath.Base(cleaned), ".jar")
@@ -1557,34 +1559,34 @@ func extractExecutablesFromCmd(cmd string) []string {
 			}
 		}
 	}
-	
+
 	return executables
 }
 
 func extractKeywords(path string) []string {
 	var keywords []string
-	
+
 	commonNames := map[string]bool{
 		"server": true, "client": true, "bin": true, "app": true,
 		"main": true, "service": true, "daemon": true, "tool": true,
 		"node": true, "agent": true, "process": true, "command": true,
 	}
-	
+
 	base := filepath.Base(path)
 	parent := filepath.Base(filepath.Dir(path))
-	
+
 	if base != "." && base != "/" && len(base) > 2 {
 		if !commonNames[strings.ToLower(base)] {
 			keywords = append(keywords, base)
 		}
 	}
-	
+
 	if len(parent) > 2 {
 		if !commonNames[strings.ToLower(parent)] {
 			keywords = append(keywords, parent)
 		}
 	}
-	
+
 	return keywords
 }
 
@@ -1592,7 +1594,7 @@ func grepProcess(keyword string) int {
 	if len(keyword) < 3 {
 		return 0
 	}
-	
+
 	// Use the more accurate findProcessByCmdline function
 	return findProcessByCmdline(keyword)
 }
@@ -1602,7 +1604,7 @@ func verifyProcessMatch(pid int, keyword string) bool {
 	if err != nil || cmdline == "" {
 		return false
 	}
-	
+
 	return strings.Contains(strings.ToLower(cmdline), strings.ToLower(keyword))
 }
 
@@ -1626,7 +1628,7 @@ func getLocalIP() string {
 		log.Printf("Using configured IP: %s", config.GlobalConfig.Agent.IP)
 		return config.GlobalConfig.Agent.IP
 	}
-	
+
 	addrs, _ := net.InterfaceAddrs()
 	for _, addr := range addrs {
 		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
@@ -1638,4 +1640,91 @@ func getLocalIP() string {
 
 func readFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
+}
+
+// detectHostDistro 读取宿主机发行版信息（真实采集，不做推断）。
+//
+// docker 部署时（compose 已配置 pid: host），容器内的 /etc/os-release 是镜像自身的
+// （基础镜像为 alpine），因此优先通过 /proc/1/root 读取宿主机根文件系统；
+// 二进制部署时 PID 1 即宿主机 init，/proc/1/root 同样指向宿主机根。
+// 两种路径均不可读时回退到本机 /etc/os-release。
+func detectHostDistro() string {
+	// 容器部署且未开启 pid: host 时，/proc/1/root 指向的是镜像自身根，读到的是
+	// alpine 等镜像发行版而非宿主机，必须放弃，避免上报错误信息。
+	probeRoot := "/proc/1/root"
+	if sameFile(probeRoot, "/") {
+		if _, err := os.Stat("/.dockerenv"); err == nil {
+			return ""
+		}
+		probeRoot = ""
+	}
+
+	for _, root := range []string{probeRoot, ""} {
+		// 优先 redhat-release：含完整版本号（如 CentOS Linux release 7.9.2009）
+		if line := readFirstLine(root + "/etc/redhat-release"); line != "" {
+			line = redhatParenSuffix.ReplaceAllString(line, "")
+			return strings.TrimSpace(strings.ReplaceAll(line, " release ", " "))
+		}
+		if name := readOSReleasePrettyName(root + "/etc/os-release"); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+var redhatParenSuffix = regexp.MustCompile(` \([^)]*\)`)
+
+// sameFile 判断两个路径是否指向同一文件系统节点（用于识别 /proc/1/root 是否就是本进程根）
+func sameFile(a, b string) bool {
+	fa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	fb, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(fa, fb)
+}
+
+// readFirstLine 返回文件首个非空行（去除首尾空白）；文件不存在或不可读时返回空串。
+func readFirstLine(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	return ""
+}
+
+// readOSReleasePrettyName 解析 os-release，优先 PRETTY_NAME，其次 NAME + VERSION_ID。
+func readOSReleasePrettyName(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	fields := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		fields[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), "\"'")
+	}
+	if fields["PRETTY_NAME"] != "" {
+		return fields["PRETTY_NAME"]
+	}
+	name, ver := fields["NAME"], fields["VERSION_ID"]
+	if name != "" && ver != "" {
+		return name + " " + ver
+	}
+	return name
 }

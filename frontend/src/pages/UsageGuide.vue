@@ -413,7 +413,7 @@
 }
 
 .guide-content {
-  background: #fff;
+  background: var(--app-panel);
   border-radius: 16px;
   padding: 32px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
@@ -426,7 +426,7 @@
 .guide-section h2 {
   font-size: 24px;
   font-weight: 600;
-  color: #1e293b;
+  color: var(--app-text);
   margin: 0 0 16px;
   padding-bottom: 12px;
   border-bottom: 3px solid #667eea;
@@ -435,7 +435,7 @@
 .guide-section p {
   font-size: 15px;
   line-height: 1.8;
-  color: #475569;
+  color: var(--app-text-2);
   margin: 0 0 16px;
 }
 
@@ -447,7 +447,7 @@
 .guide-subsection h3 {
   font-size: 18px;
   font-weight: 600;
-  color: #334155;
+  color: var(--app-text);
   margin: 0 0 12px;
 }
 
@@ -460,7 +460,7 @@
 .guide-subsection li {
   font-size: 15px;
   line-height: 1.8;
-  color: #475569;
+  color: var(--app-text-2);
   margin-bottom: 8px;
 }
 
@@ -472,7 +472,7 @@
 }
 
 .deploy-card {
-  background: #f8fafc;
+  background: var(--app-panel-soft);
   border-radius: 12px;
   padding: 24px;
   border-left: 4px solid #667eea;
@@ -481,13 +481,13 @@
 .deploy-card h3 {
   font-size: 18px;
   font-weight: 600;
-  color: #1e293b;
+  color: var(--app-text);
   margin: 12px 0 8px;
 }
 
 .deploy-card p {
   font-size: 14px;
-  color: #64748b;
+  color: var(--app-text-2);
   margin: 0 0 12px;
 }
 
@@ -499,7 +499,7 @@
 .deploy-card li {
   font-size: 14px;
   line-height: 1.8;
-  color: #475569;
+  color: var(--app-text-2);
   margin-bottom: 6px;
 }
 
@@ -536,41 +536,41 @@
 .field-table td {
   padding: 12px;
   text-align: left;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--app-border);
 }
 
 .field-table th {
-  background: #f8fafc;
+  background: var(--app-panel-soft);
   font-weight: 600;
-  color: #334155;
+  color: var(--app-text);
 }
 
 .field-table td {
-  color: #475569;
+  color: var(--app-text-2);
 }
 
 .field-table tbody tr:hover {
-  background: #f8fafc;
+  background: var(--app-panel-soft);
 }
 
 .faq-item {
   margin-bottom: 20px;
   padding: 16px;
-  background: #f8fafc;
+  background: var(--app-panel-soft);
   border-radius: 8px;
 }
 
 .faq-item h3 {
   font-size: 16px;
   font-weight: 600;
-  color: #334155;
+  color: var(--app-text);
   margin: 0 0 8px;
 }
 
 .faq-item p {
   font-size: 14px;
   line-height: 1.8;
-  color: #475569;
+  color: var(--app-text-2);
   margin: 0;
 }
 </style>

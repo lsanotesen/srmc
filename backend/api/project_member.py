@@ -185,6 +185,14 @@ async def add_project_member(
     if not ProjectMemberService.has_permission(db, user.id, project_id, "manage_project"):
         raise HTTPException(status_code=403, detail="无权限管理项目成员")
 
+    # 不允许重复添加：已是项目成员则直接拒绝（避免静默改写其项目角色）
+    existing_member = db.query(ProjectMember).filter(
+        ProjectMember.project_id == project_id,
+        ProjectMember.user_id == data.user_id,
+    ).first()
+    if existing_member:
+        raise HTTPException(status_code=400, detail="该用户已是项目成员，请勿重复添加")
+
     member = ProjectMemberService.add_member(db, project_id, data.user_id, data.role)
     target_user = db.query(User).filter(User.id == data.user_id).first()
     log_audit(
@@ -482,6 +490,11 @@ class BatchByRoleRequest(BaseModel):
     project_role: str = "Viewer"
 
 
+class BatchByUsersRequest(BaseModel):
+    user_ids: List[int]
+    role: str = "Viewer"
+
+
 class DeptInfo(BaseModel):
     id: int
     name: str
@@ -585,6 +598,67 @@ async def batch_add_by_system_role(
             db, user.id, user.username, "PROJECT_MEMBER_BATCH_ADD",
             result="success",
             output=f"按系统角色ID:{data.role_id}批量添加项目{project.name}成员, 新增{result['added']}人, 跳过{result['skipped']}人",
+            project_id=project_id,
+        )
+        return ResponseModel(
+            data=result,
+            message=f"批量添加完成：新增 {result['added']} 人，跳过 {result['skipped']} 人"
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/projects/{project_id}/members/department-users", response_model=ResponseModel)
+async def list_department_users_for_batch(
+    project_id: int,
+    department_id: int = Query(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """获取指定部门下的用户列表（供批量勾选），并标注是否已是当前项目成员。
+
+    鉴权复用项目成员管理权限（manage_project），与单个/批量添加保持一致。
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    if not ProjectMemberService.has_permission(db, user.id, project_id, "manage_project"):
+        raise HTTPException(status_code=403, detail="无权限管理项目成员")
+
+    result = ProjectMemberService.get_department_users(db, project_id, department_id)
+    return ResponseModel(data=result)
+
+
+@router.post("/projects/{project_id}/members/batch", response_model=ResponseModel)
+async def batch_add_members(
+    project_id: int,
+    data: BatchByUsersRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """按勾选的用户ID批量添加项目成员（已加入的成员自动跳过，不重复添加、不改其角色）"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    if data.role not in VALID_PROJECT_ROLES:
+        raise HTTPException(status_code=400, detail=f"无效的角色: {data.role}")
+
+    if not data.user_ids:
+        raise HTTPException(status_code=400, detail="请至少选择一名用户")
+
+    if not ProjectMemberService.has_permission(db, user.id, project_id, "manage_project"):
+        raise HTTPException(status_code=403, detail="无权限批量添加成员")
+
+    try:
+        result = ProjectMemberService.batch_add_by_users(
+            db, project_id, data.user_ids, data.role
+        )
+        log_audit(
+            db, user.id, user.username, "PROJECT_MEMBER_BATCH_ADD",
+            result="success",
+            output=f"批量添加项目{project.name}成员, 新增{result['added']}人, 跳过{result['skipped']}人",
             project_id=project_id,
         )
         return ResponseModel(

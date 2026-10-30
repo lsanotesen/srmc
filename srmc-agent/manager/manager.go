@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -47,13 +48,17 @@ func resolveComposePath(composePath string) (string, string, error) {
 }
 
 // getDockerComposeCmd 返回可用的 docker compose 命令。
-// 注意：此函数仅用于需要 context 的场景（如日志流）。
-// 其他场景请使用 runComposeCmd 以获得更好的兼容性处理。
+// 目标主机普遍只安装了独立命令 docker-compose（standalone），而不具备 docker compose（V2 插件）。
+// 若按 docker 存在与否来判定会误用 V2 插件，导致 `docker compose -f ... logs -f` 直接以
+// "unknown shorthand flag: 'f' in -f" 失败、实时日志无输出。
+// 因此这里优先探测 docker-compose，只有在不存在时才回退到 docker compose（V2 插件）。
+// 注意：此函数仅用于需要 context 的日志流场景（见 streamComposeLogs）。
+// 启停场景请使用 runComposeCmd（其内部自带 V2→V1 回退）。
 func getDockerComposeCmd() string {
-	if _, err := exec.LookPath("docker"); err == nil {
-		return "docker"
+	if _, err := exec.LookPath("docker-compose"); err == nil {
+		return "docker-compose"
 	}
-	return "docker-compose"
+	return "docker"
 }
 
 // runComposeCmd 执行 docker compose 命令，自动在 docker compose (V2) 和 docker-compose (V1) 之间切换。
@@ -624,20 +629,97 @@ func restartCompose(svc ServiceConfig) CommandResult {
 	return CommandResult{Success: true, Output: string(output)}
 }
 
+// 日志流注册表：记录每个服务当前活跃的日志流，用于 WebSocket 断开或显式停止时
+// 终止孤立的 docker logs -f / docker-compose logs -f 进程，避免进程与连接泄漏。
+var (
+	logStreamMu  sync.Mutex
+	logStreamSeq uint64
+	logStreams   = make(map[string]logStreamHandle)
+)
+
+type logStreamHandle struct {
+	cancel context.CancelFunc
+	id     uint64
+}
+
+// registerLogStream 注册服务的日志流取消函数；同一服务重复订阅时先取消旧流。
+func registerLogStream(serviceID string, cancel context.CancelFunc) uint64 {
+	logStreamMu.Lock()
+	defer logStreamMu.Unlock()
+	logStreamSeq++
+	id := logStreamSeq
+	if serviceID != "" {
+		if old, ok := logStreams[serviceID]; ok {
+			old.cancel()
+		}
+		logStreams[serviceID] = logStreamHandle{cancel: cancel, id: id}
+	}
+	return id
+}
+
+// unregisterLogStream 仅当表中登记的仍是本流时才移除，避免误删后注册的新流。
+func unregisterLogStream(serviceID string, id uint64) {
+	logStreamMu.Lock()
+	defer logStreamMu.Unlock()
+	if h, ok := logStreams[serviceID]; ok && h.id == id {
+		delete(logStreams, serviceID)
+	}
+}
+
+// StopLogStreams 取消指定服务当前活跃的日志流（WebSocket 断开或重复订阅时调用）。
+func StopLogStreams(serviceID string) {
+	if serviceID == "" {
+		return
+	}
+	logStreamMu.Lock()
+	h, ok := logStreams[serviceID]
+	if ok {
+		delete(logStreams, serviceID)
+	}
+	logStreamMu.Unlock()
+	if ok {
+		h.cancel()
+	}
+}
+
+// StopAllLogStreams 取消所有活跃日志流。
+// Agent 与后端的 WebSocket 连接断开时调用：此时后端无法下发 logs_stop，
+// 若不主动终止，docker logs -f / docker-compose logs -f 子进程会跨重连长期残留。
+func StopAllLogStreams() {
+	logStreamMu.Lock()
+	handles := make([]logStreamHandle, 0, len(logStreams))
+	for _, h := range logStreams {
+		handles = append(handles, h)
+	}
+	logStreams = make(map[string]logStreamHandle)
+	logStreamMu.Unlock()
+
+	for _, h := range handles {
+		h.cancel()
+	}
+}
+
 func StreamLogs(svc ServiceConfig, callback LogStreamFunc) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	id := registerLogStream(svc.ServiceID, cancel)
+	defer func() {
+		unregisterLogStream(svc.ServiceID, id)
+		cancel()
+	}()
+
 	switch svc.DeployType {
 	case "PROCESS":
-		return streamProcessLogs(svc, callback)
+		return streamProcessLogs(ctx, svc, callback)
 	case "DOCKER":
-		return streamDockerLogs(svc, callback)
+		return streamDockerLogs(ctx, svc, callback)
 	case "DOCKER_COMPOSE":
-		return streamComposeLogs(svc, callback)
+		return streamComposeLogs(ctx, svc, callback)
 	default:
 		return fmt.Errorf("Unknown deploy type")
 	}
 }
 
-func streamProcessLogs(svc ServiceConfig, callback LogStreamFunc) error {
+func streamProcessLogs(ctx context.Context, svc ServiceConfig, callback LogStreamFunc) error {
 	if svc.LogPath == "" {
 		return fmt.Errorf("No log path configured")
 	}
@@ -645,9 +727,6 @@ func streamProcessLogs(svc ServiceConfig, callback LogStreamFunc) error {
 	// 展开日志路径
 	logPath := expandLogPath(svc.LogPath, svc.Username)
 	log.Printf("[DEBUG] streamProcessLogs: original_log_path=%s, expanded_log_path=%s", svc.LogPath, logPath)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "tail", "-F", logPath)
 	stdout, err := cmd.StdoutPipe()
@@ -680,13 +759,10 @@ func expandLogPath(logPath string, username string) string {
 	return logPath
 }
 
-func streamDockerLogs(svc ServiceConfig, callback LogStreamFunc) error {
+func streamDockerLogs(ctx context.Context, svc ServiceConfig, callback LogStreamFunc) error {
 	if svc.DockerName == "" {
 		return fmt.Errorf("No container name configured")
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "docker", "logs", "-f", svc.DockerName)
 	stdout, err := cmd.StdoutPipe()
@@ -728,14 +804,11 @@ func streamDockerLogs(svc ServiceConfig, callback LogStreamFunc) error {
 	return cmd.Wait()
 }
 
-func streamComposeLogs(svc ServiceConfig, callback LogStreamFunc) error {
+func streamComposeLogs(ctx context.Context, svc ServiceConfig, callback LogStreamFunc) error {
 	composeFile, workDir, err := resolveComposePath(svc.ComposePath)
 	if err != nil {
 		return err
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	dockerCmd := getDockerComposeCmd()
 	var cmd *exec.Cmd

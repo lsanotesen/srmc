@@ -512,7 +512,7 @@ onMounted(() => {
 
 .org-sidebar {
   width: 280px;
-  background: #fff;
+  background: var(--app-panel);
   border-radius: 8px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
   overflow: hidden;
@@ -522,7 +522,7 @@ onMounted(() => {
 
 .sidebar-header {
   padding: 16px;
-  border-bottom: 1px solid #e8e8e8;
+  border-bottom: 1px solid var(--app-border);
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -552,7 +552,7 @@ onMounted(() => {
 }
 
 .org-item:hover {
-  background: #f5f7fa;
+  background: var(--app-panel-soft);
 }
 
 .org-item.active {
@@ -580,7 +580,7 @@ onMounted(() => {
 
 .org-name {
   font-size: 14px;
-  color: #333;
+  color: var(--app-text);
   margin-bottom: 2px;
   white-space: nowrap;
   overflow: hidden;
@@ -589,7 +589,7 @@ onMounted(() => {
 
 .org-code {
   font-size: 12px;
-  color: #999;
+  color: var(--app-text-3);
 }
 
 .org-actions {
@@ -611,7 +611,7 @@ onMounted(() => {
 
 .org-content {
   flex: 1;
-  background: #fff;
+  background: var(--app-panel);
   border-radius: 8px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
   overflow: hidden;
@@ -621,7 +621,7 @@ onMounted(() => {
 
 .content-header {
   padding: 16px 20px;
-  border-bottom: 1px solid #e8e8e8;
+  border-bottom: 1px solid var(--app-border);
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -629,7 +629,7 @@ onMounted(() => {
 
 .content-header.empty {
   justify-content: center;
-  color: #999;
+  color: var(--app-text-3);
   font-size: 14px;
 }
 

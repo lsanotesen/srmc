@@ -6,7 +6,9 @@ from utils.crypto import decrypt
 from core.database import get_db
 from api.dependencies import get_current_user
 from api.permission_dependencies import assert_service_access, assert_high_risk_capability
+import asyncio
 import os
+import stat
 import tempfile
 from datetime import datetime
 import logging
@@ -60,6 +62,25 @@ def resolve_path(path: str, username: str, home_dir: str = None) -> str:
     
     return path
 
+
+def _read_remote_home(conn):
+    """同步读取远端用户真实主目录（paramiko 为阻塞 IO，需在线程池中执行）"""
+    _, stdout, _ = conn.client.exec_command('echo $HOME')
+    return stdout.read().decode().strip()
+
+
+async def _resolve_remote_path(conn, path: str, username: str) -> str:
+    """把 ~ 解析为远端真实主目录（HOME 可能不是 /home/<username>）"""
+    if not path or not path.startswith('~'):
+        return path
+    home_dir = None
+    try:
+        loop = asyncio.get_event_loop()
+        home_dir = await loop.run_in_executor(None, _read_remote_home, conn)
+    except Exception as e:
+        logger.warning(f"获取远端主目录失败，回退默认路径: {str(e)}")
+    return resolve_path(path, username, home_dir)
+
 @router.get("/exists")
 async def check_file_exists(service_id: int, path: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
     """检查远程文件或目录是否存在"""
@@ -76,6 +97,9 @@ async def check_file_exists(service_id: int, path: str, db: Session = Depends(ge
         if not conn:
             raise HTTPException(status_code=500, detail="无法建立SSH连接")
         
+        # 处理波浪号路径，使用远端真实主目录
+        path = await _resolve_remote_path(conn, path, service.username)
+        
         sftp = await conn.open_sftp()
         if not sftp:
             raise HTTPException(status_code=500, detail="无法打开SFTP连接")
@@ -88,6 +112,8 @@ async def check_file_exists(service_id: int, path: str, db: Session = Depends(ge
         
         sftp.close()
         return {"code": 0, "message": "success", "data": {"exists": exists}}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -107,15 +133,16 @@ async def list_directory(service_id: int, path: str = '.', db: Session = Depends
         if not conn:
             raise HTTPException(status_code=500, detail="无法建立SSH连接")
         
-        # 处理波浪号路径，~ 代表用户主目录
-        if path.startswith('~'):
-            path = path.replace('~', '/home/' + service.username)
+        # 处理波浪号路径，使用远端真实主目录
+        path = await _resolve_remote_path(conn, path, service.username)
         
         files, error = await conn.sftp_listdir(path)
         if error:
             raise HTTPException(status_code=500, detail=error)
         
-        return {"code": 0, "message": "success", "data": {"files": files}}
+        return {"code": 0, "message": "success", "data": {"files": files, "path": path}}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -194,7 +221,10 @@ async def upload_file(service_id: int, remote_path: str, preserve_path: str = 'f
         
         try:
             # 构建完整的远程路径
-            full_remote_path = os.path.join(remote_path, file.filename)
+            # 目录结构由前端 remote_path 决定；部分浏览器会把相对路径放进 filename，
+            # 直接拼接会产生重复的同名目录，因此这里只取文件名
+            filename = os.path.basename(file.filename.replace('\\', '/'))
+            full_remote_path = os.path.join(remote_path, filename)
             
             # 确保目标目录存在
             target_dir = os.path.dirname(full_remote_path)
@@ -233,9 +263,6 @@ async def download_file(service_id: int, remote_path: str, db: Session = Depends
     """从远程服务器下载文件"""
     service = _assert_sftp(db, user, service_id)
     
-    # 解析波浪号路径
-    remote_path = resolve_path(remote_path, service.username)
-    
     try:
         # 创建临时文件
         with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.basename(remote_path)) as tmp_file:
@@ -251,6 +278,9 @@ async def download_file(service_id: int, remote_path: str, db: Session = Depends
         if not conn:
             os.unlink(tmp_path)
             raise HTTPException(status_code=500, detail="无法建立SSH连接")
+        
+        # 处理波浪号路径，使用远端真实主目录
+        remote_path = await _resolve_remote_path(conn, remote_path, service.username)
         
         success, message = await conn.sftp_download(remote_path, tmp_path)
         
@@ -275,9 +305,6 @@ async def delete_file(service_id: int, remote_path: str, db: Session = Depends(g
     """删除远程服务器上的文件"""
     service = _assert_sftp(db, user, service_id)
     
-    # 解析波浪号路径
-    remote_path = resolve_path(remote_path, service.username)
-    
     try:
         conn = await ssh_pool.get_connection(
             host=service.ip,
@@ -289,12 +316,20 @@ async def delete_file(service_id: int, remote_path: str, db: Session = Depends(g
         if not conn:
             raise HTTPException(status_code=500, detail="无法建立SSH连接")
         
+        # 处理波浪号路径，使用远端真实主目录
+        remote_path = await _resolve_remote_path(conn, remote_path, service.username)
+        
         sftp = await conn.open_sftp()
         if not sftp:
             raise HTTPException(status_code=500, detail="无法打开SFTP连接")
         
         try:
-            sftp.remove(remote_path)
+            # 目录需用 rmdir 删除（仅支持空目录），文件用 remove
+            attrs = sftp.stat(remote_path)
+            if stat.S_ISDIR(attrs.st_mode):
+                sftp.rmdir(remote_path)
+            else:
+                sftp.remove(remote_path)
             return {"code": 0, "message": "删除成功"}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -310,10 +345,6 @@ async def rename_file(service_id: int, old_path: str, new_path: str, db: Session
     """重命名远程服务器上的文件或目录"""
     service = _assert_sftp(db, user, service_id)
     
-    # 解析波浪号路径
-    old_path = resolve_path(old_path, service.username)
-    new_path = resolve_path(new_path, service.username)
-    
     try:
         conn = await ssh_pool.get_connection(
             host=service.ip,
@@ -324,6 +355,10 @@ async def rename_file(service_id: int, old_path: str, new_path: str, db: Session
         
         if not conn:
             raise HTTPException(status_code=500, detail="无法建立SSH连接")
+        
+        # 处理波浪号路径，使用远端真实主目录
+        old_path = await _resolve_remote_path(conn, old_path, service.username)
+        new_path = await _resolve_remote_path(conn, new_path, service.username)
         
         sftp = await conn.open_sftp()
         if not sftp:
@@ -346,9 +381,6 @@ async def create_directory(service_id: int, remote_path: str, db: Session = Depe
     """在远程服务器创建目录"""
     service = _assert_sftp(db, user, service_id)
     
-    # 解析波浪号路径
-    remote_path = resolve_path(remote_path, service.username)
-    
     try:
         conn = await ssh_pool.get_connection(
             host=service.ip,
@@ -359,6 +391,9 @@ async def create_directory(service_id: int, remote_path: str, db: Session = Depe
         
         if not conn:
             raise HTTPException(status_code=500, detail="无法建立SSH连接")
+        
+        # 处理波浪号路径，使用远端真实主目录
+        remote_path = await _resolve_remote_path(conn, remote_path, service.username)
         
         sftp = await conn.open_sftp()
         if not sftp:

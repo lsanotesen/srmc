@@ -1,0 +1,30 @@
+{
+  "table": "agents",
+  "columns_before": [
+    "id",
+    "uuid",
+    "hostname",
+    "ip",
+    "os",
+    "kernel",
+    "arch",
+    "cpu_model",
+    "cpu_cores",
+    "memory_total",
+    "agent_version",
+    "capabilities",
+    "tags",
+    "status",
+    "last_heartbeat",
+    "created_at",
+    "updated_at",
+    "ssh_port",
+    "ssh_username",
+    "ssh_password",
+    "service_name",
+    "deploy_type",
+    "deploy_dir",
+    "compose_file",
+    "binary_path"
+  ]
+}

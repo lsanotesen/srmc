@@ -13,6 +13,7 @@ from utils.ssh_pool import ssh_pool
 from core.config import settings
 from api.dependencies import get_current_user, require_permission
 import services.container_status_service as container_status_service
+import services.alert_service as alert_service
 import json
 import asyncio
 from datetime import datetime
@@ -177,6 +178,7 @@ async def get_agents(db: Session = Depends(get_db)):
             "hostname": agent.hostname,
             "ip": agent.ip,
             "os": agent.os,
+            "os_distro": agent.os_distro,
             "kernel": agent.kernel,
             "arch": agent.arch,
             "cpu_model": agent.cpu_model,
@@ -211,6 +213,7 @@ async def get_agent(agent_uuid: str, db: Session = Depends(get_db)):
         "hostname": agent.hostname,
         "ip": agent.ip,
         "os": agent.os,
+        "os_distro": agent.os_distro,
         "kernel": agent.kernel,
         "arch": agent.arch,
         "cpu_model": agent.cpu_model,
@@ -463,6 +466,7 @@ async def handle_register(message: dict, agent_uuid: str, db: Session):
     agent.hostname = registration.get('hostname', '')
     agent.ip = registration.get('ip', '')
     agent.os = registration.get('os', '')
+    agent.os_distro = registration.get('os_distro', '') or None
     agent.kernel = registration.get('kernel', '')
     agent.arch = registration.get('arch', '')
     agent.cpu_model = registration.get('cpu_model', '')
@@ -566,18 +570,24 @@ async def handle_heartbeat(message: dict, agent_uuid: str, db: Session):
 def _handle_heartbeat_sync(message: dict, agent_uuid: str, db: Session):
     data = message.get('data', {})
     heartbeat = data.get('heartbeat', {})
+    system = heartbeat.get('system', {})
     
     agent = db.query(Agent).filter(Agent.uuid == agent_uuid).first()
     if agent:
         agent.status = 'online'
         agent.last_heartbeat = datetime.now()
+        # 操作系统发行版只在信息变化时更新，避免每次心跳重复写入相同值
+        os_distro = (system or {}).get('os_distro') or ''
+        if os_distro and os_distro != (agent.os_distro or ''):
+            agent.os_distro = os_distro
         db.commit()
     
-    system = heartbeat.get('system', {})
     services = heartbeat.get('services', [])
     docker_containers = heartbeat.get('docker_containers', [])
     compose_projects = heartbeat.get('compose_projects', [])
-    
+    # 告警中心：收集本次心跳各服务的业务状态，循环结束后统一批量评估
+    alert_items = []
+
     try:
         # 一次性任务/常驻服务的运行类型配置（容器级），用于业务状态计算
         run_mode_map = _load_run_mode_map(db, services)
@@ -606,6 +616,9 @@ def _handle_heartbeat_sync(message: dict, agent_uuid: str, db: Session):
                     svc_mode_map = run_mode_map.get(str(service_id), {})
                     svc_mode = container_status_service.resolve_run_mode(svc_mode_map, None)
                     status = container_status_service.compute_host_service_status(status, svc_mode)
+
+                # 告警中心：收集本服务最终业务状态（不读取 old_status，DB 为唯一真相源）
+                alert_items.append((service_id, status))
 
                 # 【新增】先读取旧状态用于变化检测
                 old_status_bytes = redis_client.get(redis_key)
@@ -655,7 +668,15 @@ def _handle_heartbeat_sync(message: dict, agent_uuid: str, db: Session):
             redis_client.set(f"agent_compose:{agent_uuid}", compose_json, ex=60)
     except Exception as e:
         print(f"Redis cache error: {e}")
-    
+
+    # 告警中心：批量评估（去重/状态机/恢复），数据库为唯一真相源
+    try:
+        summary = alert_service.evaluate_heartbeat_statuses(db, alert_items, agent_uuid)
+        if summary.get('created') or summary.get('recovered'):
+            print(f"[Alert] agent={agent_uuid} created={summary.get('created')} updated={summary.get('updated')} recovered={summary.get('recovered')}")
+    except Exception as e:
+        print(f"[Alert] evaluate failed: {e}")
+
     print(f"Heartbeat from {agent_uuid}: CPU={system.get('cpu_percent', 0)}%, Memory={system.get('memory_percent', 0)}%, Services={len(services)}")
 
 async def handle_services(message: dict, agent_uuid: str, db: Session):
@@ -966,6 +987,78 @@ async def batch_control_agents(
         "success": success_count,
         "failed": fail_count,
         "results": results
+    })
+
+@router.post("/agents/batch-delete")
+async def batch_delete_agents(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    user = Depends(require_permission("agent_manage"))
+):
+    """批量删除 Agent。
+
+    逐台执行与单删一致的处理：断开连接、解除关联服务绑定并清理缓存。
+    每台独立提交，单台失败不影响其他主机。
+    """
+    agent_uuids = payload.get("agent_uuids", [])
+    if not agent_uuids:
+        raise HTTPException(status_code=400, detail="未选择任何 Agent")
+
+    agents = db.query(Agent).filter(Agent.uuid.in_(agent_uuids)).all()
+
+    results = []
+    success_count = 0
+    fail_count = 0
+
+    for agent in agents:
+        agent_uuid = agent.uuid
+        hostname = agent.hostname
+        ip = agent.ip
+        try:
+            # 如果 Agent 在线，先断开连接
+            if manager.is_online(agent_uuid):
+                manager.disconnect(agent_uuid)
+
+            # 解除该 Agent 关联服务的绑定
+            services = db.query(AppService).filter(AppService.agent_uuid == agent_uuid).all()
+            for service in services:
+                service.agent_uuid = None
+
+            db.delete(agent)
+            db.commit()
+
+            # 清除缓存
+            for service in services:
+                redis_client.delete(f"service_status:{service.id}")
+                redis_client.delete(f"service_status_source:{service.id}")
+            redis_client.delete(f"agent_metrics:{agent_uuid}")
+            redis_client.delete(f"agent_containers:{agent_uuid}")
+            redis_client.delete(f"agent_compose:{agent_uuid}")
+
+            success_count += 1
+            results.append({
+                "agent_uuid": agent_uuid,
+                "hostname": hostname,
+                "ip": ip,
+                "success": True,
+                "message": "删除成功",
+            })
+        except Exception as e:
+            db.rollback()
+            fail_count += 1
+            results.append({
+                "agent_uuid": agent_uuid,
+                "hostname": hostname,
+                "ip": ip,
+                "success": False,
+                "message": f"删除失败: {e}",
+            })
+
+    return ResponseModel(data={
+        "total": len(agents),
+        "success": success_count,
+        "failed": fail_count,
+        "results": results,
     })
 
 # 机器架构别名归一：uname -m 输出 → Go 侧架构命名（amd64/arm64），与更新包命名对齐

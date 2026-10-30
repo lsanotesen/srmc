@@ -3,7 +3,10 @@ services:
     image: mysql:8.0
     container_name: srmc-mysql
     restart: unless-stopped
-    command: --default-time-zone=+08:00
+    # 关闭 binlog：当前无从库、备份走 mysqldump 全量，binlog 无消费者；
+    # 开启时默认保留 30 天，叠加 Agent 5s 心跳对 alert_records/agents 的高频 UPDATE，
+    # 会以约 727MB/天 的速度堆积（详见排查结论）。
+    command: --default-time-zone=+08:00 --skip-log-bin
     environment:
       MYSQL_ROOT_PASSWORD: root123
       MYSQL_DATABASE: srmc
@@ -54,6 +57,8 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      # 监控数据源配置（独立于业务代码，只读挂载）
+      - ./monitoring.conf:/app/monitoring.conf:ro
 
   frontend:
     image: srmc-frontend:latest

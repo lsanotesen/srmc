@@ -1,0 +1,33 @@
+# SRMC 监控数据源配置模板
+#
+# 使用方式：
+#   1. 复制本文件为 monitoring.conf（cp monitoring.conf.example monitoring.conf）
+#   2. 按实际部署环境填写地址；monitoring.conf 已加入 .gitignore，不会被提交
+#   3. 由 docker-compose.yml 挂载到后端容器 /app/monitoring.conf 只读使用
+#
+# 说明：本文件独立于业务代码，后端启动时一次性读取，修改后需重启后端生效。
+
+[prometheus]
+# 数据源模式：external（外置，使用 external_url）| internal（内置，使用 internal_url）
+mode = internal
+# 外置 Prometheus 地址（mode = external 时生效）
+external_url = http://<external-prometheus-host>:9090
+# 内置 Prometheus 地址（mode = internal 时生效）
+internal_url = http://srmc-prometheus:9090
+# 内置模式 Node Exporter 的 instance 标签（内置栈 node-exporter 使用 host 网络）
+internal_node_instance = host.docker.internal:9100
+
+[alertmanager]
+# Alertmanager 地址；留空表示未配置，实时告警接口将返回空结果（兼容外置模式无 Alertmanager）
+url = http://srmc-alertmanager:9093
+
+[loki]
+# Loki 日志查询（服务器级 Docker 容器日志）；enabled = false 时前端显示「日志服务未启用」
+enabled = false
+url = http://<loki-host>:3100
+
+[thresholds]
+# 资源风险阈值（百分比）：CPU/内存默认 80，磁盘默认 90
+cpu = 80
+memory = 80
+disk = 90

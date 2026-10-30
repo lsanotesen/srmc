@@ -28,6 +28,7 @@ const routes = [
       { path: '/sql', name: 'SQL', component: () => import('../pages/SQL.vue') },
       { path: '/es', name: 'ES', component: () => import('../pages/ES.vue') },
       { path: '/audit', name: 'Audit', component: () => import('../pages/Audit.vue') },
+      { path: '/alerts', name: 'Alerts', component: () => import('../pages/Alerts.vue') },
       { path: '/backup', name: 'Backup', component: () => import('../pages/Backup.vue') },
       { path: '/users', name: 'Users', component: () => import('../pages/Users.vue') },
       { path: '/settings', name: 'Settings', component: () => import('../pages/Settings.vue') },

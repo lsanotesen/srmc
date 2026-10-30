@@ -12,6 +12,9 @@
         <el-button v-if="hasPermission('agent:manage')" type="danger" @click="batchControl('stop')" :disabled="!selectedAgents.length">
           批量停止 ({{ selectedAgents.length }})
         </el-button>
+        <el-button v-if="hasPermission('agent:manage')" type="danger" plain @click="batchDelete" :disabled="!selectedAgents.length">
+          批量删除 ({{ selectedAgents.length }})
+        </el-button>
         <el-button v-if="hasPermission('agent:manage')" plain :loading="probingArch" @click="probeArch">
           {{ selectedAgents.length ? `探测架构 (${selectedAgents.length})` : '探测架构' }}
         </el-button>
@@ -28,19 +31,33 @@
             </el-dropdown-menu>
           </template>
         </el-dropdown>
-        <el-button type="primary" @click="loadAgents">刷新</el-button>
+        <el-button type="primary" :loading="loading" @click="loadAgents()">刷新</el-button>
       </div>
     </div>
 
     <div class="search-bar">
-      <el-input v-model="searchKeyword" placeholder="搜索主机名或IP" class="search-input" @keyup.enter="loadAgents" />
-      <el-select v-model="statusFilter" placeholder="状态筛选" clearable class="status-select">
+      <el-input v-model="searchKeyword" placeholder="搜索主机名/IP/UUID" class="search-input" @keyup.enter="handleSearch" />
+      <el-select v-model="statusFilter" placeholder="状态筛选" clearable class="status-select" @change="handleSearch">
         <el-option label="在线" value="online" />
         <el-option label="离线" value="offline" />
       </el-select>
-      <el-button type="primary" @click="loadAgents">搜索</el-button>
+      <el-select v-model="deployFilter" placeholder="部署方式" clearable class="status-select" @change="handleSearch">
+        <el-option v-for="d in deployOptions" :key="d" :label="deployModeLabel(d)" :value="d" />
+      </el-select>
+      <el-select v-model="osFilter" placeholder="操作系统" clearable class="os-select" @change="handleSearch">
+        <el-option v-for="o in osOptions" :key="o" :label="o" :value="o" />
+      </el-select>
+      <el-select v-model="versionFilter" placeholder="Agent版本" clearable class="status-select" @change="handleSearch">
+        <el-option v-for="v in versionOptions" :key="v" :label="v" :value="v" />
+      </el-select>
+      <el-select v-model="archFilter" placeholder="架构" clearable class="status-select" @change="handleSearch">
+        <el-option v-for="a in archOptions" :key="a" :label="formatArch(a)" :value="a" />
+      </el-select>
+      <el-button type="primary" @click="handleSearch">搜索</el-button>
       <el-button @click="resetFilters">重置</el-button>
     </div>
+
+    <ListStats :items="statsItems" />
 
     <div class="table-wrapper">
       <el-table 
@@ -49,77 +66,55 @@
         border 
         fit 
         row-key="uuid"
+        v-loading="loading"
         :header-cell-style="{ 'white-space': 'nowrap' }"
         @selection-change="handleSelectionChange"
       >
-        <el-table-column type="selection" width="55" reserve-selection />
-        <el-table-column type="index" label="序号" width="60" />
-        <el-table-column prop="hostname" label="主机名" show-overflow-tooltip />
-        <el-table-column prop="ip" label="IP地址" width="130" show-overflow-tooltip />
-        <el-table-column prop="uuid" label="UUID" width="260" show-overflow-tooltip>
+        <el-table-column type="selection" width="42" reserve-selection />
+        <el-table-column type="index" label="序号" width="56" :index="globalIndex" />
+        <el-table-column prop="hostname" label="主机名" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="ip" label="IP地址" min-width="115" show-overflow-tooltip />
+        <el-table-column prop="uuid" label="UUID" min-width="140">
           <template #default="scope">
-            <span style="font-family: monospace; font-size: 12px;">{{ scope.row.uuid }}</span>
+            <el-tooltip :content="scope.row.uuid" placement="top" :teleported="true">
+              <span class="uuid-text">{{ shortUuid(scope.row.uuid) }}</span>
+            </el-tooltip>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="90">
+        <el-table-column label="状态" min-width="66">
           <template #default="scope">
-            <el-tag :type="scope.row.is_online ? 'success' : 'danger'">
+            <el-tag :type="scope.row.is_online ? 'success' : 'danger'" size="small">
               {{ scope.row.is_online ? '在线' : '离线' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="部署方式" width="110">
+        <el-table-column label="部署方式" min-width="90">
           <template #default="scope">
             <el-tag :type="deployModeTag(scope.row.deploy_type)" size="small">{{ deployModeLabel(scope.row.deploy_type) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="CPU" width="75">
+        <el-table-column label="系统" min-width="150" show-overflow-tooltip>
           <template #default="scope">
-            <span>{{ formatPercent(scope.row.metrics?.cpu_percent) }}</span>
+            <span>{{ systemSummary(scope.row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="内存" width="75">
-          <template #default="scope">
-            <span>{{ formatPercent(scope.row.metrics?.memory_percent) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="磁盘" width="75">
-          <template #default="scope">
-            <span>{{ formatPercent(scope.row.metrics?.disk_percent) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="Load" width="75">
-          <template #default="scope">
-            <span>{{ formatLoad(scope.row.metrics?.load1) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="系统" show-overflow-tooltip>
-          <template #default="scope">
-            <span>{{ scope.row.os || '--' }} ({{ scope.row.cpu_cores || 0 }}核)</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="内存总量" width="95" show-overflow-tooltip>
-          <template #default="scope">
-            <span>{{ formatMemory(scope.row.memory_total) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="架构" width="95" show-overflow-tooltip>
+        <el-table-column label="架构" min-width="80" show-overflow-tooltip>
           <template #default="scope">
             <el-tag v-if="scope.row.arch" type="info" size="small">{{ formatArch(scope.row.arch) }}</el-tag>
             <span v-else style="color: #e6a23c;">未知</span>
           </template>
         </el-table-column>
-        <el-table-column label="Agent版本" width="100" show-overflow-tooltip>
+        <el-table-column label="Agent版本" min-width="96" show-overflow-tooltip>
           <template #default="scope">
             <span>{{ formatVersion(scope.row.agent_version) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="最后心跳" show-overflow-tooltip>
+        <el-table-column label="最后心跳" min-width="175">
           <template #default="scope">
             <span>{{ formatDateTime(scope.row.last_heartbeat) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="250" align="center">
+        <el-table-column label="操作" min-width="190" align="center" fixed="right">
           <template #default="scope">
             <div class="action-buttons">
               <div class="action-btn view-btn" @click="viewAgent(scope.row)">
@@ -140,13 +135,23 @@
               <div v-if="hasPermission('agent:manage')" class="action-btn config-btn" @click="openConfigDialog(scope.row)">
                 <span>配置</span>
               </div>
-              <div v-if="hasPermission('agent:manage')" class="action-btn delete-btn" @click="deleteAgent(scope.row)">
-                <span>删除</span>
-              </div>
             </div>
           </template>
         </el-table-column>
       </el-table>
+    </div>
+
+    <div class="pagination-wrapper">
+      <el-pagination
+        background
+        layout="total, sizes, prev, pager, next, jumper"
+        :total="filteredAgents.length"
+        :current-page="page"
+        :page-size="pageSize"
+        :page-sizes="[10, 20, 50, 100]"
+        @current-change="handlePageChange"
+        @size-change="handleSizeChange"
+      />
     </div>
 
     <el-dialog title="Agent 详情" v-model="showDetailDialog" width="600px">
@@ -154,7 +159,7 @@
         <el-descriptions :column="2" border>
           <el-descriptions-item label="主机名">{{ selectedAgent.hostname }}</el-descriptions-item>
           <el-descriptions-item label="IP地址">{{ selectedAgent.ip }}</el-descriptions-item>
-          <el-descriptions-item label="操作系统">{{ selectedAgent.os }}</el-descriptions-item>
+          <el-descriptions-item label="操作系统">{{ selectedAgent.os_distro || selectedAgent.os }}</el-descriptions-item>
           <el-descriptions-item label="内核版本">{{ selectedAgent.kernel }}</el-descriptions-item>
           <el-descriptions-item label="架构">{{ formatArch(selectedAgent.arch) || '未知' }}</el-descriptions-item>
           <el-descriptions-item label="CPU型号">{{ selectedAgent.cpu_model }}</el-descriptions-item>
@@ -227,9 +232,9 @@
         <el-form-item label="服务名">
           <el-input v-model="configForm.service_name" placeholder="默认 srmc-agent" />
         </el-form-item>
-        <div v-if="configForm.ssh_username" style="margin-top: 10px; padding: 10px; background: #f5f7fa; border-radius: 4px;">
+        <div v-if="configForm.ssh_username" style="margin-top: 10px; padding: 10px; background: var(--app-panel-soft); border-radius: 4px;">
           <el-tag type="success" size="small">✓ 已配置 SSH 凭据</el-tag>
-          <span style="margin-left: 10px; font-size: 13px; color: #606266;">可通过 SSH 远程控制该 Agent</span>
+          <span style="margin-left: 10px; font-size: 13px; color: var(--app-text-2);">可通过 SSH 远程控制该 Agent</span>
         </div>
       </el-form>
       <template #footer>
@@ -275,7 +280,7 @@
           </el-button>
         </el-form-item>
 
-        <div v-if="showPkgUpload" style="background: #f7f9fc; padding: 14px; border-radius: 6px; margin: 0 0 14px 130px;">
+        <div v-if="showPkgUpload" style="background: var(--app-panel-soft); padding: 14px; border-radius: 6px; margin: 0 0 14px 130px;">
           <el-form-item label="包类型">
             <el-radio-group v-model="pkgForm.package_type">
               <el-radio label="docker">Docker 镜像 tar</el-radio>
@@ -304,7 +309,7 @@
 
         <el-form-item label="部署目录">
           <el-input v-model="deployForm.deploy_dir" placeholder="/etc/srmc-agent" style="width: 420px;" />
-          <span style="margin-left: 10px; color: #909399; font-size: 12px;">目录不存在会自动创建</span>
+          <span style="margin-left: 10px; color: var(--app-text-3); font-size: 12px;">目录不存在会自动创建</span>
         </el-form-item>
         <el-form-item label="后端地址">
           <el-input v-model="deployForm.server_url" placeholder="ws://192.168.12.79:8000/api/ws/agent/" style="width: 420px;" />
@@ -317,14 +322,14 @@
           </el-link>
         </el-form-item>
         <template v-if="showDeployAdvanced">
-          <div style="background: #f7f9fc; padding: 12px 14px; border-radius: 6px; margin: 0 0 12px 130px;">
+          <div style="background: var(--app-panel-soft); padding: 12px 14px; border-radius: 6px; margin: 0 0 12px 130px;">
             <el-form-item label="docker-compose.yml" style="margin-bottom: 10px;">
               <div>
                 <input ref="deployComposeRef" type="file" accept=".yml,.yaml" style="display:none" @change="onDeployComposeChange" />
                 <el-button size="small" @click="deployComposeRef?.click()">选择文件</el-button>
                 <span v-if="deployExtra.compose_name" style="margin-left: 8px; font-size: 12px;">{{ deployExtra.compose_name }}</span>
-                <el-icon v-if="deployExtra.compose_name" style="margin-left: 6px; cursor: pointer; color: #909399;" @click="deployExtra.compose_content = ''; deployExtra.compose_name = ''"><close /></el-icon>
-                <div style="font-size: 12px; color: #909399; margin-top: 2px;">留空则使用系统模板</div>
+                <el-icon v-if="deployExtra.compose_name" style="margin-left: 6px; cursor: pointer; color: var(--app-text-3);" @click="deployExtra.compose_content = ''; deployExtra.compose_name = ''"><close /></el-icon>
+                <div style="font-size: 12px; color: var(--app-text-3); margin-top: 2px;">留空则使用系统模板</div>
               </div>
             </el-form-item>
             <el-form-item label="config.yaml" style="margin-bottom: 0;">
@@ -332,8 +337,8 @@
                 <input ref="deployConfigRef" type="file" accept=".yml,.yaml" style="display:none" @change="onDeployConfigChange" />
                 <el-button size="small" @click="deployConfigRef?.click()">选择文件</el-button>
                 <span v-if="deployExtra.config_name" style="margin-left: 8px; font-size: 12px;">{{ deployExtra.config_name }}</span>
-                <el-icon v-if="deployExtra.config_name" style="margin-left: 6px; cursor: pointer; color: #909399;" @click="deployExtra.config_content = ''; deployExtra.config_name = ''"><close /></el-icon>
-                <div style="font-size: 12px; color: #909399; margin-top: 2px;">留空则使用系统模板，后端自动注入 server.url / token / agent.name / agent.ip / deploy_dir</div>
+                <el-icon v-if="deployExtra.config_name" style="margin-left: 6px; cursor: pointer; color: var(--app-text-3);" @click="deployExtra.config_content = ''; deployExtra.config_name = ''"><close /></el-icon>
+                <div style="font-size: 12px; color: var(--app-text-3); margin-top: 2px;">留空则使用系统模板，后端自动注入 server.url / token / agent.name / agent.ip / deploy_dir</div>
               </div>
             </el-form-item>
           </div>
@@ -351,7 +356,7 @@
           <el-form-item label="目标 Agent">
             <div style="width: 100%;">
               <div style="margin-bottom: 6px;">
-                <span style="font-size: 12px; color: #606266; margin-right: 8px;">架构</span>
+                <span style="font-size: 12px; color: var(--app-text-2); margin-right: 8px;">架构</span>
                 <el-select v-model="deployArchFilter" size="small" style="width: 140px; margin-right: 12px;">
                   <el-option label="全部" value="__all__" />
                   <el-option
@@ -365,7 +370,7 @@
                   全选筛选结果 ({{ deployCandidateAgents.length }})
                 </el-button>
                 <el-button size="small" :disabled="!deployTargetUuids.length" @click="deployTargetUuids = []">清空</el-button>
-                <span style="font-size: 12px; color: #909399; margin-left: 8px;">
+                <span style="font-size: 12px; color: var(--app-text-3); margin-left: 8px;">
                   共 {{ allAgents.length }} 台，当前安装包类型匹配 {{ deployMatchedAgents.length }} 台
                 </span>
               </div>
@@ -395,10 +400,10 @@
               >
                 没有与当前安装包类型（{{ selectedPackage.package_type === 'docker' ? 'Docker 镜像' : '二进制文件' }}）匹配的 Agent。
               </el-alert>
-              <div v-if="deployTargetUuids.length" style="font-size: 12px; color: #909399; margin-top: 6px; width: 560px;">
+              <div v-if="deployTargetUuids.length" style="font-size: 12px; color: var(--app-text-3); margin-top: 6px; width: 560px;">
                 已选 {{ deployTargetUuids.length }} 台：{{ deployTargetSummary }}
               </div>
-              <div style="font-size: 12px; color: #909399; line-height: 1.5; margin-top: 4px; width: 560px;">
+              <div style="font-size: 12px; color: var(--app-text-3); line-height: 1.5; margin-top: 4px; width: 560px;">
                 将复用「服务器管理」中该 IP 已保存的 SSH 凭据，无需重复输入密码。若提示无可用凭据，请先在服务器管理中维护，或改用手工填写。
               </div>
             </div>
@@ -414,7 +419,7 @@
               placeholder="每行一个 IP，例如：&#10;192.168.12.81&#10;192.168.12.82"
               style="width: 420px;"
             />
-            <div style="font-size: 12px; color: #909399; line-height: 1.5; margin-top: 4px; width: 420px;">
+            <div style="font-size: 12px; color: var(--app-text-3); line-height: 1.5; margin-top: 4px; width: 420px;">
               Agent IP 默认使用 SSH 连接的 IP，无需逐台填写；部署时会自动校验该 IP 是否在目标机网卡上，NAT/多网卡异常会在任务详情中告警。
             </div>
           </el-form-item>
@@ -423,7 +428,7 @@
           </el-form-item>
           <el-form-item label="SSH 用户">
             <el-input v-model="deployForm.username" placeholder="root" style="width: 200px;" />
-            <div style="font-size: 12px; color: #909399; margin-left: 8px;">
+            <div style="font-size: 12px; color: var(--app-text-3); margin-left: 8px;">
               非 root 用户需具备 sudo 权限（免密，或用同一密码提权）
             </div>
           </el-form-item>
@@ -479,19 +484,43 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, reactive } from 'vue'
+import { ref, computed, onMounted, onUnmounted, reactive, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import axios from '@/utils/axios'
 import { usePermission } from '@/composables/usePermission'
+import { useUserStore } from '@/stores/user'
+import ListStats from '@/components/ListStats.vue'
 
 const router = useRouter()
+const route = useRoute()
+const userStore = useUserStore()
 const { hasPermission } = usePermission()
 
-const agents = ref([])
+// 前端分页：filteredAgents 保存全部筛选结果，agents 仅暴露当前页数据
+const filteredAgents = ref([])
 const allAgents = ref([])
+const page = ref(1)
+const pageSize = ref(20)
+const agents = computed(() => {
+  const start = (page.value - 1) * pageSize.value
+  return filteredAgents.value.slice(start, start + pageSize.value)
+})
+const statsItems = ref([])
+const loading = ref(false)
+let refreshTimer = null
 const searchKeyword = ref('')
 const statusFilter = ref('')
+const deployFilter = ref('')
+const osFilter = ref('')
+const versionFilter = ref('')
+const archFilter = ref('')
+
+// 筛选下拉选项由已加载的 Agent 数据动态生成，避免写死平台/版本
+const deployOptions = computed(() => Array.from(new Set(allAgents.value.map(a => a.deploy_type).filter(Boolean))))
+const osOptions = computed(() => Array.from(new Set(allAgents.value.map(a => a.os_distro || a.os).filter(Boolean))).sort())
+const versionOptions = computed(() => Array.from(new Set(allAgents.value.map(a => a.agent_version).filter(Boolean))).sort())
+const archOptions = computed(() => Array.from(new Set(allAgents.value.map(a => a.arch).filter(Boolean))))
 const showDetailDialog = ref(false)
 const showServicesDialog = ref(false)
 const showConfigDialog = ref(false)
@@ -536,6 +565,18 @@ const formatArch = (v) => {
   return ARCH_DISPLAY[s.toLowerCase()] || s
 }
 
+// 系统列：仅展示操作系统发行版，架构、CPU 核数分别由独立列和详情展示
+// 发行版由 Agent 读取宿主机 os-release 上报；未升级的旧 Agent 回退显示 os
+const systemSummary = (row) => row.os_distro || row.os || '--'
+
+// UUID 列表展示：默认只显示前后部分、省略中间，悬停查看完整 UUID
+const shortUuid = (uuid) => {
+  const s = (uuid || '').trim()
+  if (!s) return '-'
+  if (s.length <= 18) return s
+  return `${s.slice(0, 8)}…${s.slice(-6)}`
+}
+
 // 探测架构：有选中则探选中项，未选中则补录所有架构未知的 Agent
 const probingArch = ref(false)
 const probeResultDialog = ref(false)
@@ -567,7 +608,9 @@ const probeArch = async () => {
   }
 }
 
-const loadAgents = async () => {
+// silent=true 用于定时后台刷新，不显示 loading 遮罩，避免每 10 秒闪动
+const loadAgents = async (silent = false) => {
+  if (!silent) loading.value = true
   try {
     const response = await fetch('/api/agents/', {
       headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
@@ -580,7 +623,8 @@ const loadAgents = async () => {
         const keyword = searchKeyword.value.toLowerCase()
         result = result.filter(a => 
           a.hostname.toLowerCase().includes(keyword) || 
-          a.ip.toLowerCase().includes(keyword)
+          a.ip.toLowerCase().includes(keyword) ||
+          (a.uuid || '').toLowerCase().includes(keyword)
         )
       }
       if (statusFilter.value) {
@@ -588,45 +632,73 @@ const loadAgents = async () => {
           statusFilter.value === 'online' ? a.is_online : !a.is_online
         )
       }
-      agents.value = result
-      
-      for (const agent of agents.value) {
-        if (agent.is_online) {
-          await loadAgentMetrics(agent.uuid)
-        }
+      if (deployFilter.value) {
+        result = result.filter(a => a.deploy_type === deployFilter.value)
       }
+      if (osFilter.value) {
+        result = result.filter(a => (a.os_distro || a.os) === osFilter.value)
+      }
+      if (versionFilter.value) {
+        result = result.filter(a => a.agent_version === versionFilter.value)
+      }
+      if (archFilter.value) {
+        result = result.filter(a => a.arch === archFilter.value)
+      }
+      filteredAgents.value = result
+      // 总数变化后页码可能越界（如删除最后一页数据），收敛到最后一页；
+      // 定时静默刷新时页码合法则保持不变，避免每 10 秒跳回第一页
+      const maxPage = Math.max(1, Math.ceil(result.length / pageSize.value))
+      if (page.value > maxPage) page.value = maxPage
+      
+      // 统计：Agent 总数 / 在线 / 离线（基于全部 Agent），筛选结果基于当前筛选
+      const onlineCount = allAgents.value.filter(a => a.is_online).length
+      const statsItemsValue = [
+        { label: 'Agent 总数', value: `${allAgents.value.length} 台` },
+        { label: '在线', value: `${onlineCount} 台` },
+        { label: '离线', value: `${allAgents.value.length - onlineCount} 台` }
+      ]
+      if (searchKeyword.value || statusFilter.value || deployFilter.value || osFilter.value || versionFilter.value || archFilter.value) {
+        statsItemsValue.push({ label: '筛选结果', value: `${result.length} 台` })
+      }
+      statsItems.value = statsItemsValue
     } else {
       ElMessage.error('加载失败')
     }
   } catch (error) {
     ElMessage.error('加载失败')
-  }
-}
-
-const loadAgentMetrics = async (agent_uuid) => {
-  try {
-    const response = await fetch(`/api/agents/${agent_uuid}/metrics/`, {
-      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-    })
-    const data = await response.json()
-    if (data.code === 0) {
-      const agent = agents.value.find(a => a.uuid === agent_uuid)
-      if (agent) {
-        agent.metrics = data.data.system || {}
-        agent.docker_containers = data.data.docker_containers || []
-        agent.compose_projects = data.data.compose_projects || []
-      }
-    }
-  } catch (error) {
-    console.error('加载 Agent 指标失败:', error)
+  } finally {
+    if (!silent) loading.value = false
   }
 }
 
 const resetFilters = () => {
   searchKeyword.value = ''
   statusFilter.value = ''
+  deployFilter.value = ''
+  osFilter.value = ''
+  versionFilter.value = ''
+  archFilter.value = ''
+  page.value = 1
   loadAgents()
 }
+
+// 搜索/筛选变化后回到第一页，避免停留在无数据的页码
+const handleSearch = () => {
+  page.value = 1
+  loadAgents()
+}
+
+const handlePageChange = (p) => {
+  page.value = p
+}
+
+const handleSizeChange = (size) => {
+  pageSize.value = size
+  page.value = 1
+}
+
+// 序号跨页连续：按全局位置计算，而非每页从 1 开始
+const globalIndex = (i) => (page.value - 1) * pageSize.value + i + 1
 
 const handleSelectionChange = (selection) => {
   selectedAgents.value = selection
@@ -788,11 +860,13 @@ const viewAgentServices = async (agent) => {
   }
 }
 
-const deleteAgent = async (agent) => {
+// 批量删除 Agent：删除后其关联服务自动解除关联（与单删逻辑一致）
+const batchDelete = async () => {
+  if (!selectedAgents.value.length) return
   try {
     await ElMessageBox.confirm(
-      `确定要删除 Agent "${agent.hostname} (${agent.ip})" 吗？删除后，关联的服务将自动解除关联。如果误删，重启 Agent 后会自动重新注册。`,
-      '删除确认',
+      `确定要删除选中的 ${selectedAgents.value.length} 个 Agent 吗？删除后，关联的服务将自动解除关联。如果误删，重启 Agent 后会自动重新注册。`,
+      '批量删除确认',
       {
         confirmButtonText: '确定删除',
         cancelButtonText: '取消',
@@ -800,21 +874,33 @@ const deleteAgent = async (agent) => {
         confirmButtonClass: 'el-button--danger'
       }
     )
-    
-    const response = await fetch(`/api/agents/${agent.uuid}/`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+
+    const agent_uuids = selectedAgents.value.map(a => a.uuid)
+    const response = await fetch('/api/agents/batch-delete', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getToken()}`
+      },
+      body: JSON.stringify({ agent_uuids })
     })
     const data = await response.json()
     if (data.code === 0) {
-      ElMessage.success('Agent 删除成功')
-      loadAgents()
+      const result = data.data
+      const message = `总共 ${result.total} 个 Agent，成功 ${result.success} 个，失败 ${result.failed} 个`
+      if (result.failed === 0) {
+        ElMessage.success(message)
+      } else {
+        ElMessage.warning(message)
+      }
+      await loadAgents()
+      clearSelection()
     } else {
-      ElMessage.error(data.message || '删除失败')
+      ElMessage.error(data.message || '批量删除失败')
     }
   } catch (error) {
     if (error !== 'cancel') {
-      console.error('删除 Agent 失败:', error)
+      console.error('批量删除 Agent 失败:', error)
     }
   }
 }
@@ -829,16 +915,6 @@ const formatMemory = (bytes) => {
     return (bytes / 1024).toFixed(2) + ' KB'
   }
   return bytes + ' B'
-}
-
-const formatPercent = (value) => {
-  if (value === undefined || value === null || isNaN(value)) return '--'
-  return value.toFixed(1) + '%'
-}
-
-const formatLoad = (value) => {
-  if (value === undefined || value === null || isNaN(value)) return '--'
-  return value.toFixed(2)
 }
 
 const formatDateTime = (dateStr) => {
@@ -1183,9 +1259,34 @@ const createDeployTask = async () => {
   }
 }
 
+// 从服务器管理页「未安装」入口跳转而来：打开批量部署弹窗并预填该 IP
+const applyDeployQuery = () => {
+  const deployIp = route.query.deploy_ip
+  if (!deployIp || !hasPermission('agent:manage')) return
+  openDeployDialog()
+  deployForm.value.target_mode = 'manual'
+  deployForm.value.hosts_text = String(deployIp)
+  // 处理后清掉参数，避免刷新页面重复弹窗
+  router.replace({ path: '/agents' })
+}
+
 onMounted(() => {
   loadAgents()
-  setInterval(loadAgents, 10000)
+  // 定时刷新仅用于同步 Agent 在线状态与最后心跳（不再请求资源指标），静默刷新不显示 loading
+  refreshTimer = setInterval(() => loadAgents(true), 10000)
+  applyDeployQuery()
+})
+
+// 注意：刷新页面时用户信息是异步加载的，mount 阶段 user 尚未就绪，
+// 因此同时监听用户信息加载完成，避免因权限判断过早返回 false 而丢失预填。
+watch(() => userStore.user, () => { if (route.query.deploy_ip) applyDeployQuery() }, { immediate: true })
+
+// 离开页面时清理定时器，避免后台继续刷新
+onUnmounted(() => {
+  if (refreshTimer) {
+    clearInterval(refreshTimer)
+    refreshTimer = null
+  }
 })
 </script>
 
@@ -1198,6 +1299,17 @@ onMounted(() => {
   overflow-x: auto;
   width: 100%;
   min-width: 100%;
+}
+
+.pagination-wrapper {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+/* 表头文字强制单行：EP 内层 .cell 默认 white-space: normal，需在其上覆盖，避免「序号」「Agent版本」表头折行 */
+:deep(.el-table th .cell) {
+  white-space: nowrap;
 }
 
 .page-header {
@@ -1219,6 +1331,7 @@ onMounted(() => {
 
 .search-bar {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 20px;
   align-items: center;
@@ -1230,6 +1343,10 @@ onMounted(() => {
 
 .status-select {
   width: 120px;
+}
+
+.os-select {
+  width: 160px;
 }
 
 .agent-detail {
@@ -1244,16 +1361,25 @@ onMounted(() => {
 
 .action-buttons {
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
   gap: 4px;
 }
 
+/* UUID 列：等宽字体，中间省略，悬停由 el-tooltip 展示完整值 */
+.uuid-text {
+  font-family: monospace;
+  font-size: 12px;
+}
+
+/* 操作按钮：沿用原有彩色渐变配色，仅保留紧凑尺寸与间距 */
 .action-btn {
-  width: 56px;
-  height: 28px;
+  box-sizing: border-box;
+  width: 38px;
+  height: 24px;
   border-radius: 4px;
   font-weight: 500;
-  font-size: 13px;
+  font-size: 12px;
   transition: all 0.25s ease;
   border: none;
   color: #fff;
@@ -1266,17 +1392,17 @@ onMounted(() => {
   cursor: pointer;
   outline: none;
   text-align: center;
+}
 
-  &:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-    filter: brightness(1.1);
-  }
+.action-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  filter: brightness(1.1);
+}
 
-  &:active {
-    transform: translateY(0);
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
-  }
+.action-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
 }
 
 .view-btn {
@@ -1303,10 +1429,6 @@ onMounted(() => {
   background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
 }
 
-.delete-btn {
-  background: linear-gradient(135deg, #9ca3af 0%, #6b7280 100%);
-}
-
 /* 批量按钮禁用样式 */
 .el-button:disabled {
   opacity: 0.5;
@@ -1328,7 +1450,7 @@ onMounted(() => {
 }
 
 .pkg-option-del {
-  color: #c0c4cc;
+  color: var(--app-text-3);
   cursor: pointer;
   flex-shrink: 0;
 }

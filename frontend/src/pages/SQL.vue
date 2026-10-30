@@ -187,14 +187,14 @@ onMounted(() => {
 
 .left-panel {
   width: 250px;
-  background: #f9fafb;
+  background: var(--app-panel-soft);
   border-radius: 8px;
   overflow: hidden;
 }
 
 .panel-header {
   padding: 12px 15px;
-  background: #e5e7eb;
+  background: var(--app-panel-soft);
   font-weight: bold;
 }
 
@@ -236,17 +236,17 @@ onMounted(() => {
 
 .result-container {
   flex: 2;
-  background: #fff;
-  border: 1px solid #e5e7eb;
+  background: var(--app-panel);
+  border: 1px solid var(--app-border);
   border-radius: 8px;
   overflow: auto;
 }
 
 .result-header {
   padding: 12px 15px;
-  background: #f3f4f6;
+  background: var(--app-panel-soft);
   font-weight: bold;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--app-border);
 }
 
 .error-message {
@@ -269,19 +269,19 @@ onMounted(() => {
 
 .history-header {
   padding: 12px 15px;
-  background: #f3f4f6;
+  background: var(--app-panel-soft);
   font-weight: bold;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--app-border);
 }
 
 .history-item {
   padding: 10px;
-  background: #fff;
+  background: var(--app-panel);
   cursor: pointer;
 }
 
 .history-item:hover {
-  background: #f3f4f6;
+  background: var(--app-panel-soft);
 }
 
 .history-item pre {

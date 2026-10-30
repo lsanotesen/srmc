@@ -80,6 +80,7 @@ async def get_audit_logs(
     action: str = Query(None),
     service_code: str = Query(None),
     service_id: int = Query(None),
+    service_name: str = Query(None),
     project_id: int = Query(None),
     subsystem_id: int = Query(None),
     result: str = Query(None),
@@ -91,7 +92,17 @@ async def get_audit_logs(
     user = Depends(require_permission("audit:view"))
 ):
     # 复用 DataScope：按项目权限 + 组织维度收敛可见范围
-    query = _apply_audit_data_scope(db.query(AuditLog), db, user)
+    scoped_query = _apply_audit_data_scope(db.query(AuditLog), db, user)
+
+    # total_all：数据范围内的日志总数（不受任何筛选影响）。
+    # 审计日志表较大，仅在确实带了筛选条件时才额外统计一次全部数量，避免无谓开销。
+    has_filter = any([
+        user_id, username, action, service_code, service_id,
+        service_name, project_id, subsystem_id, result, start_time, end_time,
+    ])
+    total_all = scoped_query.count() if has_filter else None
+
+    query = scoped_query
 
     if user_id:
         query = query.filter(AuditLog.user_id == user_id)
@@ -137,6 +148,12 @@ async def get_audit_logs(
         else:
             # 服务不存在，返回空结果
             query = query.filter(AuditLog.service_id == service_id)
+    if service_name:
+        # 按服务名称模糊匹配：先取出匹配的服务ID，再据此收敛日志
+        matched_service_ids = db.query(AppService.id).filter(
+            AppService.func_desc.like(f"%{service_name}%")
+        ).subquery()
+        query = query.filter(AuditLog.service_id.in_(matched_service_ids))
     if project_id:
         query = query.filter(AuditLog.project_id == project_id)
     if subsystem_id:
@@ -199,6 +216,7 @@ async def get_audit_logs(
     return ResponseModel(data={
         "items": logs_dict,
         "total": total,
+        "total_all": total_all if total_all is not None else total,
         "page": page,
         "limit": limit
     })

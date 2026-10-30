@@ -283,7 +283,7 @@ onMounted(async () => {
   font-size: 14px;
 }
 .text-muted {
-  color: #909399;
+  color: var(--app-text-3);
 }
 .perm-section {
   max-height: 500px;
@@ -296,10 +296,10 @@ onMounted(async () => {
 .perm-category h4 {
   margin: 0 0 10px 0;
   padding-bottom: 8px;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--app-border);
   font-size: 14px;
   font-weight: 600;
-  color: #303133;
+  color: var(--app-text);
 }
 .perm-checkbox-group {
   display: flex;

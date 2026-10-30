@@ -114,7 +114,7 @@
     </el-dialog>
 
     <el-dialog title="重试失败主机" v-model="showRetryDialog" width="880px">
-      <div style="margin-bottom: 10px; color: #909399; font-size: 12px; line-height: 1.6;">
+      <div style="margin-bottom: 10px; color: var(--app-text-3); font-size: 12px; line-height: 1.6;">
         仅重试失败/已取消/已跳过的主机，已成功的不受影响。可逐台修改 SSH 用户与密码（各主机可不同，本任务只需填这一次）；
         密码留空则使用任务创建时保存的密码。非 root 用户会自动尝试 sudo 提权（复用该登录密码）。
       </div>

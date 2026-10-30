@@ -1,0 +1,96 @@
+/*
+ * SRMC 全站主题变量
+ * 浅色（默认）定义在 :root，深色定义在 html.dark。
+ * 深色模式下同时把 Element Plus 的暗色变量对齐到本项目调色板，
+ * 让 el-* 组件（表格 / 弹窗 / 下拉 / 表单）与自定义页面样式配色保持一致。
+ *
+ * 注意：本文件必须在 element-plus 的暗色变量文件之后引入，才能覆盖其默认值。
+ */
+
+:root {
+  /* 页面 / 面板 */
+  --app-bg: #f1f5f9;
+  --app-panel: #ffffff;
+  --app-panel-soft: #f5f7fa;
+  /* 边框 */
+  --app-border: #e2e8f0;
+  --app-border-strong: #cbd5e1;
+  /* 文字 */
+  --app-text: #1e293b;
+  --app-text-2: #64748b;
+  --app-text-3: #94a3b8;
+  /* 交互态 */
+  --app-hover: #f1f5f9;
+  --app-active-bg: #e6f7ff;
+  --app-active-text: #1890ff;
+  /* 布局区 */
+  --app-sidebar-bg: #ffffff;
+  --app-header-bg: #ffffff;
+  --app-shadow: rgba(15, 23, 42, 0.06);
+}
+
+html.dark {
+  --app-bg: #0b1220;
+  --app-panel: #131c2e;
+  --app-panel-soft: #16202f;
+  --app-border: rgba(148, 163, 184, 0.16);
+  --app-border-strong: rgba(148, 163, 184, 0.28);
+  --app-text: #e2e8f0;
+  --app-text-2: #94a3b8;
+  --app-text-3: #64748b;
+  --app-hover: rgba(148, 163, 184, 0.08);
+  --app-active-bg: rgba(56, 189, 248, 0.14);
+  --app-active-text: #7dd3fc;
+  --app-sidebar-bg: #0f1729;
+  --app-header-bg: #111c2e;
+  --app-shadow: rgba(0, 0, 0, 0.4);
+
+  /* 对齐 Element Plus 暗色变量到本项目调色板 */
+  --el-bg-color: #131c2e;
+  --el-bg-color-page: #0b1220;
+  --el-bg-color-overlay: #16202f;
+  --el-fill-color-blank: #131c2e;
+  --el-fill-color: #1a2740;
+  --el-fill-color-light: #16202f;
+  --el-fill-color-lighter: #131c2e;
+  --el-text-color-primary: #e2e8f0;
+  --el-text-color-regular: #cbd5e1;
+  --el-text-color-secondary: #94a3b8;
+  --el-text-color-placeholder: #64748b;
+  --el-text-color-disabled: #475569;
+  --el-border-color: rgba(148, 163, 184, 0.16);
+  --el-border-color-light: rgba(148, 163, 184, 0.12);
+  --el-border-color-lighter: rgba(148, 163, 184, 0.1);
+  --el-border-color-extra-light: rgba(148, 163, 184, 0.08);
+  --el-fill-color-dark: #0f1729;
+  --el-fill-color-darker: #0b1220;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--app-bg);
+  color: var(--app-text);
+}
+
+/* 主题切换过渡（避免过多动画，仅颜色渐变） */
+body,
+.layout-container,
+.aside,
+.header,
+.main-content {
+  transition: background-color 0.25s ease, color 0.25s ease, border-color 0.25s ease;
+}
+
+/*
+ * 全站列表页筛选区统一样式（基准：Agent 管理页）
+ * 未显式设宽度的下拉框统一 160px，避免个别页面下拉框过长；
+ * 页面内更具体的样式（如状态类 120px）仍可覆盖本规则。
+ */
+.search-bar .el-select {
+  width: 160px;
+  flex-shrink: 0;
+}

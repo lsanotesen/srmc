@@ -2,9 +2,14 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
+// Element Plus 暗色变量（需在 element-plus 基础样式之后、本项目 theme.css 之前引入）
+import 'element-plus/theme-chalk/dark/css-vars.css'
+// 本项目全站主题变量（浅色默认 / 深色 html.dark），会覆盖上面的 EP 暗色默认值
+import './styles/theme.css'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import router from './router'
 import App from './App.vue'
+import { useThemeStore } from './stores/theme'
 
 const app = createApp(App)
 const pinia = createPinia()
@@ -12,6 +17,9 @@ const pinia = createPinia()
 app.use(pinia)
 app.use(router)
 app.use(ElementPlus)
+
+// 初始化主题（从 localStorage 读取并应用到 html 根元素），保证首屏与用户选择一致
+useThemeStore()
 
 // 注册所有 Element Plus 图标
 for (const [key, component] of Object.entries(ElementPlusIconsVue)) {

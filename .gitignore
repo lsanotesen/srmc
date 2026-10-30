@@ -19,6 +19,9 @@ srmc-agent/srmc-agent
 *.tar
 /srmc-agent/agent_deploy/docker-compose
 
+# 监控数据源配置（不入库，模板见 monitoring.conf.example）
+monitoring.conf
+
 # 临时文件
 /t
 /t2

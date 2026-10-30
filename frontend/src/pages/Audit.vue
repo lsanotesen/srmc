@@ -5,15 +5,15 @@
     </div>
 
     <div class="filter-bar">
-      <el-select v-model="filters.project_id" placeholder="项目" clearable filterable @change="handleProjectChange">
+      <el-select v-model="filters.project_id" placeholder="项目" clearable filterable style="width: 160px" @change="handleProjectChange">
         <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
       </el-select>
-      <el-select v-model="filters.subsystem_id" placeholder="子系统" clearable filterable :disabled="!filters.project_id">
+      <el-select v-model="filters.subsystem_id" placeholder="子系统" clearable filterable style="width: 160px" :disabled="!filters.project_id">
         <el-option v-for="s in subsystems" :key="s.id" :label="s.subsystem_name" :value="s.id" />
       </el-select>
-      <el-input v-model="filters.service_name" placeholder="服务名称" clearable style="width: 160px" />
-      <el-input v-model="filters.username" placeholder="操作用户" clearable style="width: 140px" />
-      <el-select v-model="filters.action" placeholder="操作类型" clearable style="width: 130px">
+      <el-input v-model="filters.service_name" placeholder="服务名称" clearable style="width: 200px" />
+      <el-input v-model="filters.username" placeholder="操作用户" clearable style="width: 120px" />
+      <el-select v-model="filters.action" placeholder="操作类型" clearable style="width: 120px">
         <el-option label="启动" value="SERVICE_START" />
         <el-option label="停止" value="SERVICE_STOP" />
         <el-option label="重启" value="SERVICE_RESTART" />
@@ -34,11 +34,13 @@
         start-placeholder="开始时间"
         end-placeholder="结束时间"
         value-format="YYYY-MM-DD HH:mm:ss"
-        style="width: 360px"
+        style="width: 400px"
       />
       <el-button type="primary" @click="handleSearch">查询</el-button>
       <el-button @click="handleReset">重置</el-button>
     </div>
+
+    <ListStats :items="statsItems" />
 
     <el-table :data="logs" border v-loading="loading">
       <el-table-column prop="created_at" label="操作时间" width="180">
@@ -114,14 +116,25 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, watch } from 'vue'
+import { ref, reactive, onMounted, watch, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import axios from '@/utils/axios'
+import ListStats from '@/components/ListStats.vue'
 
 const route = useRoute()
 
 const logs = ref([])
 const total = ref(0)
+const totalAll = ref(0)
+const appliedFiltered = ref(false)
+const statsItems = computed(() => {
+  const items = [{ label: '日志总数', value: `${totalAll.value} 条` }]
+  if (appliedFiltered.value) {
+    items.push({ label: '筛选结果', value: `${total.value} 条` })
+  }
+  items.push({ label: '本页', value: `${logs.value.length} 条` })
+  return items
+})
 const currentPage = ref(1)
 const pageSize = ref(20)
 const loading = ref(false)
@@ -220,6 +233,7 @@ const buildParams = (page) => {
   if (filters.project_id) params.project_id = filters.project_id
   if (filters.subsystem_id) params.subsystem_id = filters.subsystem_id
   if (filters.service_id) params.service_id = filters.service_id
+  if (filters.service_name) params.service_name = filters.service_name.trim()
   if (filters.username) params.username = filters.username
   if (filters.action) params.action = filters.action
   if (filters.result) params.result = filters.result
@@ -234,17 +248,16 @@ async function loadLogs(page = 1) {
   loading.value = true
   try {
     const params = buildParams(page)
-    // 审计日志页面不过滤操作类型，显示所有操作
+    // 服务名称等服务端已支持下推，直接使用后端返回的分页与总数
     const response = await axios.get('/api/audit', { params })
     if (response.data.code === 0) {
-      let items = response.data.data.items || []
-      // 服务名称筛选：后端按 service_id 精确匹配，此处按名称做前端过滤（当前页）
-      if (filters.service_name) {
-        const kw = filters.service_name.trim()
-        items = items.filter(i => (i.service_name || '').includes(kw))
-      }
-      logs.value = items
-      total.value = response.data.data.total
+      const data = response.data.data || {}
+      logs.value = data.items || []
+      total.value = data.total
+      // 日志总数：数据范围内不受筛选影响的总量
+      totalAll.value = data.total_all ?? data.total
+      // 是否带筛选（page / limit 之外的参数即视为筛选条件）
+      appliedFiltered.value = Object.keys(params).some(key => key !== 'page' && key !== 'limit')
       currentPage.value = page
     }
   } finally {
@@ -321,15 +334,25 @@ onMounted(async () => {
 .page-header h2 {
   margin: 0;
   font-size: 20px;
-  color: #1e293b;
+  color: var(--app-text);
 }
 
+/* 筛选区样式与告警中心保持一致 */
 .filter-bar {
   display: flex;
-  gap: 10px;
-  margin-bottom: 20px;
   flex-wrap: wrap;
   align-items: center;
+  gap: 10px 16px;
+  background: var(--el-bg-color, #fff);
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border-radius: 8px;
+  padding: 14px 16px 12px;
+  margin-bottom: 16px;
+}
+
+/* 日期范围保持固定宽度，不被弹性拉伸 */
+.filter-bar :deep(.el-date-editor) {
+  flex: none;
 }
 
 .pagination {

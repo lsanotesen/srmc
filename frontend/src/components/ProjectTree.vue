@@ -112,7 +112,7 @@ onMounted(() => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: var(--app-panel);
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
@@ -122,13 +122,13 @@ onMounted(() => {
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  border-bottom: 1px solid #e8e8e8;
+  border-bottom: 1px solid var(--app-border);
 }
 
 .tree-title {
   font-weight: 600;
   font-size: 14px;
-  color: #333;
+  color: var(--app-text);
 }
 
 .tree-container {
@@ -162,15 +162,15 @@ onMounted(() => {
 
 .node-label {
   font-size: 13px;
-  color: #666;
+  color: var(--app-text-2);
 }
 
 :deep(.el-tree-node.is-current > .el-tree-node__content) {
-  background: #e6f7ff;
+  background: var(--app-active-bg);
   color: #1890ff;
 }
 
 :deep(.el-tree-node__content:hover) {
-  background: #f5f5f5;
+  background: var(--app-panel-soft);
 }
 </style>

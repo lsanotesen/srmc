@@ -296,8 +296,9 @@
               <el-option
                 v-for="u in allUsers"
                 :key="u.id"
-                :label="`${u.username}（${u.email || '无邮箱'}）`"
+                :label="`${u.username}（${u.department_name || '未分配部门'}）${memberUserIdSet.has(u.id) ? ' · 已加入' : ''}`"
                 :value="u.id"
+                :disabled="memberUserIdSet.has(u.id)"
               />
             </el-select>
             <el-select v-model="addMemberForm.role" style="width: 160px;">
@@ -309,96 +310,76 @@
 
         <!-- 批量添加 Tab -->
         <el-tab-pane label="批量添加" name="batch">
-          <el-tabs v-model="batchTab" tab-position="left" class="batch-subtabs">
-            <!-- 按部门批量添加 -->
-            <el-tab-pane label="按部门" name="department">
-              <div class="batch-form">
-                <el-form label-width="120px" inline>
-                  <el-form-item label="选择部门">
-                    <el-select
-                      v-model="batchByDeptForm.department_id"
-                      placeholder="请选择部门"
-                      filterable
-                      style="width: 320px;"
-                    >
-                      <el-option
-                        v-for="d in allDepartmentsFlat"
-                        :key="d.id"
-                        :label="d.name"
-                        :value="d.id"
-                      />
-                    </el-select>
-                  </el-form-item>
-                  <el-form-item label="项目角色">
-                    <el-select v-model="batchByDeptForm.role" style="width: 200px;">
-                      <el-option v-for="r in projectRoles" :key="r.value" :label="r.label" :value="r.value" />
-                    </el-select>
-                  </el-form-item>
-                  <el-form-item>
-                    <el-button
-                      type="primary"
-                      @click="batchAddByDepartment"
-                      :disabled="!batchByDeptForm.department_id"
-                    >
-                      批量添加
-                    </el-button>
-                  </el-form-item>
-                </el-form>
-                <el-alert
-                  v-if="batchByDeptResult"
-                  :title="`批量添加完成：新增 ${batchByDeptResult.added} 人，跳过 ${batchByDeptResult.skipped} 人（共 ${batchByDeptResult.total} 人）`"
-                  type="success"
-                  :closable="false"
-                  show-icon
-                  style="margin-top: 12px;"
-                />
-              </div>
-            </el-tab-pane>
+          <div class="batch-form">
+            <el-form label-width="120px" inline>
+              <el-form-item label="选择部门">
+                <el-select
+                  v-model="batchByDeptForm.department_id"
+                  placeholder="请选择部门"
+                  filterable
+                  style="width: 320px;"
+                  @change="loadBatchDeptUsers"
+                >
+                  <el-option
+                    v-for="d in allDepartmentsFlat"
+                    :key="d.id"
+                    :label="d.name"
+                    :value="d.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="项目角色">
+                <el-select v-model="batchByDeptForm.role" style="width: 200px;">
+                  <el-option v-for="r in projectRoles" :key="r.value" :label="r.label" :value="r.value" />
+                </el-select>
+              </el-form-item>
+            </el-form>
 
-            <!-- 按系统角色批量添加 -->
-            <el-tab-pane label="按系统角色" name="role">
-              <div class="batch-form">
-                <el-form label-width="120px" inline>
-                  <el-form-item label="系统角色">
-                    <el-select
-                      v-model="batchByRoleForm.role_id"
-                      placeholder="请选择系统角色"
-                      style="width: 240px;"
-                    >
-                      <el-option
-                        v-for="r in allRoles"
-                        :key="r.id"
-                        :label="r.name"
-                        :value="r.id"
-                      />
-                    </el-select>
-                  </el-form-item>
-                  <el-form-item label="项目角色">
-                    <el-select v-model="batchByRoleForm.project_role" style="width: 200px;">
-                      <el-option v-for="r in projectRoles" :key="r.value" :label="r.label" :value="r.value" />
-                    </el-select>
-                  </el-form-item>
-                  <el-form-item>
-                    <el-button
-                      type="primary"
-                      @click="batchAddByRole"
-                      :disabled="!batchByRoleForm.role_id"
-                    >
-                      批量添加
-                    </el-button>
-                  </el-form-item>
-                </el-form>
-                <el-alert
-                  v-if="batchByRoleResult"
-                  :title="`批量添加完成：新增 ${batchByRoleResult.added} 人，跳过 ${batchByRoleResult.skipped} 人（共 ${batchByRoleResult.total} 人）`"
-                  type="success"
-                  :closable="false"
-                  show-icon
-                  style="margin-top: 12px;"
-                />
-              </div>
-            </el-tab-pane>
-          </el-tabs>
+            <div class="member-toolbar" style="margin: 4px 0 8px;">
+              <el-button size="small" @click="selectAllDeptUsers" :disabled="!selectableDeptUsers.length">全选</el-button>
+              <el-button size="small" @click="clearDeptUserSelection" :disabled="!selectedDeptUserIds.length">取消全选</el-button>
+              <span style="margin-left: 8px; color: var(--app-text-3); font-size: 12px;">
+                已选 {{ selectedDeptUserIds.length }} / {{ selectableDeptUsers.length }}
+              </span>
+              <el-button
+                type="primary"
+                size="small"
+                style="margin-left: auto;"
+                @click="batchAddSelectedMembers"
+                :disabled="!selectedDeptUserIds.length"
+              >
+                批量添加
+              </el-button>
+            </div>
+
+            <el-table
+              ref="deptUserTable"
+              :data="batchDeptUsers"
+              border
+              size="small"
+              max-height="240"
+              @selection-change="onDeptUserSelectionChange"
+            >
+              <el-table-column type="selection" width="45" :selectable="isDeptUserSelectable" />
+              <el-table-column prop="username" label="用户名" min-width="120" />
+              <el-table-column prop="email" label="邮箱" min-width="180" />
+              <el-table-column label="状态" width="100">
+                <template #default="scope">
+                  <el-tag v-if="scope.row.is_member" type="info" size="small">已加入</el-tag>
+                  <el-tag v-else type="success" size="small">可添加</el-tag>
+                </template>
+              </el-table-column>
+            </el-table>
+
+            <el-alert
+              v-if="batchByDeptResult"
+              :title="`批量添加完成：新增 ${batchByDeptResult.added} 人，跳过 ${batchByDeptResult.skipped} 人（共 ${batchByDeptResult.total} 人）`"
+              type="success"
+              :closable="false"
+              show-icon
+              style="margin-top: 12px;"
+            />
+          </div>
         </el-tab-pane>
       </el-tabs>
 
@@ -571,7 +552,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import axios from '@/utils/axios'
@@ -648,16 +629,23 @@ const projectRoles = [
   { value: 'Viewer', label: 'Viewer（只读）' },
 ]
 const addMemberForm = reactive({ user_id: null, role: 'Viewer' })
+// 项目所有者（Owner）/ 管理员（Manager）不允许通过批量添加再次加入（与后端 PROTECTED_PROJECT_ROLES 一致）
+const PROTECTED_PROJECT_ROLES = ['Owner', 'Manager']
 
 // ===== 批量添加相关 =====
 const memberTab = ref('single')
-const batchTab = ref('department')
 const allDepartmentsFlat = ref([])
-const allRoles = ref([])
 const batchByDeptForm = reactive({ department_id: null, role: 'Viewer' })
-const batchByRoleForm = reactive({ role_id: null, project_role: 'Viewer' })
 const batchByDeptResult = ref(null)
-const batchByRoleResult = ref(null)
+const deptUserTable = ref(null)
+const batchDeptUsers = ref([])
+const selectedDeptUserIds = ref([])
+// 已加入当前项目的用户ID集合：用于单个添加下拉框禁用/标注，避免重复添加
+const memberUserIdSet = computed(() => new Set(members.value.map(m => m.user_id)))
+// 批量列表中可勾选的用户（已是成员的、以及所有者/管理员均不可勾选）
+const selectableDeptUsers = computed(() =>
+  batchDeptUsers.value.filter(u => !u.is_member && !PROTECTED_PROJECT_ROLES.includes(u.project_role))
+)
 
 // ===== 项目共享管理 =====
 const showShareDialog = ref(false)
@@ -1063,16 +1051,14 @@ async function openMemberDialog(project) {
   memberProject.value = project
   showMemberDialog.value = true
   memberTab.value = 'single'
-  batchTab.value = 'department'
   addMemberForm.user_id = null
   addMemberForm.role = 'Viewer'
   batchByDeptForm.department_id = null
   batchByDeptForm.role = 'Viewer'
-  batchByRoleForm.role_id = null
-  batchByRoleForm.project_role = 'Viewer'
   batchByDeptResult.value = null
-  batchByRoleResult.value = null
-  await Promise.all([loadAllUsers(), loadMembers(project.id), loadDepartmentsFlat(), loadRoles()])
+  batchDeptUsers.value = []
+  selectedDeptUserIds.value = []
+  await Promise.all([loadAllUsers(), loadMembers(project.id), loadDepartmentsFlat()])
 }
 
 async function addMember() {
@@ -1091,7 +1077,7 @@ async function addMember() {
       ElMessage.error(response.data.message || '添加失败')
     }
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '添加失败')
+    ElMessage.error(error.response?.data?.message || error.response?.data?.detail || '添加失败')
   }
 }
 
@@ -1109,7 +1095,7 @@ async function changeMemberRole(row) {
       await loadMembers(memberProject.value.id)
     }
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '更新失败')
+    ElMessage.error(error.response?.data?.message || error.response?.data?.detail || '更新失败')
     await loadMembers(memberProject.value.id)
   }
 }
@@ -1132,7 +1118,7 @@ async function removeMember(row) {
       ElMessage.error(response.data.message || '移除失败')
     }
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || '移除失败')
+    ElMessage.error(error.response?.data?.message || error.response?.data?.detail || '移除失败')
   }
 }
 
@@ -1148,24 +1134,52 @@ async function loadDepartmentsFlat() {
   }
 }
 
-async function loadRoles() {
+async function loadBatchDeptUsers() {
+  batchByDeptResult.value = null
+  selectedDeptUserIds.value = []
+  batchDeptUsers.value = []
+  if (deptUserTable.value) deptUserTable.value.clearSelection()
+  if (!memberProject.value || !batchByDeptForm.department_id) return
   try {
-    const response = await axios.get('/api/rbac/roles')
+    const response = await axios.get(
+      `/api/projects/${memberProject.value.id}/members/department-users`,
+      { params: { department_id: batchByDeptForm.department_id } }
+    )
     if (response.data.code === 0) {
-      allRoles.value = response.data.data || []
+      batchDeptUsers.value = response.data.data || []
+      await nextTick()
+      if (deptUserTable.value) deptUserTable.value.clearSelection()
     }
   } catch (error) {
-    console.error('加载角色列表失败:', error)
+    ElMessage.error(error.response?.data?.message || error.response?.data?.detail || '加载部门用户失败')
   }
 }
 
-async function batchAddByDepartment() {
-  if (!memberProject.value || !batchByDeptForm.department_id) return
+// 已是项目成员的、以及项目所有者/管理员均不可勾选（避免重复添加与权限越级）
+function isDeptUserSelectable(row) {
+  return !row.is_member && !PROTECTED_PROJECT_ROLES.includes(row.project_role)
+}
+
+function onDeptUserSelectionChange(rows) {
+  selectedDeptUserIds.value = rows.map(r => r.id)
+}
+
+function selectAllDeptUsers() {
+  if (!deptUserTable.value) return
+  selectableDeptUsers.value.forEach(u => deptUserTable.value.toggleRowSelection(u, true))
+}
+
+function clearDeptUserSelection() {
+  if (deptUserTable.value) deptUserTable.value.clearSelection()
+}
+
+async function batchAddSelectedMembers() {
+  if (!memberProject.value || !selectedDeptUserIds.value.length) return
   try {
     const response = await axios.post(
-      `/api/projects/${memberProject.value.id}/members/batch-by-department`,
+      `/api/projects/${memberProject.value.id}/members/batch`,
       {
-        department_id: batchByDeptForm.department_id,
+        user_ids: selectedDeptUserIds.value,
         role: batchByDeptForm.role,
       }
     )
@@ -1173,33 +1187,12 @@ async function batchAddByDepartment() {
       batchByDeptResult.value = response.data.data
       ElMessage.success(response.data.message || '批量添加成功')
       await loadMembers(memberProject.value.id)
+      await loadBatchDeptUsers()
     } else {
       ElMessage.error(response.data.message || '批量添加失败')
     }
   } catch (error) {
-    ElMessage.error(error.response?.data?.detail || error.response?.data?.message || '批量添加失败')
-  }
-}
-
-async function batchAddByRole() {
-  if (!memberProject.value || !batchByRoleForm.role_id) return
-  try {
-    const response = await axios.post(
-      `/api/projects/${memberProject.value.id}/members/batch-by-role`,
-      {
-        role_id: batchByRoleForm.role_id,
-        project_role: batchByRoleForm.project_role,
-      }
-    )
-    if (response.data.code === 0) {
-      batchByRoleResult.value = response.data.data
-      ElMessage.success(response.data.message || '批量添加成功')
-      await loadMembers(memberProject.value.id)
-    } else {
-      ElMessage.error(response.data.message || '批量添加失败')
-    }
-  } catch (error) {
-    ElMessage.error(error.response?.data?.detail || error.response?.data?.message || '批量添加失败')
+    ElMessage.error(error.response?.data?.message || error.response?.data?.detail || '批量添加失败')
   }
 }
 
@@ -1389,7 +1382,7 @@ onMounted(() => {
 <style scoped>
 .projects-page {
   padding: 24px;
-  background-color: #f1f5f9;
+  background-color: var(--app-bg);
   min-height: 100vh;
 }
 
@@ -1399,7 +1392,7 @@ onMounted(() => {
   align-items: center;
   margin-bottom: 24px;
   padding: 20px 24px;
-  background: #ffffff;
+  background: var(--app-panel);
   border-radius: 12px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
@@ -1408,13 +1401,13 @@ onMounted(() => {
   h1 {
     font-size: 24px;
     font-weight: 600;
-    color: #1e293b;
+    color: var(--app-text);
     margin: 0 0 8px 0;
   }
   
   .subtitle {
     font-size: 14px;
-    color: #64748b;
+    color: var(--app-text-2);
     margin: 0;
   }
 }
@@ -1425,7 +1418,7 @@ onMounted(() => {
 }
 
 .table-card {
-  background: #ffffff;
+  background: var(--app-panel);
   border-radius: 12px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
   overflow: hidden;
@@ -1436,7 +1429,7 @@ onMounted(() => {
   justify-content: space-between;
   align-items: center;
   padding: 20px 24px;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--app-border);
   
   .header-left {
     display: flex;
@@ -1446,12 +1439,12 @@ onMounted(() => {
     .table-title {
       font-size: 16px;
       font-weight: 600;
-      color: #1e293b;
+      color: var(--app-text);
     }
     
     .table-count {
       font-size: 14px;
-      color: #64748b;
+      color: var(--app-text-2);
     }
   }
   
@@ -1468,7 +1461,7 @@ onMounted(() => {
 }
 
 .project-table {
-  --el-table-border-color: #e2e8f0;
+  --el-table-border-color: var(--app-border);
   --el-table-row-hover-bg-color: #f8fafc;
   
   tr {
@@ -1483,16 +1476,16 @@ onMounted(() => {
 .name-cell {
   .name-text {
     font-weight: 500;
-    color: #1e293b;
+    color: var(--app-text);
   }
 }
 
 .empty-text {
-  color: #94a3b8;
+  color: var(--app-text-3);
 }
 
 .description-text {
-  color: #475569;
+  color: var(--app-text-2);
   line-height: 1.5;
 }
 
@@ -1509,7 +1502,7 @@ onMounted(() => {
   align-items: center;
   margin-bottom: 16px;
   padding: 12px;
-  background: #f8fafc;
+  background: var(--app-panel-soft);
   border-radius: 8px;
   flex-wrap: wrap;
 }
@@ -1546,7 +1539,7 @@ onMounted(() => {
 
 .pagination-wrapper {
   padding: 20px 24px;
-  border-top: 1px solid #e2e8f0;
+  border-top: 1px solid var(--app-border);
   display: flex;
   justify-content: flex-end;
 }
@@ -1563,7 +1556,7 @@ onMounted(() => {
 .detail-name {
   font-weight: 600;
   font-size: 16px;
-  color: #1e293b;
+  color: var(--app-text);
 }
 
 .resource-counts {
@@ -1580,7 +1573,7 @@ onMounted(() => {
 .resource-section-title {
   font-size: 14px;
   font-weight: 600;
-  color: #334155;
+  color: var(--app-text);
   margin-bottom: 10px;
   padding-left: 8px;
   border-left: 3px solid #1890ff;
@@ -1591,8 +1584,8 @@ onMounted(() => {
   align-items: center;
   gap: 24px;
   padding: 14px 16px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  background: var(--app-panel-soft);
+  border: 1px solid var(--app-border);
   border-radius: 8px;
 }
 
@@ -1604,19 +1597,19 @@ onMounted(() => {
 
 .stat-label {
   font-size: 13px;
-  color: #64748b;
+  color: var(--app-text-2);
 }
 
 .stat-value {
   font-size: 20px;
   font-weight: 600;
-  color: #1e293b;
+  color: var(--app-text);
 }
 
 .resource-hint {
   margin-top: 8px;
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--app-text-3);
 }
 
 .import-content {
@@ -1624,7 +1617,7 @@ onMounted(() => {
 }
 
 .upload-area {
-  border: 2px dashed #cbd5e1;
+  border: 2px dashed var(--app-border-strong);
   border-radius: 12px;
   padding: 40px;
   text-align: center;
@@ -1643,13 +1636,13 @@ onMounted(() => {
   .upload-text {
     font-size: 16px;
     font-weight: 500;
-    color: #334155;
+    color: var(--app-text);
     margin: 0 0 8px 0;
   }
   
   .upload-hint {
     font-size: 14px;
-    color: #94a3b8;
+    color: var(--app-text-3);
     margin: 0;
   }
 }
@@ -1670,7 +1663,7 @@ onMounted(() => {
   .file-name {
     flex: 1;
     font-size: 14px;
-    color: #1e293b;
+    color: var(--app-text);
   }
 }
 

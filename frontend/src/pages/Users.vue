@@ -7,7 +7,9 @@
         新增用户
       </el-button>
     </div>
-    
+
+    <ListStats :items="statsItems" />
+
     <el-table :data="users" border>
       <el-table-column prop="username" label="用户名" width="120" />
       <el-table-column prop="job_title" label="姓名" width="120">
@@ -97,10 +99,12 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import axios from '@/utils/axios'
 import { usePermission } from '@/composables/usePermission'
+import ListStats from '@/components/ListStats.vue'
 
 const { hasPermission } = usePermission()
 
 const users = ref([])
+const statsItems = ref([])
 const organizations = ref([])
 const allDepartments = ref([])
 const showAddDialog = ref(false)
@@ -187,6 +191,8 @@ async function loadUsers() {
     const response = await axios.get('/api/users')
     if (response.data.code === 0) {
       users.value = response.data.data
+      // 统计：用户总数（受数据范围限制，接口一次性返回全部，无分页与筛选）
+      statsItems.value = [{ label: '用户总数', value: `${users.value.length} 个` }]
     }
   } catch (error) {
     ElMessage.error('加载用户列表失败')

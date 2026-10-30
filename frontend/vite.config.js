@@ -51,6 +51,10 @@ export default defineConfig({
       '/api': {
         target: 'http://srmc-backend:8000',
         changeOrigin: true,
+        // 开启 WebSocket 升级代理：实时日志 WS 路径为 /api/services/{id}/log/ws，
+        // 无法用固定前缀单独匹配（旧规则的 :service_id 被当作字面前缀，永不命中），
+        // 故在通用 /api 代理上启用 ws（http 目标同样支持协议升级）
+        ws: true,
         // 长连接复用，避免快速点击时连接池耗尽
         agent: new http.Agent({ 
           keepAlive: true, 
@@ -59,11 +63,6 @@ export default defineConfig({
         })
       },
       '/api/shell/ws': {
-        target: 'ws://srmc-backend:8000',
-        ws: true,
-        changeOrigin: true
-      },
-      '/api/services/:service_id/log/ws': {
         target: 'ws://srmc-backend:8000',
         ws: true,
         changeOrigin: true

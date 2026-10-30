@@ -14,6 +14,8 @@
       <el-button @click="resetFilters">重置</el-button>
     </div>
 
+    <ListStats :items="statsItems" />
+
     <div class="table-wrapper">
       <el-table :data="serviceGroups" border>
         <el-table-column type="index" label="序号" width="80" />
@@ -72,8 +74,10 @@
 import { ref, reactive, onMounted } from 'vue';
 import { ElMessage } from 'element-plus';
 import axios from '@/utils/axios';
+import ListStats from '@/components/ListStats.vue';
 
 const serviceGroups = ref([]);
+const statsItems = ref([]);
 const pagination = reactive({
   page: 1,
   size: 10,
@@ -103,6 +107,15 @@ const loadServiceGroups = async () => {
     if (response.data.code === 0) {
       serviceGroups.value = response.data.data.items;
       pagination.total = response.data.data.total;
+
+      // 统计：程序分类总数（不受筛选影响）/ 筛选结果 / 本页条数
+      const totalAll = response.data.data.total_all ?? pagination.total;
+      const items = [{ label: '程序分类总数', value: `${totalAll} 个` }];
+      if (filters.keyword.trim()) {
+        items.push({ label: '筛选结果', value: `${pagination.total} 个` });
+      }
+      items.push({ label: '本页', value: `${serviceGroups.value.length} 条` });
+      statsItems.value = items;
     }
   } catch (error) {
     ElMessage.error('加载程序分类列表失败');

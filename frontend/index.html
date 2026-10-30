@@ -5,6 +5,15 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>服务资源管理中心 - SRMC</title>
+    <script>
+      // 首屏防闪烁：在应用脚本执行前先按持久化选择设置主题
+      try {
+        if (localStorage.getItem('srmc-theme') === 'dark') {
+          document.documentElement.classList.add('dark')
+          document.documentElement.setAttribute('data-theme', 'dark')
+        }
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="app"></div>

@@ -25,13 +25,17 @@ async def list_subsystems(
     if project_id:
         assert_project_access(db, user, project_id)
 
-    query = db.query(Subsystem, Project).outerjoin(Project, Subsystem.project_id == Project.id)
+    # 先确定数据范围内的基础集合（始终收敛到可见项目，不受项目/关键字筛选影响）
+    scope_query = db.query(Subsystem, Project).outerjoin(Project, Subsystem.project_id == Project.id)
+    visible_project_ids = get_visible_project_ids(db, user)
+    if visible_project_ids is not None:
+        scope_query = scope_query.filter(Subsystem.project_id.in_(visible_project_ids))
+    # total_all：数据范围内（可见项目下）的子系统总数
+    total_all = scope_query.count()
+
+    query = scope_query
     if project_id:
         query = query.filter(Subsystem.project_id == project_id)
-    else:
-        visible_project_ids = get_visible_project_ids(db, user)
-        if visible_project_ids is not None:
-            query = query.filter(Subsystem.project_id.in_(visible_project_ids))
     if keyword:
         query = query.filter(
             (Subsystem.subsystem_name.like(f"%{keyword}%")) |
@@ -51,6 +55,7 @@ async def list_subsystems(
     return ResponseModel(data={
         "items": items,
         "total": total,
+        "total_all": total_all,
         "page": page,
         "size": size
     })

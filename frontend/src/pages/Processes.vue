@@ -717,7 +717,7 @@ onMounted(async () => {
 
 .project-tree {
   width: 280px;
-  border-right: 1px solid #e2e8f0;
+  border-right: 1px solid var(--app-border);
   padding-right: 20px;
   height: calc(100vh - 220px);
   overflow-y: auto;
@@ -735,7 +735,7 @@ onMounted(async () => {
 
 .node-icon {
   font-size: 14px;
-  color: #94a3b8;
+  color: var(--app-text-3);
 }
 
 .node-icon.file-icon {
@@ -764,7 +764,7 @@ onMounted(async () => {
 }
 
 .lang-icon {
-  color: #64748b;
+  color: var(--app-text-2);
 }
 
 .status-badge {

@@ -24,7 +24,10 @@ _BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACKAGE_ROOT = os.environ.get("SRMC_PACKAGE_DIR", os.path.join(_BACKEND_ROOT, "data", "agent-packages"))
 TEMPLATE_DIR = os.environ.get("SRMC_TEMPLATE_DIR", os.path.join(_BACKEND_ROOT, "agent_templates"))
 
-REGISTER_WAIT_SECONDS = 60
+# 服务启动后等待 Agent 注册心跳：低配机器/跨网段主机启动与首包上报较慢，
+# 60s 容易误判失败，放宽到 180s；等待期间每 15s 刷新一次进度文案
+REGISTER_WAIT_SECONDS = 180
+REGISTER_PROGRESS_INTERVAL = 15
 
 
 class TaskDeletedError(Exception):
@@ -556,7 +559,7 @@ def _deploy_docker(db, task_id, item_id, task, item, package, deploy_dir, ssh, p
 
         # 8. 等待 Agent 注册
         update_item_progress(db, task_id, item_id, step="等待 Agent 注册", progress=95)
-        agent_uuid = wait_registration(db, item.agent_ip or host)
+        agent_uuid = wait_registration_with_progress(db, task_id, item_id, item.agent_ip or host)
         if not agent_uuid:
             update_item_progress(db, task_id, item_id, step="容器已启动，Agent 未在 %ds 内注册" % REGISTER_WAIT_SECONDS,
                                  status="failed", progress=100,
@@ -674,7 +677,7 @@ def _deploy_binary(db, task_id, item_id, task, item, package, deploy_dir, ssh, p
 
         # 8. 等待注册
         update_item_progress(db, task_id, item_id, step="等待 Agent 注册", progress=95)
-        agent_uuid = wait_registration(db, item.agent_ip or host)
+        agent_uuid = wait_registration_with_progress(db, task_id, item_id, item.agent_ip or host)
         if not agent_uuid:
             update_item_progress(db, task_id, item_id, step="服务已启动，Agent 未在 %ds 内注册" % REGISTER_WAIT_SECONDS,
                                  status="failed", progress=100,
@@ -795,6 +798,20 @@ def put_content(sftp, content: str, remote_path: str):
         sftp.chmod(remote_path, 0o644)
     except IOError:
         pass
+
+
+def wait_registration_with_progress(db: Session, task_id: str, item_id: int, agent_ip: str) -> str:
+    """等待注册，期间按间隔刷新进度文案，避免长时间停在 95% 让人误以为卡死。"""
+    waited = 0
+    while waited < REGISTER_WAIT_SECONDS:
+        chunk = min(REGISTER_PROGRESS_INTERVAL, REGISTER_WAIT_SECONDS - waited)
+        agent_uuid = wait_registration(db, agent_ip, timeout=chunk)
+        if agent_uuid:
+            return agent_uuid
+        waited += chunk
+        update_item_progress(db, task_id, item_id,
+                             step="等待 Agent 注册（已等待 %ds）" % waited, progress=95)
+    return ""
 
 
 def wait_registration(db: Session, agent_ip: str, timeout: int = REGISTER_WAIT_SECONDS) -> str:

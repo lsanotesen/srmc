@@ -17,6 +17,8 @@
       <el-button @click="resetFilters">重置</el-button>
     </div>
 
+    <ListStats :items="statsItems" />
+
     <div class="table-wrapper">
       <el-table :data="subsystems" border>
         <el-table-column type="index" label="序号" width="80" />
@@ -88,10 +90,12 @@ import { ref, reactive, onMounted } from 'vue';
 import { ElMessage } from 'element-plus';
 import axios from '@/utils/axios';
 import { usePermission } from '@/composables/usePermission';
+import ListStats from '@/components/ListStats.vue';
 
 const { hasPermission } = usePermission();
 
 const subsystems = ref([]);
+const statsItems = ref([]);
 const projects = ref([]);
 const serviceGroups = ref([]);
 const pagination = reactive({
@@ -129,6 +133,15 @@ const loadSubsystems = async () => {
     if (response.data.code === 0) {
       subsystems.value = response.data.data.items;
       pagination.total = response.data.data.total;
+
+      // 统计：子系统总数（可见范围内，不受筛选影响）/ 筛选结果 / 本页条数
+      const totalAll = response.data.data.total_all ?? pagination.total;
+      const items = [{ label: '子系统总数', value: `${totalAll} 个` }];
+      if (filters.project_id || filters.keyword.trim()) {
+        items.push({ label: '筛选结果', value: `${pagination.total} 个` });
+      }
+      items.push({ label: '本页', value: `${subsystems.value.length} 条` });
+      statsItems.value = items;
     }
   } catch (error) {
     ElMessage.error('加载子系统列表失败');
@@ -309,16 +322,16 @@ onMounted(() => {
 }
 
 .project-select {
-  width: 200px;
+  width: 160px;
 }
 
 .search-input {
-  width: 300px;
+  width: 200px;
 }
 
 .form-tip {
   font-size: 12px;
-  color: #999;
+  color: var(--app-text-3);
   margin-top: 4px;
 }
 

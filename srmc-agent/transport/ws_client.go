@@ -6,8 +6,8 @@ import (
 	"github.com/gorilla/websocket"
 	"log"
 	"net/url"
-	"srmc-agent/config"
 	"srmc-agent/collector"
+	"srmc-agent/config"
 	"srmc-agent/manager"
 	"sync"
 	"time"
@@ -30,33 +30,34 @@ func toString(v interface{}) string {
 }
 
 type Registration struct {
-	UUID        string `json:"uuid"`
-	Hostname    string `json:"hostname"`
-	IP          string `json:"ip"`
-	OS          string `json:"os"`
-	Kernel      string `json:"kernel"`
-	Arch        string `json:"arch"`
-	CPUModel    string `json:"cpu_model"`
-	CPUCores    int    `json:"cpu_cores"`
-	MemoryTotal uint64 `json:"memory_total"`
-	AgentVersion string `json:"agent_version"`
+	UUID         string   `json:"uuid"`
+	Hostname     string   `json:"hostname"`
+	IP           string   `json:"ip"`
+	OS           string   `json:"os"`
+	OSDistro     string   `json:"os_distro"`
+	Kernel       string   `json:"kernel"`
+	Arch         string   `json:"arch"`
+	CPUModel     string   `json:"cpu_model"`
+	CPUCores     int      `json:"cpu_cores"`
+	MemoryTotal  uint64   `json:"memory_total"`
+	AgentVersion string   `json:"agent_version"`
 	Capabilities []string `json:"capabilities"`
-	Tags        []string `json:"tags"`
+	Tags         []string `json:"tags"`
 	// 部署元信息（供后端批量更新下发时使用）
-	DeployMethod  string `json:"deploy_method"`
-	DeployDir     string `json:"deploy_dir"`
-	ComposeFile   string `json:"compose_file"`
-	BinaryPath    string `json:"binary_path"`
-	ServiceName   string `json:"service_name"`
-	UpdatesDir    string `json:"updates_dir"`
-	BackupDir     string `json:"backup_dir"`
+	DeployMethod string `json:"deploy_method"`
+	DeployDir    string `json:"deploy_dir"`
+	ComposeFile  string `json:"compose_file"`
+	BinaryPath   string `json:"binary_path"`
+	ServiceName  string `json:"service_name"`
+	UpdatesDir   string `json:"updates_dir"`
+	BackupDir    string `json:"backup_dir"`
 }
 
 type Heartbeat struct {
-	System          collector.SystemMetrics      `json:"system"`
-	Services        []collector.ServiceStatus    `json:"services"`
-	DockerContainers []ContainerStatus            `json:"docker_containers"`
-	ComposeProjects []ComposeStatus               `json:"compose_projects"`
+	System           collector.SystemMetrics   `json:"system"`
+	Services         []collector.ServiceStatus `json:"services"`
+	DockerContainers []ContainerStatus         `json:"docker_containers"`
+	ComposeProjects  []ComposeStatus           `json:"compose_projects"`
 }
 
 type ContainerStatus struct {
@@ -152,6 +153,8 @@ func Connect() error {
 
 func readLoop() {
 	defer reconnect()
+	// 连接断开时终止所有活跃日志流，避免 docker logs -f / docker-compose logs -f 子进程残留
+	defer manager.StopAllLogStreams()
 
 	for {
 		_, message, err := conn.ReadMessage()
@@ -191,7 +194,7 @@ func handleMessage(msg Message) {
 
 func handlePullServices(msg Message) {
 	log.Printf("Received pull_services command, requesting service list from server")
-	
+
 	pullMsg := Message{
 		Type:      "pull_services",
 		RequestID: msg.RequestID,
@@ -202,44 +205,44 @@ func handlePullServices(msg Message) {
 
 func handleServices(msg Message) {
 	log.Printf("Received services list from server")
-	
+
 	data := msg.Data
 	servicesData, ok := data["services"].([]interface{})
 	if !ok {
 		log.Printf("No services data found")
 		return
 	}
-	
+
 	var serviceConfigs []collector.ServiceConfig
 	for _, svcData := range servicesData {
 		svcMap, ok := svcData.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		
+
 		port := 0
 		if p, ok := svcMap["port"].(float64); ok {
 			port = int(p)
 		}
-		
+
 		serviceConfigs = append(serviceConfigs, collector.ServiceConfig{
-		ServiceID:   toString(svcMap["service_id"]),
-		Name:        toString(svcMap["name"]),
-		Username:    toString(svcMap["username"]),
-		DeployType:  toString(svcMap["deploy_type"]),
-		PIDFile:     toString(svcMap["pid_file"]),
-		Port:        port,
-		HealthURL:   toString(svcMap["health_url"]),
-		StartCmd:    toString(svcMap["start_cmd"]),
-		StopCmd:     toString(svcMap["stop_cmd"]),
-		RestartCmd:  toString(svcMap["restart_cmd"]),
-		LogPath:     toString(svcMap["log_path"]),
-		DockerName:  toString(svcMap["docker_name"]),
-		ImageName:   toString(svcMap["image_name"]),
-		ComposePath: toString(svcMap["compose_path"]),
-	})
+			ServiceID:   toString(svcMap["service_id"]),
+			Name:        toString(svcMap["name"]),
+			Username:    toString(svcMap["username"]),
+			DeployType:  toString(svcMap["deploy_type"]),
+			PIDFile:     toString(svcMap["pid_file"]),
+			Port:        port,
+			HealthURL:   toString(svcMap["health_url"]),
+			StartCmd:    toString(svcMap["start_cmd"]),
+			StopCmd:     toString(svcMap["stop_cmd"]),
+			RestartCmd:  toString(svcMap["restart_cmd"]),
+			LogPath:     toString(svcMap["log_path"]),
+			DockerName:  toString(svcMap["docker_name"]),
+			ImageName:   toString(svcMap["image_name"]),
+			ComposePath: toString(svcMap["compose_path"]),
+		})
 	}
-	
+
 	collector.UpdateServices(serviceConfigs)
 	log.Printf("Updated %d services", len(serviceConfigs))
 }
@@ -307,6 +310,8 @@ func handleCommand(msg Message) {
 		}
 		SendMessage(response)
 	case "logs":
+		// 同一服务重复订阅时先终止旧流，避免多条 docker logs -f / docker-compose logs -f 进程堆积
+		manager.StopLogStreams(serviceID)
 		go func() {
 			err := manager.StreamLogs(serviceConfig, func(line manager.LogLine) {
 				logMsg := Message{
@@ -334,6 +339,9 @@ func handleCommand(msg Message) {
 				SendMessage(response)
 			}
 		}()
+	case "logs_stop":
+		// WebSocket 断开或前端停止实时日志时，终止对应服务的日志流进程
+		manager.StopLogStreams(serviceID)
 	default:
 		response := Message{
 			Type:      "command_result",
@@ -374,15 +382,15 @@ func handleUpdate(msg Message) {
 		ContainerName: toString(msg.Data["container_name"]),
 		ComposeFile:   toString(msg.Data["compose_file"]),
 		// binary
-		BinaryTargetPath:      toString(msg.Data["binary_target_path"]),
-		BinaryServiceName:     toString(msg.Data["binary_service_name"]),
-		BackupBeforeUpdate:     toBool(msg.Data["backup_before_update"]),
-		AutoStopOld:            toBool(msg.Data["auto_stop_old"]),
-		AutoStartAfter:         toBool(msg.Data["auto_start_after"]),
+		BinaryTargetPath:   toString(msg.Data["binary_target_path"]),
+		BinaryServiceName:  toString(msg.Data["binary_service_name"]),
+		BackupBeforeUpdate: toBool(msg.Data["backup_before_update"]),
+		AutoStopOld:        toBool(msg.Data["auto_stop_old"]),
+		AutoStartAfter:     toBool(msg.Data["auto_start_after"]),
 		// 可选：同步配置文件
-		ComposeFileContent:  toString(msg.Data["compose_file_content"]),
-		ConfigFileContent:   toString(msg.Data["config_file_content"]),
-		ServiceFileContent:  toString(msg.Data["service_file_content"]),
+		ComposeFileContent: toString(msg.Data["compose_file_content"]),
+		ConfigFileContent:  toString(msg.Data["config_file_content"]),
+		ServiceFileContent: toString(msg.Data["service_file_content"]),
 	}
 
 	log.Printf("[UPDATE] starting update task=%s type=%s", taskID, updateType)
@@ -462,18 +470,19 @@ func SendRegistration() error {
 	metrics := collector.CollectSystemMetrics()
 
 	registration := Registration{
-		UUID:          config.AgentUUID,
-		Hostname:      metrics.Hostname,
-		IP:            metrics.IP,
-		OS:            metrics.OS,
-		Kernel:        metrics.Kernel,
-		Arch:          metrics.Arch,
-		CPUModel:      metrics.CPUModel,
-		CPUCores:      metrics.CPUCores,
-		MemoryTotal:   metrics.MemoryTotal,
-		AgentVersion:  config.GlobalConfig.Deploy.Version,
-		Capabilities:  []string{"system", "process", "docker"},
-		Tags:          []string{},
+		UUID:         config.AgentUUID,
+		Hostname:     metrics.Hostname,
+		IP:           metrics.IP,
+		OS:           metrics.OS,
+		OSDistro:     metrics.OsDistro,
+		Kernel:       metrics.Kernel,
+		Arch:         metrics.Arch,
+		CPUModel:     metrics.CPUModel,
+		CPUCores:     metrics.CPUCores,
+		MemoryTotal:  metrics.MemoryTotal,
+		AgentVersion: config.GlobalConfig.Deploy.Version,
+		Capabilities: []string{"system", "process", "docker"},
+		Tags:         []string{},
 		// 部署元信息
 		DeployMethod: config.GlobalConfig.Deploy.Method,
 		DeployDir:    config.GlobalConfig.Deploy.DeployDir,
@@ -496,10 +505,10 @@ func SendRegistration() error {
 
 func SendHeartbeat(metrics collector.SystemMetrics, services []collector.ServiceStatus) error {
 	heartbeat := Heartbeat{
-		System:          metrics,
-		Services:        services,
+		System:           metrics,
+		Services:         services,
 		DockerContainers: []ContainerStatus{},
-		ComposeProjects: []ComposeStatus{},
+		ComposeProjects:  []ComposeStatus{},
 	}
 
 	msg := Message{

@@ -1,0 +1,16 @@
+{
+  "table": "servers",
+  "columns_before": [
+    "id",
+    "hostname",
+    "ip",
+    "ssh_port",
+    "username",
+    "password",
+    "private_key",
+    "os_type",
+    "created_at",
+    "updated_at",
+    "organization_id"
+  ]
+}

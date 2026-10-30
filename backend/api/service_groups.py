@@ -19,6 +19,8 @@ async def list_service_groups(
 ):
     """获取程序分类列表（全局统一分类）"""
     query = db.query(ServiceGroup)
+    # total_all：程序分类总数，不受关键字筛选影响
+    total_all = query.count()
     
     if keyword:
         query = query.filter(
@@ -33,6 +35,7 @@ async def list_service_groups(
     return ResponseModel(data={
         "items": [ServiceGroupResponse.model_validate(g) for g in groups],
         "total": total,
+        "total_all": total_all,
         "page": page,
         "size": size
     })

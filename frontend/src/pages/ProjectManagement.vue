@@ -333,7 +333,7 @@ onMounted(async () => {
   align-items: center;
   justify-content: center;
   padding: 60px 20px;
-  color: #94a3b8;
+  color: var(--app-text-3);
 }
 
 .empty-icon {

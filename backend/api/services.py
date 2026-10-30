@@ -303,10 +303,13 @@ async def get_services(
         if status:
             target = status.upper()
             if target == 'UNKNOWN':
-                # “状态未知”桶：真正未知/异常态（UNKNOWN / PARTIAL 等），
-                # 不含 INACTIVE（未启用/停止）与 COMPLETED（一次性任务已完成）——它们是预期状态
+                # “状态未知”桶：只含真正取不到状态或上报 UNKNOWN 的服务，
+                # 失败/部分运行等异常态归入 ABNORMAL 单独统计
+                enriched = [x for x in enriched if x[1] == 'UNKNOWN']
+            elif target in ('ABNORMAL', 'FAILED'):
+                # “异常”桶：失败、部分运行、启停中、重启中等非预期状态
                 enriched = [x for x in enriched
-                            if x[1] not in ('RUNNING', 'STOPPED', 'INACTIVE', 'COMPLETED')]
+                            if x[1] in ('FAILED', 'PARTIAL', 'STARTING', 'STOPPING', 'RESTARTING', 'UNHEALTHY', 'ERROR')]
             elif target == 'INACTIVE':
                 # “未启用/停止”桶：含一次性任务已完成（同为预期终态）
                 enriched = [x for x in enriched if x[1] in ('INACTIVE', 'COMPLETED')]
@@ -559,7 +562,7 @@ async def count_services(
     total = len(services)
 
     # Redis 批量取状态做分布统计
-    running = stopped = unknown = inactive = agent_offline = 0
+    running = stopped = unknown = inactive = abnormal = agent_offline = 0
     if services:
         try:
             from utils.redis_client import redis_client
@@ -607,6 +610,9 @@ async def count_services(
                 elif st in ("INACTIVE", "COMPLETED"):
                     # 未启用/停止 与 一次性任务已完成 都是预期状态，不计入异常/未知
                     inactive += 1
+                elif st in ("FAILED", "PARTIAL", "STARTING", "STOPPING", "RESTARTING", "UNHEALTHY", "ERROR"):
+                    # 失败/部分运行等属于异常，和"取不到状态"的未知分开统计
+                    abnormal += 1
                 else:
                     unknown += 1
 
@@ -623,6 +629,7 @@ async def count_services(
         "running": running,
         "stopped": stopped,
         "inactive": inactive,
+        "abnormal": abnormal,
         "agentOffline": agent_offline,
         "unknown": unknown,
     })
@@ -1464,6 +1471,12 @@ async def start_service(
         
         ssh = await ssh_pool.get_connection(service.ip, service.ssh_port or 22, service.username, decrypt(service.password))
         if not ssh:
+            log_audit(db, user.id, user.username, "SERVICE_START",
+                      service_id=service.id,
+                      project_id=service.project_id,
+                      subsystem_id=service.subsystem_id,
+                      result="failed",
+                      output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 失败原因: 无法建立SSH连接")
             return ResponseModel(data={"success": False, "message": "无法建立SSH连接"}, code=500)
         
         # 根据服务类型执行不同的启动命令
@@ -1509,6 +1522,12 @@ async def start_service(
         else:
             # HOST_APP及其他服务类型
             if not service.start_script:
+                log_audit(db, user.id, user.username, "SERVICE_START",
+                          service_id=service.id,
+                          project_id=service.project_id,
+                          subsystem_id=service.subsystem_id,
+                          result="failed",
+                          output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 失败原因: 未配置启动脚本")
                 return ResponseModel(data={"success": False, "message": "未配置启动脚本"}, code=400)
             
             command = f"cd {expand_home_path(service.program_path)} && {format_script_command(service.start_script)}"
@@ -1575,6 +1594,12 @@ async def stop_service(
         
         ssh = await ssh_pool.get_connection(service.ip, service.ssh_port or 22, service.username, decrypt(service.password))
         if not ssh:
+            log_audit(db, user.id, user.username, "SERVICE_STOP",
+                      service_id=service.id,
+                      project_id=service.project_id,
+                      subsystem_id=service.subsystem_id,
+                      result="failed",
+                      output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 失败原因: 无法建立SSH连接")
             return ResponseModel(data={"success": False, "message": "无法建立SSH连接"}, code=500)
         
         # 根据服务类型执行不同的停止命令
@@ -1625,6 +1650,12 @@ async def stop_service(
         else:
             # HOST_APP及其他服务类型
             if not service.stop_script:
+                log_audit(db, user.id, user.username, "SERVICE_STOP",
+                          service_id=service.id,
+                          project_id=service.project_id,
+                          subsystem_id=service.subsystem_id,
+                          result="failed",
+                          output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 失败原因: 未配置停止脚本")
                 return ResponseModel(data={"success": False, "message": "未配置停止脚本"}, code=400)
             
             command = f"cd {expand_home_path(service.program_path)} && {format_script_command(service.stop_script)}"
@@ -1691,6 +1722,12 @@ async def restart_service(
         
         ssh = await ssh_pool.get_connection(service.ip, service.ssh_port or 22, service.username, decrypt(service.password))
         if not ssh:
+            log_audit(db, user.id, user.username, "SERVICE_RESTART",
+                      service_id=service.id,
+                      project_id=service.project_id,
+                      subsystem_id=service.subsystem_id,
+                      result="failed",
+                      output=f"服务: {service.func_desc}, IP: {service.ip}, 类型: {service_type}, 失败原因: 无法建立SSH连接")
             return ResponseModel(data={"success": False, "message": "无法建立SSH连接"}, code=500)
         
         # 根据服务类型执行不同的重启命令
@@ -1783,45 +1820,50 @@ async def list_log_files(
         if not ssh:
             return ResponseModel(data={"files": [], "message": "无法建立SSH连接"}, code=500)
         
-        # Docker部署处理
-        if service.deploy_type == 'DOCKER':
-            # 如果是Docker Logs方式，返回容器名称作为日志标识
-            if service.log_type == 'DOCKER_LOGS':
-                ssh.close()
-                return ResponseModel(data={
-                    "files": [{"name": "docker.log", "size": "实时", "date": "实时"}],
-                    "log_dir": "docker_logs",
-                    "log_type": "DOCKER_LOGS",
-                    "container_name": service.container_name
-                })
+        # Docker / Docker Compose 部署处理
+        if service.deploy_type in ('DOCKER', 'DOCKER_COMPOSE'):
+            is_compose = service.deploy_type == 'DOCKER_COMPOSE'
             
-            # 主机目录方式
-            if not service.log_path:
-                ssh.close()
-                return ResponseModel(data={"files": [], "message": "未配置日志路径"}, code=400)
-            
-            program_dir = expand_home_path(service.program_path)
-            log_dir = service.log_path
-            
-            command = f"cd {program_dir}/{log_dir} && ls -lht *.log 2>/dev/null | awk '{{print $9, $5, $6, $7, $8}}'"
-            output, error, success = await ssh.execute_command(command)
-            ssh.close()
-            
-            if success and output.strip():
-                files = []
-                for line in output.strip().split('\n'):
-                    if line.strip():
-                        parts = line.split(None, 4)
-                        if len(parts) >= 5:
-                            files.append({
-                                "name": parts[0],
-                                "size": parts[1],
-                                "date": " ".join(parts[2:5])
-                            })
+            # 挂载主机目录方式：列出目录下的日志文件
+            if service.log_path and service.log_type == 'HOST_DIR':
+                program_dir = expand_home_path(service.program_path)
+                log_dir = service.log_path
                 
-                return ResponseModel(data={"files": files, "log_dir": log_dir, "log_type": "HOST_DIR"})
-            else:
-                return ResponseModel(data={"files": [{"name": service.log_path, "size": "unknown", "date": "unknown"}], "log_dir": service.log_path, "log_type": "HOST_DIR"})
+                command = f"cd {program_dir}/{log_dir} && ls -lht *.log 2>/dev/null | awk '{{print $9, $5, $6, $7, $8}}'"
+                output, error, success = await ssh.execute_command(command)
+                ssh.close()
+                
+                if success and output.strip():
+                    files = []
+                    for line in output.strip().split('\n'):
+                        if line.strip():
+                            parts = line.split(None, 4)
+                            if len(parts) >= 5:
+                                files.append({
+                                    "name": parts[0],
+                                    "size": parts[1],
+                                    "date": " ".join(parts[2:5])
+                                })
+                    
+                    return ResponseModel(data={"files": files, "log_dir": log_dir, "log_type": "HOST_DIR"})
+                else:
+                    return ResponseModel(data={"files": [{"name": service.log_path, "size": "unknown", "date": "unknown"}], "log_dir": service.log_path, "log_type": "HOST_DIR"})
+            
+            # 容器日志方式：返回合成条目，供前端下拉/标识使用
+            ssh.close()
+            if is_compose:
+                return ResponseModel(data={
+                    "files": [{"name": "docker-compose.log", "size": "实时", "date": "实时"}],
+                    "log_dir": "compose_logs",
+                    "log_type": "DOCKER_LOGS",
+                    "compose_path": service.program_path
+                })
+            return ResponseModel(data={
+                "files": [{"name": "docker.log", "size": "实时", "date": "实时"}],
+                "log_dir": "docker_logs",
+                "log_type": "DOCKER_LOGS",
+                "container_name": service.container_name
+            })
         
         # 主机部署处理（原有逻辑）
         else:
@@ -1893,7 +1935,7 @@ async def service_log_websocket(websocket: WebSocket, service_id: int, token: st
         try:
             manager.subscribe_log(str(service_id), websocket)
             
-            request_id = str(uuid.uuid4())
+            request_id = str(_uuid.uuid4())
             message = {
                 "type": "command",
                 "request_id": request_id,
@@ -1907,7 +1949,6 @@ async def service_log_websocket(websocket: WebSocket, service_id: int, token: st
                     "log_path": service.log_path,
                     "start_cmd": service.start_script,
                     "stop_cmd": service.stop_script,
-                    "restart_cmd": service.restart_script,
                 }
             }
             
@@ -1923,6 +1964,17 @@ async def service_log_websocket(websocket: WebSocket, service_id: int, token: st
             await websocket.close()
         finally:
             manager.unsubscribe_log(str(service_id), websocket)
+            # 通知 Agent 终止该服务的日志流进程，避免 docker logs -f / docker-compose logs -f 长期驻留
+            if service.agent_uuid:
+                try:
+                    await manager.send_message(service.agent_uuid, {
+                        "type": "command",
+                        "request_id": str(_uuid.uuid4()),
+                        "timestamp": datetime.now().timestamp(),
+                        "data": {"service_id": str(service.id), "action": "logs_stop"},
+                    })
+                except Exception as stop_err:
+                    print(f"Stop agent log stream failed: {stop_err}")
     else:
         await websocket.send_json({"type": "error", "message": "Agent未在线，无法实时推送日志"})
         await websocket.close()
@@ -1930,7 +1982,7 @@ async def service_log_websocket(websocket: WebSocket, service_id: int, token: st
 @router.get("/services/{service_id}/log", response_model=ResponseModel)
 async def get_service_log(
     service_id: int,
-    lines: int = Query(200, ge=10, le=5000),
+    lines: int = Query(100, ge=10, le=5000),
     filename: str = Query(None, description="日志文件名"),
     keyword: str = Query(None, description="搜索关键词"),
     db: Session = Depends(get_db),
@@ -1947,11 +1999,11 @@ async def get_service_log(
         if not ssh:
             return ResponseModel(data={"content": "无法建立SSH连接"}, code=500)
         
-        # Docker部署处理
-        if service.deploy_type == 'DOCKER':
+        # Docker / Docker Compose 部署处理
+        if service.deploy_type in ('DOCKER', 'DOCKER_COMPOSE'):
             container_name = service.container_name
             
-            # 如果有日志路径配置，说明是挂载的主机目录日志
+            # 如果有日志路径配置且类型为挂载主机目录，读取主机目录日志
             if service.log_path and service.log_type == 'HOST_DIR':
                 program_dir = expand_home_path(service.program_path)
                 log_dir = service.log_path
@@ -1980,24 +2032,74 @@ async def get_service_log(
                 
                 return ResponseModel(data={"content": content, "filename": filename or "latest.log"})
             
-            # Docker Logs方式
-            else:
+            # 单容器（Docker）方式：读取容器标准输出日志
+            elif service.deploy_type == 'DOCKER':
                 if not container_name:
                     ssh.close()
                     return ResponseModel(data={"content": "未配置容器名称，无法查看Docker日志"}, code=400)
                 
+                # 用 shell timeout 兜底，避免目标主机 docker 日志接口无响应时长时间挂起
                 if keyword:
-                    command = f"docker logs {container_name} 2>&1 | grep -n '{keyword}' | tail -n {lines}"
+                    command = f"timeout 20 docker logs {container_name} 2>&1 | grep -n '{keyword}' | tail -n {lines}"
                 else:
-                    command = f"docker logs --tail {lines} {container_name} 2>&1"
+                    command = f"timeout 20 docker logs --tail {lines} {container_name} 2>&1"
                 
                 content, error_output, success = await ssh.execute_command(command)
                 ssh.close()
                 
-                if error_output and not success:
-                    content = f"错误: {error_output}"
+                if not success:
+                    content = f"读取容器日志失败: {error_output or 'SSH 连接或命令执行异常'}"
+                elif 'No such container' in (content or ''):
+                    content = f"未找到容器「{container_name}」，请检查容器名称是否正确\n\n{content}"
+                elif not (content or '').strip():
+                    content = f"容器「{container_name}」暂无日志输出" if not keyword else f"未匹配到包含「{keyword}」的日志"
                 
                 return ResponseModel(data={"content": content, "filename": "docker.log"})
+            
+            # Docker Compose 方式：通过 compose 文件读取服务日志
+            else:
+                compose_base = expand_home_path(service.program_path)
+                if not compose_base:
+                    ssh.close()
+                    return ResponseModel(data={"content": "未配置程序路径（compose 目录），无法查看 Docker Compose 日志"}, code=400)
+                
+                resolve_cmd = (
+                    f"BASE={compose_base}; "
+                    "if [ -f \"$BASE\" ]; then dirname \"$BASE\"; echo \"$BASE\"; "
+                    "else for f in docker-compose.yml docker-compose.yaml compose.yaml compose.yml; do "
+                    "if [ -f \"$BASE/$f\" ]; then echo \"$BASE\"; echo \"$BASE/$f\"; break; fi; done; fi"
+                )
+                resolve_output, _rerr, _rok = await ssh.execute_command(resolve_cmd)
+                resolve_lines = [l.strip() for l in (resolve_output or '').strip().split('\n') if l.strip()]
+                if len(resolve_lines) < 2:
+                    ssh.close()
+                    return ResponseModel(data={"content": f"未找到 docker-compose 配置文件，请检查程序路径「{service.program_path}」下是否存在 docker-compose.yml / compose.yaml"}, code=400)
+                
+                work_dir, compose_file = resolve_lines[0], resolve_lines[1]
+                
+                # 选择目标主机上可用的 compose 命令：优先独立命令 docker-compose，回退 docker compose 插件
+                probe_out, _pe, _pok = await ssh.execute_command("command -v docker-compose >/dev/null 2>&1 && echo V1 || echo V2")
+                compose_cmd = "docker-compose" if "V1" in (probe_out or "") else "docker compose"
+                
+                # 用 shell timeout 兜底，避免目标主机 docker 日志接口无响应时长时间挂起
+                compose_logs = f"timeout 20 {compose_cmd} -f {compose_file} logs --tail {lines} 2>&1"
+                if keyword:
+                    command = f"cd {work_dir} && {compose_logs} | grep -n '{keyword}' | tail -n {lines}"
+                else:
+                    command = f"cd {work_dir} && {compose_logs}"
+                
+                content, error_output, success = await ssh.execute_command(command)
+                ssh.close()
+                
+                if not success:
+                    content = f"读取 Docker Compose 日志失败: {error_output or 'SSH 连接或命令执行异常'}"
+                elif "unknown shorthand flag" in (content or "") or "is not a docker command" in (content or ""):
+                    content = f"目标主机未安装可用的 compose 命令（{compose_cmd}），无法读取容器日志"
+                elif not (content or '').strip():
+                    content = (f"使用配置文件「{compose_file}」未获取到日志输出（容器可能无日志，或该主机 Docker 日志接口响应超时）" if not keyword
+                               else f"未匹配到包含「{keyword}」的日志")
+                
+                return ResponseModel(data={"content": content, "filename": "docker-compose.log"})
         
         # 主机部署处理（原有逻辑）
         else:

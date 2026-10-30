@@ -21,3 +21,4 @@ from models.db_backup import DbBackupConfig, DbBackupRecord
 from models.import_batch import ImportBatch, ImportBatchOperation
 from models.agent_update import AgentUpdateTask, AgentUpdateTaskItem
 from models.service_container_config import ServiceContainerConfig
+from models.alert_record import AlertRecord

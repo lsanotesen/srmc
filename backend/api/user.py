@@ -242,6 +242,10 @@ async def get_user_menu(db: Session = Depends(get_db), user = Depends(get_curren
     if has_perm("agent", "view"):
         menu.append({"id": "agents", "name": "Agent管理", "icon": "cpu", "path": "/agents", "children": []})
     
+    # 监控中心（服务器资源监控、历史趋势、服务器详情）：需 service:view
+    if has_perm("service", "view"):
+        menu.append({"id": "monitoring", "name": "监控中心", "icon": "data-line", "path": "/monitoring", "children": []})
+    
     # 数据库管理（基于服务类型动态显示）
     service_types = db.query(Service.service_type).distinct().all()
     service_types = [st[0] for st in service_types]
@@ -254,6 +258,14 @@ async def get_user_menu(db: Session = Depends(get_db), user = Depends(get_curren
     if has_perm("service", "view") and has_es_service:
         menu.append({"id": "es", "name": "Elasticsearch管理", "icon": "search", "path": "/es", "children": []})
     
+    # 告警中心：需 service:view（所有登录角色可见，只读角色仅可查看）
+    if has_perm("service", "view"):
+        menu.append({"id": "alerts", "name": "告警中心", "icon": "bell", "path": "/alerts", "children": []})
+
+    # 审计日志：需 audit:view
+    if has_perm("audit", "view"):
+        menu.append({"id": "audit", "name": "审计日志", "icon": "file-search", "path": "/audit", "children": []})
+
     # 权限管理（组织+角色+用户）：按查看权限码显示，仅显示有权限的项
     perm_children = []
     if has_perm("organization", "view"):
@@ -270,10 +282,6 @@ async def get_user_menu(db: Session = Depends(get_db), user = Depends(get_curren
             "path": "",
             "children": perm_children
         })
-    
-    # 审计日志：需 audit:view
-    if has_perm("audit", "view"):
-        menu.append({"id": "audit", "name": "审计日志", "icon": "file-search", "path": "/audit", "children": []})
 
     # 数据备份：需 backup:view（写操作另受 backup:manage 保护）
     if has_perm("backup", "view"):

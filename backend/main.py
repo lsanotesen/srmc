@@ -41,6 +41,7 @@ from api.backup import router as backup_router
 from api.dashboard import router as dashboard_router
 from api.agent_update import router as agent_update_router
 from api.agent_deploy import router as agent_deploy_router
+from api.alerts import router as alerts_router
 from services.monitor_service import update_all_service_statuses
 from core.database import get_db
 from schemas.common import ResponseModel
@@ -149,6 +150,7 @@ app.include_router(backup_router, prefix="/api", tags=["backup"])
 app.include_router(dashboard_router, prefix="/api", tags=["dashboard"])
 app.include_router(agent_update_router, prefix="/api/agent-update", tags=["agent_update"])
 app.include_router(agent_deploy_router, prefix="/api/agent-deploy", tags=["agent_deploy"])
+app.include_router(alerts_router, prefix="/api", tags=["alerts"])
 
 @app.get("/health")
 async def health_check(db: Session = Depends(get_db)):

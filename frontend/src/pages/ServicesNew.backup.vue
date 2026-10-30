@@ -1449,7 +1449,7 @@ onUnmounted(() => {
 }
 
 .import-tip {
-  color: #999;
+  color: var(--app-text-3);
   margin-top: 10px;
 }
 

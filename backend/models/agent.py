@@ -10,6 +10,7 @@ class Agent(Base):
     hostname = Column(VARCHAR(128), nullable=False)
     ip = Column(VARCHAR(45), nullable=False)
     os = Column(VARCHAR(64))
+    os_distro = Column(VARCHAR(128))
     kernel = Column(VARCHAR(128))
     arch = Column(VARCHAR(32))
     cpu_model = Column(VARCHAR(256))

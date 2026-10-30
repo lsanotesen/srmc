@@ -11,90 +11,84 @@
     </div>
 
     <div class="page-content">
-      <!-- 备份配置 -->
-      <div class="config-card">
-        <div class="card-header">
-          <el-icon class="card-icon"><Setting /></el-icon>
-          <span>定时备份配置</span>
-        </div>
-        <el-form :model="config" label-width="110px" v-loading="loadingConfig" class="config-form">
-          <el-row :gutter="20">
-            <el-col :span="8">
-              <el-form-item label="定时备份">
-                <el-switch
-                  v-model="config.enabled"
-                  active-text="开启"
-                  inactive-text="关闭"
+      <!-- 顶部两栏：定时备份配置 + 手动备份 -->
+      <div class="top-row">
+        <!-- 备份配置 -->
+        <div class="config-card">
+          <div class="card-header config-header">
+            <div class="manual-title">
+              <el-icon class="card-icon"><Setting /></el-icon>
+              <span>定时备份配置</span>
+            </div>
+            <div v-if="config.last_run_at" class="config-hint">上次执行：{{ config.last_run_at }}</div>
+          </div>
+        <el-form :model="config" label-width="72px" v-loading="loadingConfig" class="config-form">
+          <div class="config-row">
+            <el-form-item label="定时备份">
+              <el-switch
+                v-model="config.enabled"
+                active-text="开启"
+                inactive-text="关闭"
+              />
+            </el-form-item>
+            <el-form-item label="执行频率">
+              <el-select v-model="config.schedule_type" class="cfg-select">
+                <el-option label="每天" value="daily" />
+                <el-option label="每周" value="weekly" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="执行时间">
+              <el-time-picker
+                v-model="config.timeObj"
+                format="HH:mm"
+                placeholder="选择时间"
+                class="cfg-select"
+              />
+            </el-form-item>
+            <el-form-item v-if="config.schedule_type === 'weekly'" label="星期">
+              <el-select v-model="config.week_day" class="cfg-select">
+                <el-option
+                  v-for="(name, idx) in weekNames"
+                  :key="idx"
+                  :label="name"
+                  :value="idx"
                 />
-              </el-form-item>
-            </el-col>
-            <el-col :span="8">
-              <el-form-item label="执行频率">
-                <el-select v-model="config.schedule_type" style="width: 100%">
-                  <el-option label="每天" value="daily" />
-                  <el-option label="每周" value="weekly" />
-                </el-select>
-              </el-form-item>
-            </el-col>
-            <el-col :span="8">
-              <el-form-item label="执行时间">
-                <el-time-picker
-                  v-model="config.timeObj"
-                  format="HH:mm"
-                  placeholder="选择时间"
-                  style="width: 100%"
-                />
-              </el-form-item>
-            </el-col>
-          </el-row>
-          <el-row :gutter="20">
-            <el-col :span="8">
-              <el-form-item v-if="config.schedule_type === 'weekly'" label="星期">
-                <el-select v-model="config.week_day" style="width: 100%">
-                  <el-option
-                    v-for="(name, idx) in weekNames"
-                    :key="idx"
-                    :label="name"
-                    :value="idx"
-                  />
-                </el-select>
-              </el-form-item>
-            </el-col>
-            <el-col :span="8">
-              <el-form-item label="保留份数">
-                <el-input-number
-                  v-model="config.retention_count"
-                  :min="1"
-                  :max="100"
-                  style="width: 100%"
-                />
-              </el-form-item>
-            </el-col>
-            <el-col :span="8">
-              <el-form-item label="">
-                <el-button type="primary" @click="saveConfig">保存配置</el-button>
-                <span v-if="config.last_run_at" class="hint-text" style="margin-left: 12px;">
-                  上次执行：{{ config.last_run_at }}
-                </span>
-              </el-form-item>
-            </el-col>
-          </el-row>
+              </el-select>
+            </el-form-item>
+            <el-form-item label="保留份数">
+              <el-input-number
+                v-model="config.retention_count"
+                :min="1"
+                :max="100"
+                class="cfg-number"
+              />
+            </el-form-item>
+          </div>
+          <div class="config-actions">
+            <el-button type="primary" @click="saveConfig">保存配置</el-button>
+          </div>
         </el-form>
-      </div>
-
-      <!-- 手动备份 -->
-      <div class="manual-card">
-        <div class="card-header">
-          <el-icon class="card-icon"><CirclePlus /></el-icon>
-          <span>手动备份</span>
         </div>
-        <div class="manual-body">
-          <p class="manual-desc">
-            立即对数据库业务表做一次全量逻辑备份（mysqldump + gzip 压缩），审计日志大表不参与备份。恢复前系统会自动再做一次当前状态快照兜底。
-          </p>
-          <el-button type="success" size="large" :loading="running" @click="runBackup">
-            <el-icon><Upload /></el-icon>&nbsp;立即备份
-          </el-button>
+
+        <!-- 手动备份 -->
+        <div class="manual-card">
+          <div class="card-header">
+            <el-icon class="card-icon"><CirclePlus /></el-icon>
+            <span>手动备份</span>
+          </div>
+          <div class="manual-body">
+            <div class="manual-info">
+              <el-icon class="manual-icon"><InfoFilled /></el-icon>
+              <p class="manual-desc">
+                立即对数据库业务表做一次全量逻辑备份（mysqldump + gzip 压缩），审计日志大表不参与备份。恢复前系统会自动再做一次当前状态快照兜底。
+              </p>
+            </div>
+          </div>
+          <div class="manual-actions">
+            <el-button class="manual-btn" type="success" :loading="running" @click="runBackup">
+              <el-icon><Upload /></el-icon><span class="manual-btn-text">立即备份</span>
+            </el-button>
+          </div>
         </div>
       </div>
 
@@ -107,32 +101,33 @@
             <el-icon><Refresh /></el-icon>&nbsp;刷新
           </el-button>
         </div>
+        <ListStats :items="statsItems" />
         <el-table :data="records" v-loading="loadingRecords" border stripe>
-          <el-table-column prop="filename" label="文件名" min-width="240" show-overflow-tooltip />
-          <el-table-column label="大小" width="100">
+          <el-table-column prop="filename" label="文件名" min-width="260" show-overflow-tooltip />
+          <el-table-column label="大小" min-width="78" align="right">
             <template #default="{ row }">{{ formatSize(row.file_size) }}</template>
           </el-table-column>
-          <el-table-column label="类型" width="100">
+          <el-table-column label="类型" min-width="70">
             <template #default="{ row }">
               <el-tag :type="typeTagMap[row.backup_type]?.tag || 'info'" size="small">
                 {{ typeTagMap[row.backup_type]?.label || row.backup_type }}
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="状态" width="90">
+          <el-table-column label="状态" min-width="70">
             <template #default="{ row }">
               <el-tag :type="row.status === 'success' ? 'success' : row.status === 'failed' ? 'danger' : 'warning'" size="small">
                 {{ statusMap[row.status] || row.status }}
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="table_count" label="表数" width="70" />
-          <el-table-column label="耗时" width="90">
+          <el-table-column prop="table_count" label="表数" min-width="55" align="right" />
+          <el-table-column label="耗时" min-width="66" align="right">
             <template #default="{ row }">{{ row.duration_ms ? (row.duration_ms / 1000).toFixed(1) + 's' : '-' }}</template>
           </el-table-column>
-          <el-table-column prop="created_by" label="触发人" width="90" />
-          <el-table-column prop="created_at" label="时间" width="165" />
-          <el-table-column label="操作" width="190" fixed="right">
+          <el-table-column prop="created_by" label="触发人" min-width="72" show-overflow-tooltip />
+          <el-table-column prop="created_at" label="时间" min-width="150" />
+          <el-table-column label="操作" width="220" fixed="right">
             <template #default="{ row }">
               <el-button link type="primary" :disabled="row.status !== 'success'" @click="download(row)">
                 <el-icon><Download /></el-icon>下载
@@ -161,9 +156,10 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue';
+import { ref, reactive, computed, onMounted } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import axios from '@/utils/axios';
+import ListStats from '@/components/ListStats.vue';
 
 const loadingConfig = ref(false);
 const loadingRecords = ref(false);
@@ -181,6 +177,11 @@ const config = reactive({
 
 const records = ref([]);
 const pagination = reactive({ page: 1, size: 20, total: 0 });
+// 统计：备份记录总数（接口分页 total，无筛选）与本页条数
+const statsItems = computed(() => [
+  { label: '备份记录总数', value: `${pagination.total} 条` },
+  { label: '本页', value: `${records.value.length} 条` }
+]);
 
 const weekNames = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 const typeTagMap = {
@@ -360,17 +361,26 @@ onMounted(() => {
 }
 
 .subtitle {
-  color: #909399;
+  color: var(--app-text-3);
   font-size: 13px;
   margin-top: 4px;
 }
 
 .config-card, .manual-card, .records-card {
-  background: #fff;
+  background: var(--app-panel);
   border-radius: 8px;
   padding: 20px;
   margin-bottom: 20px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+
+/* 两栏等宽后，手动备份卡片内边距与其他卡片保持一致 */
+.manual-card {
+  padding: 20px;
+}
+
+.manual-card .card-header {
+  margin-bottom: 8px;
 }
 
 .card-header {
@@ -380,7 +390,7 @@ onMounted(() => {
   font-weight: 600;
   font-size: 15px;
   margin-bottom: 16px;
-  color: #303133;
+  color: var(--app-text);
 }
 
 .card-icon {
@@ -388,29 +398,174 @@ onMounted(() => {
 }
 
 .hint-text {
-  color: #606266;
+  color: var(--app-text-2);
   font-size: 13px;
+}
+
+/* 定时备份配置：开关/频率/时间/星期/保留份数/保存 排在同一行 */
+.config-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 14px;
+}
+
+.config-row :deep(.el-form-item) {
+  margin-bottom: 0;
+}
+
+
+.config-row :deep(.el-form-item__content) {
+  gap: 12px;
+}
+
+.cfg-select {
+  width: 90px;
+}
+
+.cfg-number {
+  width: 100px;
+}
+
+/* 时间选择器根节点带 EP 双类名，需用 :deep 覆盖默认宽度 */
+.config-row :deep(.el-date-editor) {
+  width: 90px;
+}
+
+/* 备份记录表格：加大单元格上下留白，操作列左右留白并与数据列分隔 */
+.records-card :deep(.el-table th.el-table__cell),
+.records-card :deep(.el-table td.el-table__cell) {
+  padding: 12px 0;
+}
+
+.records-card :deep(.el-table .el-table-fixed-column--right .cell) {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.records-card :deep(.el-table th.el-table-fixed-column--right) {
+  border-left: 1px solid var(--app-border);
+}
+
+.config-header {
+  justify-content: space-between;
+}
+
+.config-hint {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--app-text-2);
 }
 
 .form-hint-inline {
   font-size: 12px;
-  color: #909399;
+  color: var(--app-text-3);
   padding-left: 110px;
+}
+
+/* 顶部两栏：定时备份配置 + 手动备份 */
+.top-row {
+  display: flex;
+  gap: 20px;
+  align-items: stretch;
+  margin-bottom: 20px;
+}
+
+.top-row > .config-card,
+.top-row > .manual-card {
+  flex: 1 1 0;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.config-card {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 表单在卡片内纵向撑开，让配置行与操作按钮分离 */
+.top-row > .config-card :deep(.el-form) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+/* 保存配置固定在卡片右下角，与右侧「立即备份」同一水平线 */
+.config-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+.manual-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.manual-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .manual-body {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
+  align-items: flex-start;
+}
+
+/* 按钮固定在卡片右下角 */
+.manual-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+/* 窄屏回落为单栏 */
+@media (max-width: 1100px) {
+  .top-row {
+    flex-direction: column;
+  }
+
+  .top-row > .config-card,
+  .top-row > .manual-card {
+    margin-bottom: 0;
+  }
+}
+
+.manual-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.manual-icon {
+  flex: none;
+  margin-top: 4px;
+  font-size: 14px;
+  color: var(--app-text-2);
 }
 
 .manual-desc {
   flex: 1;
-  color: #606266;
+  max-width: 860px;
+  color: var(--app-text-2);
   font-size: 13px;
-  line-height: 1.6;
+  line-height: 1.5;
   margin: 0;
+  text-wrap: pretty;
+}
+
+.manual-btn {
+  flex: none;
+  min-width: 132px;
+}
+
+.manual-btn-text {
+  margin-left: 2px;
 }
 
 .pagination-wrapper {

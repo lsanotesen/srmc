@@ -128,6 +128,10 @@ class ProjectMemberService:
         "script_run", "host_reboot",
     ]
 
+    # 项目所有者（Owner）/ 管理员（Manager）：具备项目级管理权限（manage_project=True），
+    # 不允许通过「批量添加」再次加入，避免权限越级或重复授权。
+    PROTECTED_PROJECT_ROLES = {"Owner", "Manager"}
+
     @staticmethod
     def get_user_role_in_project(db: Session, user_id: int, project_id: int) -> Optional[str]:
         """获取用户在指定项目中的角色"""
@@ -309,6 +313,77 @@ class ProjectMemberService:
 
         db.commit()
         return {"added": added, "skipped": skipped, "total": len(users)}
+
+    @staticmethod
+    def get_department_users(db: Session, project_id: int, department_id: int) -> List[dict]:
+        """获取某部门下的在职用户列表（供批量勾选）。
+
+        - 排除项目所有者（Owner）/ 管理员（Manager）：不允许被再次加入；
+        - 其余已加入成员保留并标注 is_member（前端标记「已加入」且不可勾选，避免重复添加）。
+        """
+        users = db.query(User).filter(
+            User.department_id == department_id,
+            User.status == 1,
+        ).all()
+        role_by_user = {
+            row[0]: row[1] for row in db.query(ProjectMember.user_id, ProjectMember.role).filter(
+                ProjectMember.project_id == project_id
+            ).all()
+        }
+        result = []
+        for u in users:
+            role = role_by_user.get(u.id)
+            if role in ProjectMemberService.PROTECTED_PROJECT_ROLES:
+                continue
+            result.append({
+                "id": u.id,
+                "username": u.username,
+                "email": u.email,
+                "department_id": u.department_id,
+                "project_role": role,
+                "is_member": role is not None,
+            })
+        return result
+
+    @staticmethod
+    def batch_add_by_users(db: Session, project_id: int, user_ids: List[int], role: str) -> dict:
+        """按指定用户ID批量添加项目成员。
+
+        - 所有者（Owner）/ 管理员（Manager）不得被添加，否则拒绝（防止绕过前端直接提交）；
+        - 已存在的成员跳过（不改其角色），不允许重复添加。
+        """
+        user_ids = list(dict.fromkeys(user_ids))
+        users = db.query(User).filter(
+            User.id.in_(user_ids),
+            User.status == 1,
+        ).all()
+        found_ids = {u.id for u in users}
+        missing = [uid for uid in user_ids if uid not in found_ids]
+        if missing:
+            raise ValueError(f"用户不存在或已停用: {missing}")
+
+        role_by_user = {
+            row[0]: row[1] for row in db.query(ProjectMember.user_id, ProjectMember.role).filter(
+                ProjectMember.project_id == project_id,
+                ProjectMember.user_id.in_(user_ids),
+            ).all()
+        }
+        protected = [
+            uid for uid in user_ids
+            if role_by_user.get(uid) in ProjectMemberService.PROTECTED_PROJECT_ROLES
+        ]
+        if protected:
+            raise ValueError(f"以下用户是项目所有者/管理员，不允许添加为成员: {protected}")
+
+        existing_ids = set(role_by_user.keys())
+        added = 0
+        for u in users:
+            if u.id in existing_ids:
+                continue
+            db.add(ProjectMember(project_id=project_id, user_id=u.id, role=role))
+            added += 1
+        db.commit()
+        return {"added": added, "skipped": len(user_ids) - added, "total": len(user_ids)}
 
     @staticmethod
     def _get_all_dept_ids(db: Session, root_dept_id: int) -> List[int]:

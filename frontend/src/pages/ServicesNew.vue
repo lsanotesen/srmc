@@ -43,6 +43,7 @@
             <el-option label="运行中" value="RUNNING" />
             <el-option label="已停止" value="STOPPED" />
             <el-option label="未启用/已停止" value="INACTIVE" />
+            <el-option label="服务异常" value="ABNORMAL" />
             <el-option label="状态未知" value="UNKNOWN" />
           </el-select>
           <el-select v-model="filters.agent_status" placeholder="Agent状态" clearable class="agent-select">
@@ -73,6 +74,9 @@
           </span>
           <span :class="['stats-chip stats-agent-offline', filters.agent_status === 'offline' ? 'active' : '']" @click="applyStatusFilter('', 'offline')">
             Agent异常 {{ statusStats.agentOffline }}
+          </span>
+          <span :class="['stats-chip stats-failed', filters.status === 'ABNORMAL' ? 'active' : '']" @click="applyStatusFilter('ABNORMAL', '')">
+            服务异常 {{ statusStats.abnormal }}
           </span>
           <span :class="['stats-chip stats-unknown', filters.status === 'UNKNOWN' ? 'active' : '']" @click="applyStatusFilter('UNKNOWN', '')">
             状态未知 {{ statusStats.unknown }}
@@ -107,7 +111,7 @@
                 <el-tag v-if="scope.row.agent_uuid" :type="scope.row.agent_status === 'online' ? 'success' : 'danger'">
                   {{ scope.row.agent_status === 'online' ? '在线' : '离线' }}
                 </el-tag>
-                <span v-else style="color: #999;">未关联</span>
+                <span v-else style="color: var(--app-text-3);">未关联</span>
               </template>
             </el-table-column>
             <el-table-column prop="ip" label="IP地址" min-width="120" />
@@ -471,17 +475,7 @@
         </el-select>
         <el-button @click="loadLogFileList">刷新列表</el-button>
         <el-button @click="refreshLog">刷新内容</el-button>
-        <el-button 
-          type="primary" 
-          :class="{ 'is-active': logStreaming }"
-          @click="toggleLogStream"
-          :disabled="!selectedLogService?.agent_uuid"
-        >
-          {{ logStreaming ? '停止实时' : '实时推送' }}
-        </el-button>
-        <el-tag v-if="selectedLogService?.agent_uuid && logStreaming" type="success">实时推送中</el-tag>
-        <el-tag v-if="!selectedLogService?.agent_uuid" type="warning">未关联Agent，无法实时推送</el-tag>
-        <el-button @click="downloadLog" v-if="!(selectedLogService?.deploy_type === 'DOCKER' && selectedLogService?.log_type === 'DOCKER_LOGS')">下载日志</el-button>
+        <el-button @click="downloadLog" v-if="!(selectedLogService?.deploy_type === 'DOCKER' || selectedLogService?.deploy_type === 'DOCKER_COMPOSE') || selectedLogService?.log_type === 'HOST_DIR'">下载日志</el-button>
       </div>
       <div class="log-content" ref="logContent">
         <pre>{{ logContentText }}</pre>
@@ -498,12 +492,12 @@
 
     <!-- 远程终端对话框 -->
     <el-dialog 
-      v-model="showShellDialog" 
+      :key="shellDialogKey"
+      :model-value="showShellDialog" 
       width="900px" 
       height="600px" 
       :before-close="handleShellClose"
       draggable
-      append-to-body
       :show-close="false"
       :close-on-click-modal="false"
       :modal="!shellMinimized"
@@ -515,7 +509,7 @@
           <span class="shell-dialog-title">远程终端</span>
           <div class="shell-dialog-controls">
             <el-icon class="shell-control-icon" @click.stop="minimizeShell"><Minus /></el-icon>
-            <el-icon class="shell-control-icon" @click.stop="showShellDialog = false"><Close /></el-icon>
+            <el-icon class="shell-control-icon" @click.stop="handleShellClose"><Close /></el-icon>
           </div>
         </div>
       </template>
@@ -531,6 +525,7 @@
           <el-tab-pane label="文件管理" name="files">
           </el-tab-pane>
         </el-tabs>
+        <TerminalSettingsMenu class="shell-header-settings" />
       </div>
       <div class="shell-container" ref="shellContainer">
         <div v-show="shellActiveTab === 'terminal'" ref="terminalRef" class="terminal-container"></div>
@@ -557,7 +552,7 @@
               <div class="panel-body">
                 <div v-if="localFiles.length === 0" class="empty-state">
                   <p>点击上方按钮选择本地文件</p>
-                  <p style="font-size: 12px; color: #999;">或拖拽文件到此处</p>
+                  <p style="font-size: 12px; color: var(--app-text-3);">或拖拽文件到此处</p>
                 </div>
                 <el-table :data="localFiles" class="file-table" v-else>
                   <el-table-column prop="relativePath" label="文件路径">
@@ -658,24 +653,24 @@
       :before-close="handleOverwriteDialogClose"
     >
       <div style="margin-bottom: 15px;">
-        <p style="font-size: 14px; color: #666;">此文件夹已包含同名文件</p>
+        <p style="font-size: 14px; color: var(--app-text-2);">此文件夹已包含同名文件</p>
         <p style="margin-top: 10px; font-size: 16px; font-weight: bold;">{{ overwriteDialogFile }}</p>
       </div>
       
-      <div style="margin-bottom: 20px; padding: 15px; background-color: #f5f5f5; border-radius: 4px;">
+      <div style="margin-bottom: 20px; padding: 15px; background-color: var(--app-panel-soft); border-radius: 4px;">
         <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-          <span style="color: #999;">目标文件大小:</span>
+          <span style="color: var(--app-text-3);">目标文件大小:</span>
           <span>2.05 MB</span>
         </div>
         <div style="display: flex; justify-content: space-between;">
-          <span style="color: #999;">源文件大小:</span>
+          <span style="color: var(--app-text-3);">源文件大小:</span>
           <span>2.05 MB</span>
         </div>
       </div>
       
       <div style="margin-bottom: 20px; text-align: right;">
         <el-checkbox v-model="overwriteAllSelected" style="margin-right: 8px;">全部应用</el-checkbox>
-        <span style="color: #999; font-size: 12px;">对所有后续同名文件执行相同操作</span>
+        <span style="color: var(--app-text-3); font-size: 12px;">对所有后续同名文件执行相同操作</span>
       </div>
       
       <template #footer>
@@ -735,6 +730,8 @@ import ProjectTree from '@/components/ProjectTree.vue';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { WebLinksAddon } from 'xterm-addon-web-links';
+import TerminalSettingsMenu from '@/components/TerminalSettingsMenu.vue';
+import { attachTerminalClipboard } from '@/composables/useTerminalSettings';
 
 const { hasPermission } = usePermission();
 import 'xterm/css/xterm.css';
@@ -776,6 +773,7 @@ const statusStats = reactive({
   stopped: 0,
   inactive: 0,
   agentOffline: 0,
+  abnormal: 0,
   unknown: 0
 });
 
@@ -796,6 +794,7 @@ const loadStatusStats = async () => {
       statusStats.stopped = d.stopped || 0;
       statusStats.inactive = d.inactive || 0;
       statusStats.agentOffline = d.agentOffline || 0;
+      statusStats.abnormal = d.abnormal || 0;
       statusStats.unknown = d.unknown || 0;
     }
   } catch (e) {
@@ -849,6 +848,10 @@ const showLogDialog = ref(false);
 const showImportDialog = ref(false);
 const showShellDialog = ref(false);
 const shellMinimized = ref(false);
+// 对话框使用了 append-to-body（内容 Teleport 到 body），页面被 KeepAlive 缓存期间
+// 该 Teleport 内容会脱离文档且不会随页面恢复，导致再次打开时看不到弹窗。
+// 激活时重建已关闭的对话框组件，保证每次回到本页都有一份正常的 DOM。
+const shellDialogKey = ref(0);
 const importFile = ref(null);
 const selectedService = reactive({});
 const currentShellService = ref(null);
@@ -870,6 +873,7 @@ const selectedLogService = ref(null);
 // 保存事件监听器引用以便清理
 let windowResizeHandler = null;
 let terminalClickHandler = null;
+let detachClipboard = null;
 
 // 终端准备标志和消息队列
 let terminalReady = false;
@@ -886,13 +890,12 @@ const overwriteResolve = ref(null);
 const contextMenuVisible = ref(false);
 const contextMenuPosition = ref({ x: 0, y: 0 });
 const contextMenuFile = ref(null);
-const logLines = ref(200);
+const logLines = ref(100);
 const logContentText = ref('');
 const logFiles = ref([]);
 const selectedLogFile = ref('');
 const isSubmitting = ref(false);
-const logStreaming = ref(false);
-let logWebSocket = null;
+
 // 操作中的服务ID集合
 const operatingServices = ref(new Set());
 const serviceForm = reactive({
@@ -1961,8 +1964,6 @@ const viewLog = async (service) => {
   selectedLogService.value = service;
   showLogDialog.value = true;
   selectedLogFile.value = '';
-  logStreaming.value = false;
-  stopLogStream();
   await loadLogFileList();
   await loadLog();
 };
@@ -1994,9 +1995,9 @@ const loadLog = async () => {
       params
     });
     if (response.data.code === 0) {
-      logContentText.value = response.data.data.content;
+      logContentText.value = response.data.data?.content || '';
     } else {
-      logContentText.value = response.data.message || '获取日志失败';
+      logContentText.value = response.data.data?.content || response.data.message || '获取日志失败';
     }
   } catch (error) {
     logContentText.value = error.response?.data?.message || '获取日志失败';
@@ -2037,79 +2038,6 @@ const downloadLog = async () => {
 const handleLogClose = () => {
   showLogDialog.value = false;
   logContentText.value = '';
-  stopLogStream();
-};
-
-const toggleLogStream = () => {
-  if (logStreaming.value) {
-    stopLogStream();
-  } else {
-    startLogStream();
-  }
-};
-
-const startLogStream = () => {
-  if (!selectedLogService.value || !selectedLogService.value.agent_uuid) {
-    ElMessage.warning('未关联Agent，无法实时推送日志');
-    return;
-  }
-  
-  stopLogStream();
-  
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const token = localStorage.getItem('token');
-  const wsUrl = `${protocol}//${window.location.host}/api/services/${selectedLogService.value.id}/log/ws?token=${token}`;
-  
-  logWebSocket = new WebSocket(wsUrl);
-  
-  logWebSocket.onopen = () => {
-    logStreaming.value = true;
-    ElMessage.success('实时日志推送已开始');
-  };
-  
-  logWebSocket.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      if (data.type === 'log_line') {
-        if (data.line) {
-          logContentText.value += data.line + '\n';
-          scrollLogToBottom();
-        }
-      } else if (data.type === 'error') {
-        ElMessage.error(data.message);
-        stopLogStream();
-      }
-    } catch (e) {
-      console.error('解析日志消息失败:', e);
-    }
-  };
-  
-  logWebSocket.onerror = () => {
-    ElMessage.error('实时日志推送连接失败');
-    stopLogStream();
-  };
-  
-  logWebSocket.onclose = () => {
-    if (logStreaming.value) {
-      logStreaming.value = false;
-      ElMessage.info('实时日志推送已停止');
-    }
-  };
-};
-
-const stopLogStream = () => {
-  if (logWebSocket) {
-    logWebSocket.close();
-    logWebSocket = null;
-  }
-  logStreaming.value = false;
-};
-
-const scrollLogToBottom = () => {
-  const logContent = document.querySelector('.log-content');
-  if (logContent) {
-    logContent.scrollTop = logContent.scrollHeight;
-  }
 };
 
 const handlePageChange = (page) => {
@@ -2216,6 +2144,10 @@ const doImport = async () => {
 };
 
 let websocket = null;
+// 本次 WebSocket 是否成功 open 过，用于区分「连接失败」与「正常断开」
+let shellWsOpened = false;
+// 连接序号：旧连接（已被新连接替换）的事件不应影响当前会话状态
+let shellConnSeq = 0;
 
 const initTerminal = () => {
   // 先清理旧的终端和监听器
@@ -2262,6 +2194,9 @@ const initTerminal = () => {
   terminal.loadAddon(webLinksAddon);
   
   terminal.open(terminalRef.value);
+
+  // 挂载选中自动复制与右键粘贴
+  detachClipboard = attachTerminalClipboard(terminal, terminalRef.value);
   
   // 确保终端容器有正确的尺寸和焦点
   setTimeout(() => {
@@ -2280,6 +2215,11 @@ const initTerminal = () => {
       if (msg) {
         terminal.write(msg);
       }
+    }
+    // fit 完成后才建链：此时终端的 cols/rows 已是真实列数/行数，
+    // 首帧即可把正确尺寸带给后端创建 PTY，不会先落到默认 80x24
+    if (currentShellService.value && (!websocket || websocket.readyState === WebSocket.CLOSED)) {
+      connectShell();
     }
   }, 200);
   
@@ -2333,6 +2273,8 @@ const initTerminal = () => {
 
 // 清理终端相关资源
 const cleanupTerminal = () => {
+  detachClipboard?.();
+  detachClipboard = null;
   if (terminal) {
     terminal.dispose();
     terminal = null;
@@ -2363,6 +2305,10 @@ const cleanupTerminal = () => {
 
 const webShell = (service) => {
   console.log('Opening shell for service:', service);
+  // 每次打开都重建对话框组件：append-to-body 的 Teleport 内容在页面被 KeepAlive
+  // 缓存/关闭过渡中断后会脱离文档，复用旧实例会出现「弹窗一闪就消失」或打不开，
+  // 重新挂载可保证每次都是一份干净的 DOM
+  shellDialogKey.value += 1;
   currentShellService.value = service;
   shellConnected.value = false;
   shellMinimized.value = false;
@@ -2375,14 +2321,16 @@ const webShell = (service) => {
   
   // 设置默认远程目录为程序路径，如果没有则使用根目录
   currentRemotePath.value = service.program_path || '/';
+  // 重置文件列表与路径历史，避免残留上一个服务的浏览状态
+  remoteFiles.value = [];
+  pathHistory.value = [currentRemotePath.value];
+  pathHistoryIndex.value = 0;
   
   // 给予足够的时间让 DOM 完全渲染
   setTimeout(() => {
     nextTick(() => {
       if (terminalRef.value) {
-        console.log('Terminal ref found, initializing terminal');
         initTerminal();
-        connectShell();
       } else {
         console.error('Terminal ref not found!');
       }
@@ -2401,7 +2349,13 @@ const restoreShell = () => {
 // 监听最小化状态变化
 watch(shellMinimized, (newValue) => {
   nextTick(() => {
-    // 找到所有 dialog wrapper 和 overlay
+    // 对话框未使用 append-to-body 时，遮罩层就在本组件 DOM 内，直接定位
+    const innerOverlay = terminalRef.value?.closest('.el-overlay');
+    if (innerOverlay) {
+      innerOverlay.style.display = newValue ? 'none' : '';
+      return;
+    }
+    // 兼容遮罩层被 Teleport 到 body 的情况
     const allElements = document.body.children;
     for (let i = 0; i < allElements.length; i++) {
       const el = allElements[i];
@@ -2426,6 +2380,8 @@ const connectShell = () => {
     return;
   }
   
+  shellWsOpened = false;
+  const connSeq = ++shellConnSeq;
   const token = localStorage.getItem('token');
   console.log('Connecting to WebSocket, token:', !!token);
   if (!token) {
@@ -2437,14 +2393,20 @@ const connectShell = () => {
   terminal.write('[正在连接服务器...]\r\n');
   
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${wsProtocol}//${window.location.host}/api/shell/ws/${currentShellService.value.id}?token=${token}`;
+  // 建链时携带终端实际尺寸（xterm 只有 cols/rows，没有 size 属性），
+  // 后端据此创建 PTY，避免 PTY 初始固定 80x24
+  const initialSize = terminal ? { cols: terminal.cols, rows: terminal.rows } : null;
+  const sizeQuery = initialSize ? `&cols=${initialSize.cols}&rows=${initialSize.rows}` : '';
+  const wsUrl = `${wsProtocol}//${window.location.host}/api/shell/ws/${currentShellService.value.id}?token=${token}${sizeQuery}`;
   console.log('WebSocket URL:', wsUrl);
   websocket = new WebSocket(wsUrl);
   
   websocket.binaryType = 'arraybuffer';
   
   websocket.onopen = () => {
+    if (connSeq !== shellConnSeq) return;
     console.log('WebSocket connected');
+    shellWsOpened = true;
     shellConnected.value = true;
     // 连接成功后强制聚焦终端的 textarea 输入元素
     setTimeout(() => {
@@ -2459,7 +2421,7 @@ const connectShell = () => {
       if (terminal) {
         terminal.focus();
         // 立即用二进制消息同步一次终端尺寸到后端
-        const size = terminal.size;
+        const size = terminal ? { cols: terminal.cols, rows: terminal.rows } : null;
         if (websocket && size) {
           try {
             const buf = new ArrayBuffer(5);
@@ -2477,6 +2439,7 @@ const connectShell = () => {
   };
   
   websocket.onmessage = (event) => {
+    if (connSeq !== shellConnSeq) return;
     console.log('WebSocket received:', event.data);
     let msg;
     if (event.data instanceof ArrayBuffer) {
@@ -2495,16 +2458,25 @@ const connectShell = () => {
   };
   
   websocket.onerror = (error) => {
+    if (connSeq !== shellConnSeq) return;
     console.error('WebSocket error:', error);
-    terminal.write('[错误] 连接失败\r\n');
+    // 终端可能已随弹窗关闭被销毁，这里必须判空
+    terminal?.write('[错误] 连接失败\r\n');
     shellConnected.value = false;
   };
   
   websocket.onclose = (event) => {
+    if (connSeq !== shellConnSeq) return;
     console.log('WebSocket closed:', event.code, event.reason);
-    terminal.write(`[断开] 连接已关闭 (Code: ${event.code})\r\n`);
+    // 关闭弹窗时会先 cleanupTerminal 再触发 onclose，terminal 可能已为 null
+    terminal?.write(`[断开] 连接已关闭 (Code: ${event.code})\r\n`);
     shellConnected.value = false;
     websocket = null;
+    // 从未连接成功即关闭，说明建链失败；此时弹窗必须保持打开并给出明确提示
+    if (!shellWsOpened && showShellDialog.value) {
+      ElMessage.error('SSH 连接失败，请检查目标服务器状态或凭据');
+      terminal?.write('[错误] SSH 连接失败\r\n');
+    }
   };
 };
 
@@ -2532,20 +2504,38 @@ const listRemoteFiles = async () => {
     });
     if (response.data.code === 0) {
       remoteFiles.value = response.data.data.files;
+      // 后端会返回解析后的绝对路径（~ 已展开为真实主目录），同步输入框
+      if (response.data.data.path) {
+        currentRemotePath.value = response.data.data.path;
+      }
     } else {
       ElMessage.error(response.data.message || '获取文件列表失败');
     }
   } catch (error) {
-    ElMessage.error('获取文件列表失败');
+    ElMessage.error(error.response?.data?.message || '获取文件列表失败');
   }
 };
+
+// 切换到「文件管理」Tab 时自动加载，列表已有数据则不重复请求
+watch(shellActiveTab, (tab) => {
+  if (tab === 'files' && remoteFiles.value.length === 0) {
+    listRemoteFiles();
+  }
+});
 
 const navigateToDir = (dirName) => {
   let newPath = currentRemotePath.value;
   if (dirName === '..') {
     const parts = currentRemotePath.value.split('/').filter(p => p);
     parts.pop();
-    newPath = '/' + parts.join('/');
+    if (parts.length === 0) {
+      newPath = '/';
+    } else if (parts[0] === '~') {
+      // 兼容 ~ 开头的路径，避免拼出 /~/... 这种非法路径
+      newPath = parts.length === 1 ? '~' : '~/' + parts.slice(1).join('/');
+    } else {
+      newPath = '/' + parts.join('/');
+    }
   } else {
     if (currentRemotePath.value === '/') {
       newPath = '/' + dirName;
@@ -2630,7 +2620,7 @@ const deleteRemoteFile = async (fileName) => {
       ElMessage.success('删除成功');
       listRemoteFiles();
     } catch (error) {
-      ElMessage.error('删除失败');
+      ElMessage.error(error.response?.data?.message || '删除失败');
     }
   }).catch(() => {
     ElMessage.info('已取消删除');
@@ -3284,6 +3274,9 @@ onActivated(() => {
   statusInterval = setInterval(updateStatuses, 5000);
   window.addEventListener('keydown', handleKeyDown);
   window.addEventListener('keyup', handleKeyUp);
+  // 失活期间被中断的关闭过渡不会自行完成，回到本页时重建已关闭的对话框，
+  // 避免残留的弹窗还停留在页面中
+  shellDialogKey.value += 1;
   // 从运行总览下钻进入、或点侧栏"服务管理"回到无 query 时，URL 条件发生变化 → 重新套用筛选（清掉上一次残留）
   const sig = querySignature(route.query);
   if (sig !== lastAppliedQuery.value) {
@@ -3350,7 +3343,7 @@ const loadAgents = async () => {
 .port-help-icon {
   margin-left: 4px;
   font-size: 14px;
-  color: #909399;
+  color: var(--app-text-3);
   cursor: help;
   vertical-align: middle;
 }
@@ -3397,14 +3390,17 @@ const loadAgents = async () => {
   align-items: center;
 }
 
-.project-select, .subsystem-select, .group-select,
-.deploy-select, .status-select, .agent-select {
+.project-select, .subsystem-select, .group-select {
   width: 160px;
+  flex-shrink: 0;
+}
+.deploy-select, .status-select, .agent-select {
+  width: 120px;
   flex-shrink: 0;
 }
 
 .search-input {
-  width: 250px;
+  width: 200px;
 }
 
 .ip-input {
@@ -3418,13 +3414,13 @@ const loadAgents = async () => {
   gap: 12px;
   margin-bottom: 16px;
   padding: 10px 16px;
-  background: #f8fafc;
+  background: var(--app-panel-soft);
   border-radius: 8px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--app-border);
 }
 .stats-label {
   font-size: 13px;
-  color: #64748b;
+  color: var(--app-text-2);
   font-weight: 500;
 }
 .stats-chip {
@@ -3436,15 +3432,15 @@ const loadAgents = async () => {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  background: #fff;
-  color: #64748b;
-  border: 1px solid #e2e8f0;
+  background: var(--app-panel);
+  color: var(--app-text-2);
+  border: 1px solid var(--app-border);
   transition: all 0.15s ease;
   user-select: none;
 }
 .stats-chip:hover {
-  border-color: #cbd5e1;
-  color: #334155;
+  border-color: var(--app-border-strong);
+  color: var(--app-text);
 }
 .stats-chip.active {
   border-color: transparent;
@@ -3454,10 +3450,12 @@ const loadAgents = async () => {
 .stats-chip.stats-running.active { background: #059669; color: #fff; }
 .stats-chip.stats-stopped { color: #dc2626; border-color: #fecaca; }
 .stats-chip.stats-stopped.active { background: #dc2626; color: #fff; }
-.stats-chip.stats-inactive { color: #64748b; border-color: #cbd5e1; }
+.stats-chip.stats-inactive { color: var(--app-text-2); border-color: var(--app-border-strong); }
 .stats-chip.stats-inactive.active { background: #64748b; color: #fff; }
-.stats-chip.stats-agent-offline { color: #6b7280; border-color: #e5e7eb; }
+.stats-chip.stats-agent-offline { color: #6b7280; border-color: var(--app-border); }
 .stats-chip.stats-agent-offline.active { background: #6b7280; color: #fff; }
+.stats-chip.stats-failed { color: #dc2626; border-color: #fecaca; }
+.stats-chip.stats-failed.active { background: #dc2626; color: #fff; }
 .stats-chip.stats-unknown { color: #d97706; border-color: #fde68a; }
 .stats-chip.stats-unknown.active { background: #d97706; color: #fff; }
 .stats-chip.active { background: #3b82f6; color: #fff; border-color: transparent; }
@@ -3472,7 +3470,7 @@ const loadAgents = async () => {
 }
 
 .import-tip {
-  color: #999;
+  color: var(--app-text-3);
   margin-top: 10px;
 }
 
@@ -3486,7 +3484,7 @@ const loadAgents = async () => {
 /* Docker Compose 容器状态表格 */
 .containers-section {
   margin-top: 20px;
-  border-top: 1px solid #ebeef5;
+  border-top: 1px solid var(--app-border);
   padding-top: 15px;
 }
 
@@ -3500,12 +3498,12 @@ const loadAgents = async () => {
 .containers-title {
   font-size: 14px;
   font-weight: 600;
-  color: #303133;
+  color: var(--app-text);
 }
 
 .containers-summary {
   font-size: 13px;
-  color: #606266;
+  color: var(--app-text-2);
 }
 
 .text-success {
@@ -3554,7 +3552,7 @@ const loadAgents = async () => {
 .run-mode-hint {
   margin-left: 8px;
   font-size: 12px;
-  color: #909399;
+  color: var(--app-text-3);
 }
 
 .agent-source {
@@ -3568,7 +3566,7 @@ const loadAgents = async () => {
 }
 
 .offline-source {
-  background-color: #f5f5f5;
+  background-color: var(--app-panel-soft);
   color: #9e9e9e;
 }
 
@@ -3653,6 +3651,10 @@ const loadAgents = async () => {
   gap: 10px;
   margin-bottom: 15px;
   flex-wrap: wrap;
+}
+
+.shell-header-settings {
+  margin-left: auto;
 }
 
 .shell-container {
@@ -3741,7 +3743,7 @@ const loadAgents = async () => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: var(--app-panel);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -3771,7 +3773,7 @@ const loadAgents = async () => {
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  background: #f5f5f5;
+  background: var(--app-panel-soft);
   border-bottom: 1px solid #e5e5e5;
 }
 
@@ -3807,12 +3809,12 @@ const loadAgents = async () => {
 }
 
 .file-table .el-table__row:hover {
-  background-color: #f9fafb;
+  background-color: var(--app-panel-soft);
 }
 
 .panel-divider {
   width: 6px;
-  background-color: #e5e5e5;
+  background-color: var(--app-panel-soft);
   cursor: col-resize;
   display: flex;
   align-items: center;
@@ -3832,22 +3834,22 @@ const loadAgents = async () => {
   align-items: center;
   justify-content: center;
   height: 200px;
-  color: #999;
+  color: var(--app-text-3);
 }
 
 .drop-zone {
   padding: 15px;
   border-top: 1px dashed #ccc;
   text-align: center;
-  color: #999;
+  color: var(--app-text-3);
   font-size: 13px;
   cursor: pointer;
   transition: all 0.3s;
 }
 
 .drop-zone:hover {
-  background-color: #f9fafb;
-  color: #666;
+  background-color: var(--app-panel-soft);
+  color: var(--app-text-2);
 }
 
 .dir-clickable {
@@ -3876,9 +3878,9 @@ const loadAgents = async () => {
   position: fixed;
   z-index: 9999;
   min-width: 120px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--app-border);
   border-radius: 4px;
-  background: #fff;
+  background: var(--app-panel);
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
   padding: 5px 0;
 }
@@ -3886,12 +3888,12 @@ const loadAgents = async () => {
 .context-menu .el-menu-item {
   padding: 8px 20px;
   font-size: 14px;
-  color: #606266;
+  color: var(--app-text-2);
   cursor: pointer;
 }
 
 .context-menu .el-menu-item:hover {
-  background-color: #f5f7fa;
+  background-color: var(--app-panel-soft);
   color: #409eff;
 }
 
@@ -3948,7 +3950,7 @@ const loadAgents = async () => {
 .shell-control-icon {
   cursor: pointer;
   font-size: 18px;
-  color: #606266;
+  color: var(--app-text-2);
   transition: all 0.2s ease;
   padding: 4px;
   border-radius: 4px;
@@ -3956,13 +3958,13 @@ const loadAgents = async () => {
 
 .shell-control-icon:hover {
   color: #409eff;
-  background: #ecf5ff;
+  background: var(--app-active-bg);
 }
 
 /* 对话框样式 */
 :deep(.shell-dialog .el-dialog__header) {
   padding: 15px 20px;
-  border-bottom: 1px solid #e4e7ed;
+  border-bottom: 1px solid var(--app-border);
   margin-right: 0;
 }
 

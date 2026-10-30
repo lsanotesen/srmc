@@ -5,18 +5,21 @@
     </div>
     
     <el-card title="审计日志保留">
-      <el-form :model="settings" label-width="200px">
+      <el-form :model="settings" label-width="140px">
         <el-form-item label="审计日志保留天数">
-          <el-input v-model.number="settings.auditRetentionDays" />
-          <span class="form-tip">天</span>
+          <el-input v-model.number="settings.auditRetentionDays" class="setting-input">
+            <template #suffix>天</template>
+          </el-input>
         </el-form-item>
         <el-form-item label="SSH连接超时">
-          <el-input v-model.number="settings.sshTimeout" />
-          <span class="form-tip">秒</span>
+          <el-input v-model.number="settings.sshTimeout" class="setting-input">
+            <template #suffix>秒</template>
+          </el-input>
         </el-form-item>
         <el-form-item label="批量操作并发数">
-          <el-input v-model.number="settings.batchWorkers" />
-          <span class="form-tip">个</span>
+          <el-input v-model.number="settings.batchWorkers" class="setting-input">
+            <template #suffix>个</template>
+          </el-input>
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="saveSettings">保存设置</el-button>
@@ -50,8 +53,8 @@ async function saveSettings() {
   margin-bottom: 20px;
 }
 
-.form-tip {
-  margin-left: 8px;
-  color: #9ca3af;
+/* 与全站筛选/表单控件统一宽度 */
+.setting-input {
+  width: 200px;
 }
 </style>

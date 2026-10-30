@@ -9,14 +9,16 @@ import httpx
 import asyncio
 
 from core.database import get_db
+from core import monitoring_config
 from models.app_service import AppService
 from utils.crypto import decrypt
 from api.dependencies import get_current_user
 
 router = APIRouter()
 
-# Prometheus配置
-PROMETHEUS_URL = "http://srmc-prometheus:9090"
+# Prometheus / Alertmanager 数据源统一由 monitoring.conf 提供（见 core/monitoring_config.py）
+PROMETHEUS_URL = monitoring_config.get_prometheus_url()
+ALERTMANAGER_URL = monitoring_config.get_alertmanager_url()
 
 # Prometheus指标
 service_count = Gauge('srmc_service_count', 'Total number of services', ['project', 'deploy_type', 'status'])
@@ -127,75 +129,76 @@ async def get_service_metrics(
         service = db.query(AppService).filter(AppService.id == service_id).first()
         if not service:
             raise HTTPException(status_code=404, detail="服务不存在")
-        
-        metrics = await fetch_service_metrics(service)
+
+        metrics = (await fetch_service_metrics([service]))[0]
         return {"code": 0, "data": metrics}
-    
+
     # 获取所有服务指标
     services = db.query(AppService).all()
+    return {"code": 0, "data": await fetch_service_metrics(services)}
+
+
+async def fetch_service_metrics(services: List[AppService]) -> List[Dict[str, Any]]:
+    """批量获取服务指标。
+
+    按指标名整体查询一次，再按 (app_name, ip, port) 与传入服务匹配；
+    避免每个服务发 4 个小请求，服务多时接口耗时线性增长。
+    """
+    async def _index_by_key(metric: str) -> Dict[tuple, str]:
+        result = await query_prometheus(metric)
+        index = {}
+        for item in result.get('data', {}).get('result') or []:
+            m = item.get('metric', {})
+            index.setdefault((m.get('app_name'), m.get('ip'), m.get('port')), item.get('value', [0, '0'])[1])
+        return index
+
+    status_idx, memory_idx, cpu_idx, uptime_idx = await asyncio.gather(
+        _index_by_key('srmc_app_status'),
+        _index_by_key('srmc_app_memory_mb'),
+        _index_by_key('srmc_app_cpu_percent'),
+        _index_by_key('srmc_app_uptime_seconds'),
+    )
+
     results = []
     for service in services:
-        metrics = await fetch_service_metrics(service)
-        results.append(metrics)
-    
-    return {"code": 0, "data": results}
+        key = (service.func_desc, str(service.ip), str(service.port))
+        status = "UNKNOWN"
+        memory_mb = 0
+        cpu_percent = 0
+        uptime_seconds = 0
 
-async def fetch_service_metrics(service: AppService) -> Dict[str, Any]:
-    """获取单个服务的指标"""
-    # 查询应用状态
-    status_query = f'srmc_app_status{{app_name="{service.func_desc}",ip="{service.ip}",port="{service.port}"}}'
-    status_result = await query_prometheus(status_query)
-    
-    # 查询内存使用
-    memory_query = f'srmc_app_memory_mb{{app_name="{service.func_desc}",ip="{service.ip}",port="{service.port}"}}'
-    memory_result = await query_prometheus(memory_query)
-    
-    # 查询CPU使用
-    cpu_query = f'srmc_app_cpu_percent{{app_name="{service.func_desc}",ip="{service.ip}",port="{service.port}"}}'
-    cpu_result = await query_prometheus(cpu_query)
-    
-    # 查询运行时间
-    uptime_query = f'srmc_app_uptime_seconds{{app_name="{service.func_desc}",ip="{service.ip}",port="{service.port}"}}'
-    uptime_result = await query_prometheus(uptime_query)
-    
-    # 解析结果
-    status = "UNKNOWN"
-    memory_mb = 0
-    cpu_percent = 0
-    uptime_seconds = 0
-    
-    if status_result.get('data', {}).get('result'):
-        status_value = status_result['data']['result'][0].get('value', [0, '0'])[1]
-        status = "RUNNING" if float(status_value) == 1 else "STOPPED"
-    
-    if memory_result.get('data', {}).get('result'):
-        memory_mb = float(memory_result['data']['result'][0].get('value', [0, '0'])[1])
-    
-    if cpu_result.get('data', {}).get('result'):
-        cpu_percent = float(cpu_result['data']['result'][0].get('value', [0, '0'])[1])
-    
-    if uptime_result.get('data', {}).get('result'):
-        uptime_seconds = float(uptime_result['data']['result'][0].get('value', [0, '0'])[1])
-    
-    return {
-        "service_id": service.id,
-        "name": service.func_desc,
-        "ip": service.ip,
-        "port": service.port,
-        "status": status,
-        "memory_mb": memory_mb,
-        "cpu_percent": cpu_percent,
-        "uptime_seconds": uptime_seconds,
-        "deploy_type": service.deploy_type
-    }
+        if key in status_idx:
+            status = "RUNNING" if float(status_idx[key]) == 1 else "STOPPED"
+        if key in memory_idx:
+            memory_mb = float(memory_idx[key])
+        if key in cpu_idx:
+            cpu_percent = float(cpu_idx[key])
+        if key in uptime_idx:
+            uptime_seconds = float(uptime_idx[key])
+
+        results.append({
+            "service_id": service.id,
+            "name": service.func_desc,
+            "ip": service.ip,
+            "port": service.port,
+            "status": status,
+            "memory_mb": memory_mb,
+            "cpu_percent": cpu_percent,
+            "uptime_seconds": uptime_seconds,
+            "deploy_type": service.deploy_type
+        })
+    return results
 
 @router.get("/api/alerts")
 async def get_alerts(user = Depends(get_current_user)):
     """获取告警列表"""
+    # 未配置 Alertmanager（如外置模式）时返回空结果
+    if not ALERTMANAGER_URL:
+        return {"code": 0, "data": []}
     try:
         # 查询Alertmanager的告警
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get("http://srmc-alertmanager:9093/api/v1/alerts")
+            response = await client.get(f"{ALERTMANAGER_URL}/api/v1/alerts")
             response.raise_for_status()
             data = response.json()
             
